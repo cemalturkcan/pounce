@@ -53,6 +53,8 @@ type ClaudeCredentials = {
   [key: string]: unknown;
 };
 
+class RejectedSessionError extends AskSetupError {}
+
 class RetryableAnthropicError extends ToolError {
   readonly failure: ToolError;
   readonly retryAfterMs?: number;
@@ -137,9 +139,22 @@ async function requestTokenRefresh(refreshToken: string, scope: string | undefin
   return { response, payload };
 }
 
-async function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal) {
+function isExpiring(credentials: { expiresAt?: number }) {
+  return credentials.expiresAt !== undefined && credentials.expiresAt <= Date.now() + REFRESH_WINDOW_MS;
+}
+
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal) {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+async function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, rejectedToken?: string) {
   const credentials = await readCredentials(credentialsPath, signal);
-  if (credentials.expiresAt === undefined || credentials.expiresAt > Date.now() + REFRESH_WINDOW_MS) return;
+  if (rejectedToken === undefined ? !isExpiring(credentials) : credentials.accessToken !== rejectedToken) return;
   if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
 
   let answer = await requestTokenRefresh(credentials.refreshToken, OAUTH_SCOPES, signal);
@@ -147,6 +162,8 @@ async function refreshCredentialsFile(credentialsPath: string, signal: AbortSign
     answer = await requestTokenRefresh(credentials.refreshToken, undefined, signal);
   }
   if (!answer.response.ok) {
+    const latest = await readCredentials(credentialsPath, signal);
+    if (latest.accessToken !== credentials.accessToken && !isExpiring(latest)) return;
     const error = typeof answer.payload?.error === "string" ? answer.payload.error : undefined;
     const description = typeof answer.payload?.error_description === "string" ? answer.payload.error_description : undefined;
     throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${errorDetail({ type: error, message: description }, credentials.refreshToken)}`, SIGN_IN);
@@ -388,7 +405,7 @@ async function postMessage(body: string, token: string, sessionId: string, retry
   signal.throwIfAborted();
   const detail = errorDetail(payload?.error, token);
   const failure = response.status === 401
-    ? new AskSetupError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
+    ? new RejectedSessionError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
     : new ToolError(`Anthropic Messages returned HTTP ${response.status}${detail}`);
   const retry = response.headers.get("x-should-retry");
   const retryableStatus = [408, 409, 429].includes(response.status) || (response.status >= 500 && response.status < 600);
@@ -429,18 +446,18 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
   let profiledToken: string | undefined;
   let profiledAccountUuid: string | undefined;
   let refreshPromise: Promise<void> | undefined;
+  const refreshSession = async (signal: AbortSignal, rejectedToken?: string) => {
+    refreshPromise ??= refreshCredentialsFile(credentialsPath, AbortSignal.timeout(30_000), rejectedToken).finally(() => {
+      refreshPromise = undefined;
+    });
+    await untilAborted(refreshPromise, signal);
+    return readCredentials(credentialsPath, signal);
+  };
   return {
     name: "Anthropic Claude account",
     async complete({ system, prompt, model, maxTokens, images, signal }) {
       let credentials = await readCredentials(credentialsPath, signal);
-      if (credentials.expiresAt !== undefined && credentials.expiresAt <= Date.now() + REFRESH_WINDOW_MS) {
-        refreshPromise ??= refreshCredentialsFile(credentialsPath, AbortSignal.timeout(30_000)).finally(() => {
-          refreshPromise = undefined;
-        });
-        await refreshPromise;
-        signal.throwIfAborted();
-        credentials = await readCredentials(credentialsPath, signal);
-      }
+      if (isExpiring(credentials)) credentials = await refreshSession(signal);
       const token = credentials.accessToken;
       let accountUuid = credentials.accountUuid;
       if (!accountUuid && profiledToken === token) accountUuid = profiledAccountUuid;
@@ -463,7 +480,14 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
           user_id: JSON.stringify({ device_id: localDeviceId, account_uuid: accountUuid, session_id: sessionId }),
         },
       });
-      return completeMessage(body, token, sessionId, signal);
+      try {
+        return await completeMessage(body, token, sessionId, signal);
+      } catch (error) {
+        if (!(error instanceof RejectedSessionError) || !credentials.refreshToken) throw error;
+        const refreshed = await refreshSession(signal, token);
+        if (refreshed.accessToken === token) throw error;
+        return completeMessage(body, refreshed.accessToken, sessionId, signal);
+      }
     },
   };
 }

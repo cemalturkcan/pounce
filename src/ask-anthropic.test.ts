@@ -189,6 +189,64 @@ test("Anthropic adapter does not overwrite credentials refreshed concurrently by
   assert.equal(saved.claudeAiOauth.refreshToken, "external-refresh");
 });
 
+test("Anthropic adapter uses credentials Claude Code refreshed while its own refresh was rejected", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh");
+      return Response.json({ error: "invalid_grant", error_description: "Refresh token already used" }, { status: 400 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter refreshes a rejected session once and retries the request", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    if (new Headers(request?.headers).get("authorization") === "Bearer revoked-access") {
+      return Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "new-access");
+});
+
+test("Anthropic adapter reports a session still rejected after one refresh", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      return Response.json({ access_token: `new-access-${refreshCalls}`, refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    return Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+  });
+  await assert.rejects(adapter.complete(input), AskSetupError);
+  assert.equal(refreshCalls, 1);
+});
+
+test("Anthropic adapter stops waiting for a shared refresh when its call is aborted", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", (url: string, request?: RequestInit) => new Promise((_, reject) => {
+    request?.signal?.addEventListener("abort", () => reject(request.signal?.reason), { once: true });
+  }));
+  const controller = new AbortController();
+  const pending = adapter.complete({ ...input, signal: controller.signal });
+  setTimeout(() => controller.abort(new Error("caller cancelled")), 20);
+  const startedAt = Date.now();
+  await assert.rejects(pending, /caller cancelled/);
+  assert.ok(Date.now() - startedAt < 1_000);
+});
+
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
