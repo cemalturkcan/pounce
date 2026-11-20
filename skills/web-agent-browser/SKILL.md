@@ -73,7 +73,7 @@ These show the shape of a good route, not templates.
 - A click that reports another element intercepting pointer events has a banner, modal or sticky header over the target; `dismiss_overlays` handles banners and modals, iframes included.
 - `evaluate` runs in the page's own JavaScript world. In `run_script`, functions passed to `page.evaluate` or `locator.evaluate` run in an isolated world that shares the DOM but not the page's globals.
 - Console capture is off on ordinary sites with the default stealth engine; `console_logs` works on localhost, 127.0.0.1, `*.localhost` and `*.test`.
-- Secrets typed with `secret` are masked in results and written files, one-time codes for 2 minutes; usernames are not masked, and raw exports (`cookies` export, `network_export`, `storage` export) keep values as they are. Do not read a secret back out of the page.
+- Secrets typed with `secret` are masked in tool results, in the text files the server writes (collect_pages files, overflow files, reports, script and job output), in page text sent to the `ask_pages` model and in the server log; one-time codes for 2 minutes. Usernames, raw exports (`cookies` export, `network_export`, `storage` export), downloads, binary files and screenshots keep values as they are. Do not read a secret back out of the page.
 - `ask_pages` answers come from a fast model reading quickly; check the facts a decision rests on against the page. When each page needs work it cannot do, such as following a link, use `run_script` or Claude Code subagents over the collected files instead.
 - When the user closes the window or Chrome dies, the next `tab_open` starts it again with the same profile; earlier tab ids are gone.
 

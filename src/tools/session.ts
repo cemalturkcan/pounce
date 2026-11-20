@@ -18,7 +18,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     name: "secrets_list",
     title: "List stored secrets",
     description:
-      "List the names of entries in the user's password store, without their values. Use it before signing in to a site: a matching name goes to fill or fill_form as secret (with secret_field username, password or otp), and the server types the value, which you never see. Passwords and other secret fields are then masked in tool results and written files (one-time codes for 2 minutes, usernames not at all, raw exports excepted). For a site that answers with the browser's own login dialog, pass the name to http_auth instead.",
+      "List the names of entries in the user's password store, without their values. Use it before signing in to a site: a matching name goes to fill or fill_form as secret (with secret_field username, password or otp), and the server types the value, which you never see. Passwords and other secret fields are then masked in tool results, in the text files the server writes, in page text sent to the ask_pages model and in the server log (one-time codes for 2 minutes); usernames, raw exports (cookies export, network_export, storage export), downloads, binary files and screenshots are not masked. For a site that answers with the browser's own login dialog, pass the name to http_auth instead.",
     input: {
       query: z.string().optional().describe("Keep only names containing this, case-insensitive, for example a site name."),
     },

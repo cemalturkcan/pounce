@@ -795,6 +795,23 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab });
   });
 
+  await t.test("collected files and ask_pages prompts mask stored secrets", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("fill", { tab, target: "#password", secret: "fixture/site" });
+    await ok("tab_close", { tab });
+    const page = `data:text/html,<title>Account</title><main><h1>Account</h1><p>Your key is ${TEST_SECRET}</p><table><tr><td>password</td><td>${TEST_SECRET}</td></tr></table><a href="/x?k=${TEST_SECRET}">link</a></main>`;
+    const collected = await ok("collect_pages", { urls: [page], include: ["text", "markdown", "snapshot", "structured", "links"] });
+    const dir = /into (\S+)/.exec(collected)?.[1] ?? "";
+    for (const name of await readdir(dir)) {
+      const content = await readFile(path.join(dir, name), "utf8");
+      assert.ok(!content.includes(TEST_SECRET), `secret leaked into ${name}`);
+    }
+    askPrompts.length = 0;
+    await ok("ask_pages", { question: "What is the key?", dir });
+    assert.ok(askPrompts.length > 0);
+    assert.ok(askPrompts.every((prompt) => !prompt.includes(TEST_SECRET)), "secret sent to the model");
+  });
+
   await t.test("evaluate runs code once and reports runtime errors", async () => {
     const tab = openedTab(await ok("tab_open", { url: fixture.url }));
     const before = fixture.hits();

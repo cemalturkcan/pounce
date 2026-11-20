@@ -68,6 +68,10 @@ export class OutputStore {
     this.redactor = redactor;
   }
 
+  redact(text: string) {
+    return this.redactor ? this.redactor.redact(text) : text;
+  }
+
   async write(kind: string, name: string, content: string | Buffer, options: WriteOptions = {}) {
     const dir = path.join(this.root, kind);
     await mkdir(dir, { recursive: true });

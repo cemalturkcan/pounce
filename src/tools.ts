@@ -141,7 +141,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const model = modelId(input.model ?? "haiku");
       const report = await askPages(adapter, {
         question: input.question,
-        documents,
+        documents: documents.map((document) => ({ ...document, source: deps.redactor.redact(document.source), text: deps.redactor.redact(document.text) })),
         batchChars: input.batch_chars ?? DEFAULT_BATCH_CHARS,
         maxPagesPerBatch: input.max_pages_per_batch,
         maxCharsPerPage: input.max_chars_per_page,

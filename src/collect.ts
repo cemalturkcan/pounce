@@ -31,7 +31,12 @@ export type CollectInput = {
   label?: string;
   signal?: AbortSignal;
   capture?: (tab: Tab, base: string, dir: string) => Promise<string[]>;
+  redact?: (text: string) => string;
 };
+
+function writeText(file: string, text: string, input: CollectInput) {
+  return writeFile(file, input.redact ? input.redact(text) : text);
+}
 
 export type CollectedPage = {
   index: number;
@@ -137,7 +142,7 @@ async function saveOne(
     result.chars = text.length;
     result.preview = text.slice(0, input.previewChars).replace(/\s+/g, " ");
     const header = `URL: ${result.finalUrl}\nTitle: ${result.title ?? ""}\nStatus: ${result.status ?? ""}\n\n`;
-    await writeFile(path.join(dir, `${base}.txt`), header + text);
+    await writeText(path.join(dir, `${base}.txt`), header + text, input);
     result.files.push(`${base}.txt`);
   }
   if (input.include.includes("markdown")) {
@@ -147,24 +152,24 @@ async function saveOne(
       result.preview = markdown.slice(0, input.previewChars).replace(/\s+/g, " ");
     }
     const header = `<!-- URL: ${result.finalUrl} · Status: ${result.status ?? ""} -->\n# ${result.title ?? ""}\n\n`;
-    await writeFile(path.join(dir, `${base}.md`), header + markdown);
+    await writeText(path.join(dir, `${base}.md`), header + markdown, input);
     result.files.push(`${base}.md`);
   }
   if (input.capture) result.files.push(...(await input.capture(tab, base, dir)));
   if (input.include.includes("links")) {
     const links = await pageLinks(page, LINK_LIMIT);
     result.links = links.length;
-    await writeFile(path.join(dir, `${base}.links.tsv`), links.map((link) => `${link.url}\t${link.text}`).join("\n"));
+    await writeText(path.join(dir, `${base}.links.tsv`), links.map((link) => `${link.url}\t${link.text}`).join("\n"), input);
     result.files.push(`${base}.links.tsv`);
   }
   if (input.include.includes("structured")) {
     const data = await extractPage(page);
     result.data = summarizeStructured(data);
-    await writeFile(path.join(dir, `${base}.data.json`), JSON.stringify(data, null, 2));
+    await writeText(path.join(dir, `${base}.data.json`), JSON.stringify(data, null, 2), input);
     result.files.push(`${base}.data.json`);
   }
   if (input.include.includes("snapshot")) {
-    await writeFile(path.join(dir, `${base}.snapshot.yml`), await rawSnapshot(manager, tab, {}));
+    await writeText(path.join(dir, `${base}.snapshot.yml`), await rawSnapshot(manager, tab, {}), input);
     result.files.push(`${base}.snapshot.yml`);
   }
   if (input.include.includes("screenshot")) {
@@ -212,7 +217,8 @@ async function saveBody(dir: string, base: string, type: BodyType, body: Buffer,
   result.type = type.mime;
   result.bytes = body.length;
   const raw = `${base}.${type.extension}`;
-  await writeFile(path.join(dir, raw), body);
+  if (isTextKind(type.kind)) await writeText(path.join(dir, raw), body.toString("utf8"), input);
+  else await writeFile(path.join(dir, raw), body);
   result.files.push(raw);
   if (isTextKind(type.kind)) keepText(result, body.toString("utf8"), input.previewChars);
   if (type.kind !== "pdf") return;
@@ -221,7 +227,7 @@ async function saveBody(dir: string, base: string, type: BodyType, body: Buffer,
     result.note = extracted.unavailable;
     return;
   }
-  await writeFile(path.join(dir, `${base}.txt`), extracted.text);
+  await writeText(path.join(dir, `${base}.txt`), extracted.text, input);
   result.files.push(`${base}.txt`);
   keepText(result, extracted.text, input.previewChars);
 }
@@ -235,10 +241,11 @@ export async function collectPages(manager: BrowserManager, store: OutputStore, 
     opening = next.catch(() => undefined);
     return next;
   };
-  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, openTab, dir, input, url, index), input.signal);
+  const job: CollectInput = { ...input, redact: input.redact ?? ((text) => store.redact(text)) };
+  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, openTab, dir, job, url, index), input.signal);
   const results = collected.map((result, index): CollectedPage => result ?? { index: index + 1, url: urls[index] ?? "", files: [], error: "not started: the call was cancelled" });
 
-  await writeFile(path.join(dir, "index.json"), JSON.stringify(results, null, 2));
+  await writeText(path.join(dir, "index.json"), JSON.stringify(results, null, 2), job);
   return { dir, results };
 }
 
