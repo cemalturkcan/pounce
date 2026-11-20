@@ -85,6 +85,10 @@ Signing up, filling in their details, adding to a cart, checking out and paying 
 - `storage` reads the tab origin's localStorage, sessionStorage and IndexedDB. Tokens and app state often live there; `export` writes a whole area to JSON. It only reads; change storage with `evaluate`.
 - `emulate` changes one tab's viewport and mobile mode, color scheme, reduced motion, time zone, locale, user agent, geolocation, offline mode and throttling. Settings stay until `reset: true` or the tab closes. Geolocation also grants the permission to the origin for the whole profile. Reload after changing locale, time zone or user agent so the site starts with them.
 
+# Checking a page against its design
+
+`compare_design` compares a tab with a design export (a Figma frame as PNG or JPEG) or with an earlier screenshot kept as a baseline, and returns only a list of differing regions: a box in reference pixels per region, and with a model, the element, property, design value against page value and severity, plus design elements missing on the page. The images never reach the conversation; the diff image, the screenshot, per-region crops and `report.json` are written to files whose paths are in the result. It sets the viewport from the reference size, so pass `device_scale_factor: 2` for an @2x export, and it restores the viewport afterwards. `model: "none"` gives the pixel layer alone, which suits regression checks against a baseline; small spacing or shade differences need `model: "sonnet"` or `"opus"`. Open a crop file with Read when one region needs a closer look.
+
 # `run_script` patterns
 
 These are illustrations of shape, not templates to copy.
@@ -121,6 +125,21 @@ const prices = await Promise.all(urls.map(async (url) => {
   return { url, price };
 }));
 return prices;
+```
+
+Check many routes against a folder of baselines (`compareDesign` returns the same report as `compare_design`, with `summary` holding its text):
+
+```js
+const routes = ["/", "/pricing", "/login"];
+const results = [];
+for (const route of routes) {
+  await page.goto(`http://localhost:3000${route}`, { waitUntil: "networkidle" });
+  const name = route === "/" ? "home" : route.slice(1);
+  const report = await compareDesign(page, `/home/me/baselines/${name}.png`, { model: "none" });
+  results.push({ route, regions: report.regions.length, diff: report.files.diff });
+  log(route, report.regions.length);
+}
+return results;
 ```
 
 A run that takes minutes goes in the background with `background: true` and a `label`; the call returns a job id at once. `jobs` with `status` shows its state and latest log lines, and the result file appears when it ends. Use `log()` generously in such scripts, because the log is all you see while it runs, and check `signal.aborted` in long loops so `jobs` `cancel` stops it cleanly.
