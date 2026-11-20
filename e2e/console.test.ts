@@ -57,8 +57,19 @@ test("console_logs on a site outside the console hook", async (t) => {
   await t.test("the description names both sources and where each is captured", async () => {
     const { tools } = await client.listTools();
     const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
-    assert.match(description, /the page's own console calls and uncaught errors are captured only on local development hosts/);
     assert.match(description, /Messages Chrome itself logs about the page, such as a Permissions-Policy header error, are captured on every site/);
+  });
+
+  await t.test("the description states where the patchright engine captures page console calls", async () => {
+    const { tools } = await client.listTools();
+    const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
+    assert.match(description, /With the default patchright engine, the page's own console calls and uncaught errors are captured only on local development hosts \(localhost, 127\.0\.0\.1, \*\.localhost, \*\.test\) unless the server runs with WEB_AGENT_CONSOLE_HOOK=all \(every site\) or off \(none\)/);
+  });
+
+  await t.test("the description states that the playwright engine captures page console calls everywhere", async () => {
+    const { tools } = await client.listTools();
+    const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
+    assert.match(description, /With WEB_AGENT_ENGINE=playwright they are captured on every site and WEB_AGENT_CONSOLE_HOOK has no effect/);
   });
 });
 
