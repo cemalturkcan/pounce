@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readTabBody, tabBodyType } from "../body.ts";
 import { extractPage, summarizeStructured, toCsv } from "../extract.ts";
+import { framesText } from "../frames.ts";
 import { elementMarkdown, pageMarkdown } from "../markdown.ts";
 import { clipWindow, untrusted } from "../output.ts";
 import { pageText, rawSnapshot, renderSnapshot } from "../page.ts";
@@ -73,6 +74,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       format: z.enum(["text", "markdown"]).optional().describe("text is the rendered text as the user sees it; markdown keeps structure and link URLs. Default text."),
       offset: z.number().int().min(0).optional().describe("Character offset to start from. Default 0."),
       max_chars: z.number().int().min(200).max(200_000).optional().describe("Characters to return. Default 12000."),
+      frames: z.boolean().optional().describe("Append the text of every iframe, same-origin or cross-origin, each after a line \"--- frame: <url> ---\". Default false. Ignored when target is set."),
     },
     readOnly: true,
     handler: async (input) => {
@@ -91,7 +93,8 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
           : locator
             ? await locator.innerText()
             : await pageText(tab.page, scope);
-      const window = clipWindow(text, input.offset ?? 0, input.max_chars ?? 12_000);
+      const frameText = input.frames && !locator && body === undefined ? await framesText(tab.page, input.format ?? "text") : "";
+      const window = clipWindow(frameText ? `${text}\n\n${frameText}` : text, input.offset ?? 0, input.max_chars ?? 12_000);
       const footer = window.hasMore
         ? `\n[chars ${window.start}-${window.end} of ${window.totalChars}; pass offset=${window.end} for more]`
         : `\n[chars ${window.start}-${window.end} of ${window.totalChars}; end of text]`;

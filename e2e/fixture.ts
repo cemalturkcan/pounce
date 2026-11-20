@@ -149,10 +149,12 @@ export type Fixture = {
 export async function startFixture(): Promise<Fixture> {
   let hits = 0;
   const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
-  const server = http.createServer((request, response) => {
+  const handler: http.RequestListener = (request, response) => {
     const pathname = (request.url ?? "/").split("?")[0] ?? "/";
     const content = CONTENT_ROUTES[pathname];
-    if (content) {
+    if (pathname === "/framed") {
+      response.writeHead(200, { "content-type": "text/html" }).end(framedPage(`http://${request.headers.host ?? "127.0.0.1"}`));
+    } else if (content) {
       response.writeHead(200, { "content-type": content.type }).end(content.body());
     } else if (pages[pathname]) {
       response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
@@ -184,17 +186,21 @@ export async function startFixture(): Promise<Fixture> {
     } else {
       response.writeHead(404, { "content-type": "text/html" }).end("<title>Missing</title><h1>Not found</h1>");
     }
-  });
+  };
+  const server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
+  const loopbackV6 = await listenOnLoopbackV6(handler, port);
   return {
     url: `http://127.0.0.1:${port}`,
     hits: () => hits,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: async () => {
+      await loopbackV6?.close();
+      await new Promise<void>((resolve) => {
         server.closeAllConnections();
         server.close(() => resolve());
-      }),
+      });
+    },
   };
 }
 
@@ -265,3 +271,31 @@ addEventListener("scroll", () => {
 </body></html>`;
 
 CONTENT_ROUTES["/feed"] = { type: "text/html", body: () => FEED };
+
+export const FRAME_TEXT = { outer: `outer text ${contentToken()}`, same: `same origin text ${contentToken()}`, cross: `cross origin text ${contentToken()}` };
+
+CONTENT_ROUTES["/frame-same"] = { type: "text/html", body: () => `<!doctype html><title>Same</title><p>${FRAME_TEXT.same}</p>` };
+CONTENT_ROUTES["/frame-cross"] = { type: "text/html", body: () => `<!doctype html><title>Cross</title><p>${FRAME_TEXT.cross}</p>` };
+
+export function framedPage(fixtureUrl: string) {
+  const cross = fixtureUrl.replace("127.0.0.1", "localhost");
+  return `<!doctype html><html><head><title>Fixture Framed</title></head><body><main><p>${FRAME_TEXT.outer}</p>
+<iframe title="Same" src="/frame-same"></iframe>
+<iframe title="Cross" src="${cross}/frame-cross"></iframe></main></body></html>`;
+}
+
+async function listenOnLoopbackV6(handler: http.RequestListener, port: number) {
+  const server = http.createServer(handler);
+  const listening = await new Promise<boolean>((resolve) => {
+    server.once("error", () => resolve(false));
+    server.listen(port, "::1", () => resolve(true));
+  });
+  if (!listening) return undefined;
+  return {
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}

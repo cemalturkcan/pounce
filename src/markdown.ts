@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright-core";
+import type { Frame, Locator, Page } from "playwright-core";
 
 export type MarkdownMode = "main" | "page" | "element";
 
@@ -130,4 +130,8 @@ export function pageMarkdown(page: Page, scope: "main" | "page") {
 
 export function elementMarkdown(locator: Locator) {
   return locator.evaluate(renderMarkdown, "element" as MarkdownMode);
+}
+
+export function frameMarkdown(frame: Frame) {
+  return frame.locator("body").evaluate(renderMarkdown, "page" as MarkdownMode, { timeout: 5000 });
 }

@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT, FEED_TOTAL } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -1047,4 +1047,63 @@ test("collect_pages scrolls lazy-loading pages", async (t) => {
   await t.test("scroll stops at max_steps", async () => {
     assert.match((await collectFeed({ scroll: { max_steps: 2, idle_ms: 400 } })).index, /scrolled 2 steps \(max_steps reached\)/);
   });
+});
+
+test("frames are readable", async (t) => {
+  const frameDir = await mkdtemp(path.join(tmpdir(), "web-agent-frames-"));
+  const frameConfig = loadConfig({
+    WEB_AGENT_DATA_DIR: frameDir,
+    WEB_AGENT_HEADLESS: "true",
+    WEB_AGENT_PASSWORD_STORE: "basic",
+    WEB_AGENT_ENGINE: process.env.WEB_AGENT_ENGINE,
+    WEB_AGENT_DEFAULT_LAUNCH_ARGS: "--disable-features=LocalNetworkAccessChecks",
+  });
+  const frameDeps = createDeps(frameConfig, fakeSecrets, fakeAdapter);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createServer(frameConfig, frameDeps).connect(serverSide);
+  const frameClient = new Client({ name: "e2e-frames", version: "0" });
+  await frameClient.connect(clientSide);
+  const read = async (name: string, args: Record<string, unknown>) => {
+    const result = await frameClient.callTool({ name, arguments: args });
+    const text = (result.content as Content[]).map((part) => part.text ?? "").join("\n");
+    assert.equal(result.isError === true, false, `${name} failed: ${text}`);
+    return text;
+  };
+  try {
+    const tab = openedTab(await read("tab_open", { url: `${fixture.url}/framed` }));
+    await read("wait_for", { tab, text: FRAME_TEXT.outer });
+    await pause(500);
+
+    await t.test("read_text leaves frame text out by default", async () => {
+      assert.ok(!(await read("read_text", { tab })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("read_text with frames includes same-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("read_text with frames includes cross-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true })).includes(FRAME_TEXT.cross));
+    });
+
+    await t.test("read_text marks each frame with its URL", async () => {
+      assert.match(await read("read_text", { tab, frames: true }), /^--- frame: http:\/\/localhost:\d+\/frame-cross ---$/m);
+    });
+
+    await t.test("read_text markdown with frames includes cross-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true, format: "markdown" })).includes(FRAME_TEXT.cross));
+    });
+
+    await t.test("snapshot includes same-origin frame text", async () => {
+      assert.ok((await read("snapshot", { tab })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("snapshot includes cross-origin frame text", async () => {
+      assert.ok((await read("snapshot", { tab })).includes(FRAME_TEXT.cross));
+    });
+  } finally {
+    await frameClient.close();
+    await frameDeps.manager.shutdown();
+    await rm(frameDir, { recursive: true, force: true });
+  }
 });
