@@ -412,6 +412,17 @@ test("browser flow", async (t) => {
     assert.ok(text.length < 800, `diff too large: ${text.length}`);
   });
 
+  await t.test("include_diff reports a message that fades out and is removed after the click", async () => {
+    const page = openedTab(await ok("tab_open", { url: `${fixture.url}/notice` }));
+    try {
+      const close = refOf(await ok("snapshot", { tab: page }), 'link "Close message"');
+      const text = await ok("click", { tab: page, target: close, include_diff: true });
+      assert.match(text, /^- .*Action successful/m);
+    } finally {
+      await ok("tab_close", { tab: page });
+    }
+  });
+
   await t.test("fill_form fills in order, reports invalid fields and submits", async () => {
     const text = await ok("fill_form", {
       tab,

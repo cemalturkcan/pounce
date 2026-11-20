@@ -4,6 +4,7 @@ import type { BrowserManager, Tab } from "./browser.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail, type OutputStore } from "./output.ts";
 import { challengeLine, classifyChallenge, probe as probeLanding, SIGN_IN_NOTE, sessionMayHaveExpired } from "./page-checks.ts";
+import { settleRendering } from "./settle.ts";
 import { cutSubtree, interactiveOnly, limitDepth, parseRef, topLevelRefs } from "./snapshot.ts";
 
 const SETTLE_MS = 150;
@@ -245,6 +246,7 @@ export async function runAction(
     const document = currentDocument(tab);
     lines.push(...(await landingLines(manager, tab, { previousUrl: urlBefore, status: document?.status, redirected: navigated && document?.redirected === true })));
   }
+  if ((options.includeSnapshot || snapshotBefore !== undefined) && !page.isClosed()) await settleRendering(page);
   lines.push(...manager.drainEvents(tab, startedAt));
 
   if (options.includeSnapshot && !page.isClosed()) {

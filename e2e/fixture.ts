@@ -344,6 +344,13 @@ const EDGE_PAGES: Record<string, { status?: number; html: string }> = {
   "/consent/frame": { html: EDGE_HTML("Consent Frame", `<p id="consent-state">pending</p><iframe title="Privacy" src="/consent/cmp-frame" style="position:fixed;bottom:0;width:100%;height:120px;border:0"></iframe>`) },
   "/consent/cmp-frame": { html: EDGE_HTML("CMP", `<div id="cmp-box">We and our partners use cookies. <button onclick="parent.document.getElementById('consent-state').textContent = 'rejected'">Manage options</button> <button onclick="parent.document.getElementById('consent-state').textContent = 'accepted'; this.parentElement.remove()">Agree</button></div>`) },
   "/consent/delayed": { html: EDGE_HTML("Consent Delayed", `<p id="consent-state">pending</p><script>setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="consent-banner" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:16px">This site uses cookies. <button onclick="document.getElementById(\\'consent-state\\').textContent = \\'accepted\\'; this.parentElement.remove()">OK</button></div>'), 800);</script>`) },
+  "/notice": {
+    html: EDGE_HTML(
+      "Notification Message",
+      `<div id="flash" class="flash notice" data-alert>Action successful <a href="#" class="close" aria-label="Close message">×</a></div><h3>Notification Message</h3>
+<script>document.querySelector(".close").addEventListener("click", (event) => { event.preventDefault(); const box = document.getElementById("flash"); const started = performance.now(); const step = () => { const done = (performance.now() - started) / 400; if (done >= 1) { box.remove(); return; } box.style.opacity = String(1 - done); setTimeout(step, 13); }; step(); });</script>`,
+    ),
+  },
   "/text": { html: EDGE_HTML("Text", `<p id="sample">Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا</p><label>Note <input id="note"></label><label>Body <textarea id="body"></textarea></label><button aria-label="Gönder 👍">Gönder 👍</button>`) },
 };
 

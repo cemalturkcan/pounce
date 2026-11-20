@@ -6,6 +6,7 @@ import type { BrowserManager, Tab } from "./browser.ts";
 import { capture } from "./capture.ts";
 import { MAX_IMAGES_PER_CALL } from "./ask.ts";
 import { ToolError } from "./errors.ts";
+import { settleRendering } from "./settle.ts";
 import { browserTranscoder, imageSize, JPEG_QUALITY, type PreparedImage, prepareModelImage } from "./model-images.ts";
 
 export type ImageMode = "none" | "auto" | "viewport" | "full";
@@ -14,8 +15,6 @@ export type PageVisualStats = { textChars: number; viewport: { width: number; he
 export type PageImages = { images: AskImage[]; prepared: PreparedImage[]; files: string[]; kind: "none" | "viewport" | "tiles"; tiles: number; regions: number; notes: string[] };
 
 export const TILE_OVERLAP = 80;
-const SCREEN_SETTLE_MS = 1500;
-const SCREEN_QUIET_MS = 200;
 const MEDIA_SHARE = 0.4;
 const CHARS_PER_10K_PX = 2;
 const STEP_MS = 20_000;
@@ -38,36 +37,6 @@ function scrollToTop(top: number): ScreenPosition {
 
 function restoreScroll(position: { x: number; y: number }) {
   window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
-}
-
-async function settleScreen(options: { maxMs: number; quietMs: number }) {
-  const deadline = performance.now() + options.maxMs;
-  const remaining = () => Math.max(0, deadline - performance.now());
-  const within = (promise: Promise<unknown>) => Promise.race([promise, new Promise((resolve) => setTimeout(resolve, remaining()))]);
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  const onScreen = (element: Element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
-  };
-  const images = [...document.images].filter(onScreen);
-  await within(Promise.allSettled(images.map((image) => image.decode())));
-  const finite = document.getAnimations().filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)));
-  await within(Promise.allSettled(finite.map((animation) => animation.finished)));
-  await within(
-    new Promise<void>((resolve) => {
-      let timer = setTimeout(done, options.quietMs);
-      const observer = new MutationObserver(() => {
-        clearTimeout(timer);
-        timer = setTimeout(done, options.quietMs);
-      });
-      function done() {
-        observer.disconnect();
-        resolve();
-      }
-      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-    }),
-  );
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
 
 const bounded = <T>(promise: Promise<T>, label: string) =>
@@ -108,7 +77,7 @@ async function captureScreens(page: Tab["page"]) {
       const at = await bounded(page.evaluate(scrollToTop, top), "scrolling the page");
       if (at.y <= previous) break;
       previous = at.y;
-      await bounded(page.evaluate(settleScreen, { maxMs: SCREEN_SETTLE_MS, quietMs: SCREEN_QUIET_MS }), "waiting for the page to settle");
+      await settleRendering(page);
       shots.push(await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS }));
       const height = await bounded(page.evaluate(() => (document.scrollingElement ?? document.documentElement).scrollHeight), "measuring the page");
       if (at.y + at.viewport >= height - 1) break;

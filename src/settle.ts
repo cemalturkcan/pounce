@@ -54,3 +54,40 @@ export async function waitForContent(page: Page, options: SettleOptions): Promis
   }
   return { settled: false, ms: Date.now() - started };
 }
+
+async function settleInPage(options: { maxMs: number; quietMs: number }) {
+  const deadline = performance.now() + options.maxMs;
+  const remaining = () => Math.max(0, deadline - performance.now());
+  const within = (promise: Promise<unknown>) => Promise.race([promise, new Promise((resolve) => setTimeout(resolve, remaining()))]);
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const onScreen = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+  };
+  const images = [...document.images].filter(onScreen);
+  await within(Promise.allSettled(images.map((image) => image.decode())));
+  const finite = document.getAnimations().filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)));
+  await within(Promise.allSettled(finite.map((animation) => animation.finished)));
+  await within(
+    new Promise<void>((resolve) => {
+      let timer = setTimeout(done, options.quietMs);
+      const observer = new MutationObserver(() => {
+        clearTimeout(timer);
+        timer = setTimeout(done, options.quietMs);
+      });
+      function done() {
+        observer.disconnect();
+        resolve();
+      }
+      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    }),
+  );
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+const RENDER_MAX_MS = 1500;
+const RENDER_QUIET_MS = 200;
+
+export async function settleRendering(page: Page) {
+  await withDeadline(page.evaluate(settleInPage, { maxMs: RENDER_MAX_MS, quietMs: RENDER_QUIET_MS }), RENDER_MAX_MS + PROBE_MS).catch(() => undefined);
+}
