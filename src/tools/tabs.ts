@@ -12,10 +12,25 @@ import { defineTool, includeSnapshotParam, tabLine, tabParam, timeoutParam, type
 
 const LEFT_PAGE_CANCELLED = Symbol("leave cancelled");
 
+const ERROR_PAGE_SETTLE_MS = 2000;
+
+function authChallengeLine(response: Response | null) {
+  const challenge = response?.status() === 401 ? response.headers()["www-authenticate"] : undefined;
+  if (!challenge) return [];
+  return [`The site asks for HTTP authentication (${challenge.split(/\s/)[0]}); use http_auth with a password-store entry for this origin, then navigate again.`];
+}
+
 async function downloadInstead(manager: BrowserManager, tab: Tab, since: number, error: unknown) {
-  if (!/Download is starting|net::ERR_ABORTED/i.test(error instanceof Error ? error.message : String(error))) throw error;
-  const download = await manager.downloadSince(tab, since);
-  if (!download) throw error;
+  const isDownload = /Download is starting|net::ERR_ABORTED/i.test(error instanceof Error ? error.message : String(error));
+  const download = isDownload ? await manager.downloadSince(tab, since) : undefined;
+  if (!download) {
+    if (/net::ERR_/.test(String(error)) && !tab.page.url().startsWith("chrome-error:")) {
+      await tab.page
+        .waitForEvent("framenavigated", { predicate: (frame) => frame === tab.page.mainFrame() && frame.url().startsWith("chrome-error:"), timeout: ERROR_PAGE_SETTLE_MS })
+        .catch(() => undefined);
+    }
+    throw error;
+  }
   const outcome = download.file ? `Downloaded ${download.name} to ${download.file}` : `The download of ${download.name} ${download.note}.`;
   return `${outcome}\nThe URL is a file download, so the tab stays at ${await describePage(tab.page)}.`;
 }
@@ -89,7 +104,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
         return `Opened ${tab.id}.\n${text}`;
       }
       manager.markSeen(tab);
-      const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`];
+      const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
       lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
       lines.push(...manager.drainEvents(tab, startedAt));
       const notes = await siteNotesHint(manager.config.sitesDir, tab.page.url());
@@ -172,7 +187,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       if (input.url === "back" || input.url === "forward") {
         await tab.page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => undefined);
       }
-      const lines = [`${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`];
+      const lines = [`${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
       lines.push(
         ...(await landingLines(manager, tab, { previousUrl, requestedUrl, status: response?.status(), redirected: response ? response.request().redirectedFrom() !== null : undefined })),
       );

@@ -886,8 +886,8 @@ test("browser edge cases", async (t) => {
   const tab = openedTab(await ok("tab_open", { url: fixture.url }));
   const authTexts: string[] = [];
 
-  await t.test("a Basic-auth page answers 401 before http_auth is set", async () => {
-    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-c/` }), /HTTP 401/);
+  await t.test("a Basic-auth page without credentials points to http_auth", async () => {
+    assert.match((await call("navigate", { tab, url: `${fixture.url}/auth-c/` })).text, /HTTP authentication[\s\S]*use http_auth/i);
   });
 
   await t.test("http_auth set answers the Basic challenge for the origin", async () => {
@@ -928,7 +928,7 @@ test("browser edge cases", async (t) => {
 
   await t.test("http_auth clear stops answering new challenges", async () => {
     await ok("http_auth", { action: "clear", origin: fixture.url });
-    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-c/` }), /HTTP 401/);
+    assert.match((await call("navigate", { tab, url: `${fixture.url}/auth-c/` })).text, /HTTP authentication[\s\S]*use http_auth/i);
   });
 
   await t.test("a reCAPTCHA widget is reported after navigate", async () => {
