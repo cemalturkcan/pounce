@@ -149,9 +149,14 @@ export type Fixture = {
 export async function startFixture(): Promise<Fixture> {
   let hits = 0;
   const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
-  const server = http.createServer((request, response) => {
+  const handler: http.RequestListener = (request, response) => {
     const pathname = (request.url ?? "/").split("?")[0] ?? "/";
-    if (pages[pathname]) {
+    const content = CONTENT_ROUTES[pathname];
+    if (pathname === "/framed") {
+      response.writeHead(200, { "content-type": "text/html" }).end(framedPage(`http://${request.headers.host ?? "127.0.0.1"}`));
+    } else if (content) {
+      response.writeHead(200, { "content-type": content.type }).end(content.body());
+    } else if (pages[pathname]) {
       response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
     } else if (pathname === "/pixel.png") {
       response.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" }).end(PIXEL);
@@ -181,12 +186,112 @@ export async function startFixture(): Promise<Fixture> {
     } else {
       response.writeHead(404, { "content-type": "text/html" }).end("<title>Missing</title><h1>Not found</h1>");
     }
-  });
+  };
+  const server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
+  const loopbackV6 = await listenOnLoopbackV6(handler, port);
   return {
     url: `http://127.0.0.1:${port}`,
     hits: () => hits,
+    close: async () => {
+      await loopbackV6?.close();
+      await new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+export function tinyPdf(text: string) {
+  const content = `BT /F1 18 Tf 20 100 Td (${text}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xref = body.length;
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}`;
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(body, "latin1");
+}
+
+const contentToken = () => Math.random().toString(36).slice(2, 10);
+
+export const CONTENT = {
+  pdfText: `Quarterly total ${contentToken()}`,
+  json: JSON.stringify({ name: `json-${contentToken()}`, items: [1, 2, 3] }),
+  text: `plain notes ${contentToken()}\nsecond line`,
+  csv: `name,value\nrow-${contentToken()},7\n`,
+  binary: Buffer.from(Array.from({ length: 64 }, (_value, index) => (index * 37) % 256)),
+};
+
+export const CONTENT_ROUTES: Record<string, { type: string; body: () => Buffer | string }> = {
+  "/files/report.pdf": { type: "application/pdf", body: () => tinyPdf(CONTENT.pdfText) },
+  "/files/data.json": { type: "application/json; charset=utf-8", body: () => CONTENT.json },
+  "/files/notes.txt": { type: "text/plain; charset=utf-8", body: () => CONTENT.text },
+  "/files/table.csv": { type: "text/csv", body: () => CONTENT.csv },
+  "/files/pixel.png": { type: "image/png", body: () => PIXEL },
+  "/files/blob.bin": { type: "application/octet-stream", body: () => CONTENT.binary },
+};
+
+export const FEED_TOTAL = 50;
+
+const FEED = `<!doctype html>
+<html><head><title>Fixture Feed</title><style>.item { height: 120px; border-bottom: 1px solid #ccc; }</style></head><body>
+<main id="feed"></main>
+<script>
+let shown = 0;
+let loading = false;
+const more = () => {
+  for (let index = 0; index < 10 && shown < ${FEED_TOTAL}; index += 1) {
+    shown += 1;
+    const item = document.createElement("div");
+    item.className = "item";
+    item.textContent = "Feed item " + shown;
+    document.getElementById("feed").append(item);
+  }
+};
+more();
+addEventListener("scroll", () => {
+  if (loading || shown >= ${FEED_TOTAL} || innerHeight + scrollY < document.body.scrollHeight - 200) return;
+  loading = true;
+  setTimeout(() => { more(); loading = false; }, 150);
+});
+</script>
+</body></html>`;
+
+CONTENT_ROUTES["/feed"] = { type: "text/html", body: () => FEED };
+
+export const FRAME_TEXT = { outer: `outer text ${contentToken()}`, same: `same origin text ${contentToken()}`, cross: `cross origin text ${contentToken()}` };
+
+CONTENT_ROUTES["/frame-same"] = { type: "text/html", body: () => `<!doctype html><title>Same</title><p>${FRAME_TEXT.same}</p>` };
+CONTENT_ROUTES["/frame-cross"] = { type: "text/html", body: () => `<!doctype html><title>Cross</title><p>${FRAME_TEXT.cross}</p>` };
+
+export function framedPage(fixtureUrl: string) {
+  const cross = fixtureUrl.replace("127.0.0.1", "localhost");
+  return `<!doctype html><html><head><title>Fixture Framed</title></head><body><main><p>${FRAME_TEXT.outer}</p>
+<iframe title="Same" src="/frame-same"></iframe>
+<iframe title="Cross" src="${cross}/frame-cross"></iframe></main></body></html>`;
+}
+
+async function listenOnLoopbackV6(handler: http.RequestListener, port: number) {
+  const server = http.createServer(handler);
+  const listening = await new Promise<boolean>((resolve) => {
+    server.once("error", () => resolve(false));
+    server.listen(port, "::1", () => resolve(true));
+  });
+  if (!listening) return undefined;
+  return {
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -194,3 +299,28 @@ export async function startFixture(): Promise<Fixture> {
       }),
   };
 }
+
+export const SPA_TEXT = { item: `SPA item ${contentToken()}`, skeleton: `Loading placeholder ${contentToken()}` };
+
+CONTENT_ROUTES["/spa"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><title>Fixture SPA</title></head><body><main id="app"><div class="skeleton-list">${SPA_TEXT.skeleton}</div></main>
+<script>
+setTimeout(() => fetch("/api/data").then((response) => response.json()).then(() => {
+  const list = document.createElement("ul");
+  for (let index = 1; index <= 5; index += 1) {
+    const item = document.createElement("li");
+    item.textContent = "${SPA_TEXT.item} " + index;
+    list.append(item);
+  }
+  document.getElementById("app").append(list);
+  document.querySelector(".skeleton-list").remove();
+}), 1500);
+</script></body></html>`,
+};
+
+CONTENT_ROUTES["/ticker"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><title>Fixture Ticker</title></head><body><main><p id="tick">0</p></main>
+<script>let ticks = 0; setInterval(() => { ticks += 1; document.getElementById("tick").textContent = "tick " + ticks + " ".repeat(ticks % 7); }, 100);</script></body></html>`,
+};
