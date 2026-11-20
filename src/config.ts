@@ -22,6 +22,7 @@ export type Config = {
   channel: string;
   executablePath?: string;
   headless: boolean;
+  chromeSandbox: boolean;
   passwordStore: string;
   locale?: string;
   timezoneId?: string;
@@ -93,6 +94,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     channel: source.WEB_AGENT_CHROME_CHANNEL?.trim() || "chrome",
     executablePath: source.WEB_AGENT_CHROME_EXECUTABLE?.trim() || undefined,
     headless: parseBoolean(source.WEB_AGENT_HEADLESS) ?? !hasDisplay,
+    chromeSandbox: parseBoolean(source.WEB_AGENT_CHROME_SANDBOX) ?? true,
     passwordStore: source.WEB_AGENT_PASSWORD_STORE?.trim() || "gnome-libsecret",
     locale: source.WEB_AGENT_DEFAULT_LOCALE?.trim() || undefined,
     timezoneId: source.WEB_AGENT_DEFAULT_TIMEZONE_ID?.trim() || undefined,

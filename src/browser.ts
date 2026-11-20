@@ -167,6 +167,19 @@ async function loadChromium(engine: Config["engine"]) {
   return module.chromium as unknown as BrowserType;
 }
 
+const SANDBOX_FAILURE = /no usable sandbox|setuid sandbox|suid sandbox|namespace/i;
+
+export function sandboxLaunchError(error: unknown, sandbox: boolean) {
+  if (!sandbox) return undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  if (!SANDBOX_FAILURE.test(message)) return undefined;
+  const detail = message.split("\n").find((line) => SANDBOX_FAILURE.test(line))?.trim() ?? message;
+  return new ToolError(
+    `Chrome could not start its sandbox: ${detail.slice(0, 300)}`,
+    "This kernel or container does not allow the Chrome sandbox (unprivileged user namespaces). Enable them, or restart the daemon with WEB_AGENT_CHROME_SANDBOX=false to launch Chrome without the sandbox.",
+  );
+}
+
 export class BrowserManager {
   readonly config: Config;
   readonly profile = new ProfileSettings();
@@ -244,7 +257,10 @@ export class BrowserManager {
       timezoneId: config.timezoneId,
       acceptDownloads: true,
       ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
+      chromiumSandbox: config.chromeSandbox,
       args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", ...config.extraArgs],
+    }).catch((error: unknown) => {
+      throw sandboxLaunchError(error, config.chromeSandbox) ?? error;
     });
 
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
+import { sandboxLaunchError } from "./browser.ts";
 import { normalizeUrl } from "./collect.ts";
 import { loadConfig, parseLaunchArgs } from "./config.ts";
 import { isAllowedHost, isAllowedOrigin, isDaemonProcess } from "./daemon.ts";
@@ -285,6 +286,32 @@ test("config reads launch args and defaults", () => {
   assert.equal(config.headless, true);
   assert.equal(loadConfig({ DISPLAY: ":0" }).headless, false);
   assert.throws(() => loadConfig({ WEB_AGENT_DAEMON_PORT: "abc" }), /Invalid WEB_AGENT_DAEMON_PORT/);
+});
+
+test("config enables the Chrome sandbox unless WEB_AGENT_CHROME_SANDBOX turns it off", () => {
+  assert.equal(loadConfig({}).chromeSandbox, true);
+  assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "true" }).chromeSandbox, true);
+  assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "1" }).chromeSandbox, true);
+  assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "false" }).chromeSandbox, false);
+  assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "0" }).chromeSandbox, false);
+  assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "maybe" }).chromeSandbox, true);
+});
+
+test("a launch failure caused by the Chrome sandbox points at WEB_AGENT_CHROME_SANDBOX", () => {
+  const messages = [
+    "browserType.launchPersistentContext: Target page, context or browser has been closed\n[pid=1][err] No usable sandbox! If you are running on Ubuntu 23.10+ ...",
+    "[pid=1][err] Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted",
+    "The SUID sandbox helper binary was found, but is not configured correctly (setuid sandbox)",
+  ];
+  for (const message of messages) {
+    const mapped = sandboxLaunchError(new Error(message), true);
+    assert.ok(mapped instanceof ToolError, message);
+    assert.match(mapped.message, /sandbox/i);
+    assert.match(mapped.hint ?? "", /WEB_AGENT_CHROME_SANDBOX=false/);
+  }
+  assert.equal(sandboxLaunchError(new Error(messages[0]), false), undefined);
+  assert.equal(sandboxLaunchError(new Error("Executable doesn't exist at /opt/google/chrome/chrome"), true), undefined);
+  assert.equal(sandboxLaunchError("No usable sandbox", true) instanceof ToolError, true);
 });
 
 test("parseEntry splits the password line from key-value fields", () => {
