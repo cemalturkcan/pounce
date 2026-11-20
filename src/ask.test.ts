@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -16,8 +16,10 @@ import {
   parseCliOutput,
   parseReply,
   renderAskResults,
+  sourceNames,
   type AskAdapter,
 } from "./ask.ts";
+import { describeError, ToolError } from "./errors.ts";
 
 const doc = (source: string, size: number) => ({ source, text: "x".repeat(size) });
 
@@ -90,7 +92,7 @@ test("askPages runs batches concurrently through the adapter and merges the resu
       };
     },
   };
-  const results = await askPages(adapter, {
+  const report = await askPages(adapter, {
     question: "Where?",
     documents: [doc("hit1.md", 50), doc("miss1.md", 50), doc("bad.md", 50), doc("hit2.md", 50), doc("miss2.md", 50)],
     batchChars: 100,
@@ -101,10 +103,10 @@ test("askPages runs batches concurrently through the adapter and merges the resu
     maxTokens: 4000,
     timeoutMs: 5000,
   });
-  assert.equal(results.length, 3);
+  assert.equal(report.batches.length, 3);
   assert.equal(peak, 2);
   assert.deepEqual(calls.sort(), ["bad.md,hit2.md", "hit1.md,miss1.md", "miss2.md"]);
-  const text = renderAskResults("Where?", results, "fake", "haiku");
+  const text = renderAskResults("Where?", report, "fake", "haiku");
   assert.match(text, /^- found it \[hit1\.md\]$/m);
   assert.ok(!text.includes("[hit2.md]"));
   assert.match(text, /Nothing relevant in: miss1\.md, miss2\.md/);
@@ -120,7 +122,9 @@ test("askPages reports a timed out call", async () => {
     complete: ({ signal }) =>
       new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason as Error))),
   };
-  const [result] = await askPages(adapter, {
+  const {
+    batches: [result],
+  } = await askPages(adapter, {
     question: "q",
     documents: [doc("a.md", 10)],
     batchChars: 100,
@@ -234,6 +238,172 @@ test("loadAdapterModule accepts an adapter or a factory and rejects other shapes
     await assert.rejects(loadAdapterModule(await write("none.mjs", "export const adapter = 1;")), /wrong shape/);
     await assert.rejects(loadAdapterModule(path.join(dir, "missing.mjs")), /Could not load the ask adapter at .*missing\.mjs/);
     await assert.rejects(loadAdapterModule("relative.mjs"), /must be an absolute path/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const askOptions = (documents: { source: string; text: string }[], overrides: Partial<Parameters<typeof askPages>[1]> = {}) => ({
+  question: "What is listed?",
+  documents,
+  batchChars: 100_000,
+  maxPagesPerBatch: 20,
+  maxCharsPerPage: 10_000,
+  concurrency: 2,
+  model: "haiku",
+  maxTokens: 100,
+  timeoutMs: 5000,
+  ...overrides,
+});
+
+const promptSources = (prompt: string) => [...prompt.matchAll(/source="([^"]+)"/g)].map((match) => match[1] ?? "");
+
+function recordingAdapter(reply: (sources: string[], prompt: string) => string = (sources) => `NOT FOUND: ${sources.join(", ")}`) {
+  const sent: string[][] = [];
+  const adapter: AskAdapter = {
+    name: "recording",
+    complete: async ({ prompt }) => {
+      const sources = promptSources(prompt);
+      sent.push(sources);
+      return { text: reply(sources, prompt) };
+    },
+  };
+  return { adapter, sent };
+}
+
+const token = () => Math.random().toString(36).slice(2, 10);
+
+test("askPages does not send pages that are empty after trimming", async () => {
+  const empty = `${token()}.md`;
+  const { adapter, sent } = recordingAdapter();
+  await askPages(adapter, askOptions([doc(`${token()}.md`, 20), { source: empty, text: " \n\t " }]));
+  assert.ok(!sent.flat().includes(empty));
+});
+
+test("renderAskResults lists empty pages as empty", async () => {
+  const empty = `${token()}.md`;
+  const { adapter } = recordingAdapter();
+  const report = await askPages(adapter, askOptions([doc(`${token()}.md`, 20), { source: empty, text: "" }]));
+  assert.match(renderAskResults("q", report, "recording", "haiku"), new RegExp(`^Empty pages \\(not sent\\): ${empty.replace(/\./g, "\\.")}$`, "m"));
+});
+
+test("renderAskResults notes which pages were clipped", async () => {
+  const long = `${token()}.md`;
+  const size = 3000 + Math.floor(Math.random() * 1000);
+  const { adapter } = recordingAdapter();
+  const report = await askPages(adapter, askOptions([doc(`${token()}.md`, 50), { source: long, text: "x".repeat(size) }], { maxCharsPerPage: 1000 }));
+  assert.match(renderAskResults("q", report, "recording", "haiku"), new RegExp(`^Clipped to their start and end: ${long.replace(/\./g, "\\.")} \\(${size} chars\\)$`, "m"));
+});
+
+test("askPages gives duplicate sources a numbered suffix in order", async () => {
+  const name = `${token()}.md`;
+  const { adapter, sent } = recordingAdapter();
+  await askPages(adapter, askOptions([doc(name, 10), doc(name, 10), doc(name, 10)]));
+  assert.deepEqual(sent.flat(), [name, `${name}#2`, `${name}#3`]);
+});
+
+test("answers about a duplicate source map back to that copy", async () => {
+  const name = `${token()}.md`;
+  const { adapter } = recordingAdapter(() => `- second copy has it [${name}#2]\nNOT FOUND: ${name}`);
+  const report = await askPages(adapter, askOptions([doc(name, 10), doc(name, 10)]));
+  assert.deepEqual(report.batches[0]?.notFound, [name]);
+});
+
+test("parseReply matches NOT FOUND entries exactly, so t1 never matches t10", () => {
+  assert.deepEqual(parseReply("NOT FOUND: t1", ["t10 http://b.test/", "t1 http://a.test/"]).notFound, ["t1 http://a.test/"]);
+});
+
+test("parseReply ignores NOT FOUND entries that only share a prefix with a source", () => {
+  assert.deepEqual(parseReply("NOT FOUND: 01-a", ["01-a-long.md"]).notFound, []);
+});
+
+test("parseReply rewrites an answer's citation to the exact source it names", () => {
+  assert.deepEqual(parseReply("- fact [t1]", ["t10 http://b.test/", "t1 http://a.test/"]).answers, ["- fact [t1 http://a.test/]"]);
+});
+
+test("sourceNames uses base names when they are unique", () => {
+  const names = [`${token()}.md`, `${token()}.md`];
+  assert.deepEqual(sourceNames(names.map((name) => path.join("/data", token(), name))), names);
+});
+
+test("sourceNames uses paths relative to the common folder when base names collide", () => {
+  const [left, right, name] = [token(), token(), `${token()}.md`];
+  assert.deepEqual(sourceNames([path.join("/out/collect", left, name), path.join("/out/collect", right, name)]), [path.join(left, name), path.join(right, name)]);
+});
+
+async function fakeCli(dir: string, body: string[]) {
+  const file = path.join(dir, "fake-claude");
+  await writeFile(file, [`#!${process.execPath}`, ...body].join("\n"));
+  await chmod(file, 0o755);
+  return file;
+}
+
+test("a missing claude CLI is a ToolError naming WEB_AGENT_ASK_CLAUDE_COMMAND", async () => {
+  const missing = path.join(tmpdir(), `no-claude-${token()}`);
+  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
+    assert.ok(error instanceof ToolError);
+    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
+    return true;
+  });
+});
+
+test("a missing claude CLI error says how to check the sign-in", async () => {
+  const missing = path.join(tmpdir(), `no-claude-${token()}`);
+  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
+    assert.match(describeError(error), /claude auth status/);
+    return true;
+  });
+});
+
+test("askPages stops with the setup error when the claude CLI is missing", async () => {
+  const missing = path.join(tmpdir(), `no-claude-${token()}`);
+  await assert.rejects(askPages(claudeCliAdapter(missing), askOptions([doc("a.md", 10), doc("b.md", 10)], { maxPagesPerBatch: 1 })), (error: Error) => {
+    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
+    return true;
+  });
+});
+
+const brokenCli = [
+  "let input = '';",
+  "process.stdin.on('data', (chunk) => { input += chunk; });",
+  "process.stdin.on('end', () => {",
+  "  if (input.includes('BROKEN')) { process.stdout.write('<html>gateway error</html>'); return; }",
+  "  const source = /source=\"([^\"]+)\"/.exec(input)[1];",
+  "  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '- ok [' + source + ']' }));",
+  "});",
+];
+
+test("a batch with malformed CLI output is listed as failed with a short reason", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+  try {
+    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
+    const failed = report.batches.find((batch) => batch.sources.includes("bad.md"));
+    assert.match(failed?.error ?? "", /not JSON/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("other batches still answer when one batch gets malformed CLI output", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+  try {
+    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
+    assert.deepEqual(report.batches.find((batch) => batch.sources.includes("good.md"))?.answers, ["- ok [good.md]"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a CLI call that runs past the timeout is failed and its process is killed", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+  const pidFile = path.join(dir, "pid");
+  try {
+    const cli = await fakeCli(dir, [`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`, "setTimeout(() => undefined, 60000);"]);
+    const report = await askPages(claudeCliAdapter(cli), askOptions([doc("a.md", 10)], { timeoutMs: 1500 }));
+    assert.equal(report.batches[0]?.error, "no answer within 1500 ms");
+    const pid = Number(await readFile(pidFile, "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

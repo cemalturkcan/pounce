@@ -2,10 +2,11 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { type AskDocument, askPages, renderAskResults } from "./ask.ts";
+import { allBatchesFailed, type AskDocument, askPages, renderAskResults, sourceNames } from "./ask.ts";
 import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
+import { untrusted } from "./output.ts";
 import { clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
 import { registerTabTools } from "./tools/tabs.ts";
 import { registerPageReadTools } from "./tools/page-read.ts";
@@ -36,6 +37,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
     description: [
       "Answer one question over many pages without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) in a few large calls; each call returns short answer lines that name the page every fact came from, and this tool returns only those lines merged, the pages where nothing relevant was found, and any failed calls. The full answers are also saved to a file.",
       "Use it after collect_pages for comparisons, price or spec tables, or finding which pages mention something; give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. The model sees only the page text, so it cannot click, follow links or check anything; for work that needs that, use run_script or a subagent. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
+      "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix.",
     ].join("\n"),
     input: {
       question: z.string().min(3).max(4000).describe("The question, phrased so it can be answered from each page on its own, for example: What is the price and battery life of the laptop on this page?"),
@@ -50,16 +52,16 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       model: z.string().optional().describe("haiku (default), sonnet, or a full model id understood by the adapter."),
       timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. Default 180000."),
     },
-    readOnly: true,
     handler: async (input, owner) => {
       const given = [input.files, input.dir, input.urls, input.tabs].filter((value) => value !== undefined).length;
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
       const documents: AskDocument[] = [];
       if (input.files) {
-        for (const file of input.files) {
+        const names = sourceNames(input.files);
+        for (const [index, file] of input.files.entries()) {
           const text = await readFile(file, "utf8").catch(() => undefined);
           if (text === undefined) throw new ToolError(`Cannot read ${file}.`, "Pass absolute paths of existing text files.");
-          documents.push({ source: path.basename(file), text });
+          documents.push({ source: names[index] ?? path.basename(file), text });
         }
       } else if (input.dir || input.urls) {
         const dir = input.dir
@@ -90,14 +92,13 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
           documents.push({ source: `${tab.id} ${tab.page.url()}`, text: await pageMarkdown(tab.page, "main") });
         }
       }
-      const usable = documents.filter((document) => document.text.trim());
-      if (usable.length === 0) throw new ToolError("All pages are empty.");
+      if (documents.every((document) => !document.text.trim())) throw new ToolError(`All pages are empty: ${documents.map((document) => document.source).join(", ")}.`);
 
       const adapter = await deps.ask.get();
       const model = input.model ?? "haiku";
-      const results = await askPages(adapter, {
+      const report = await askPages(adapter, {
         question: input.question,
-        documents: usable,
+        documents,
         batchChars: input.batch_chars ?? 150_000,
         maxPagesPerBatch: input.max_pages_per_batch ?? 20,
         maxCharsPerPage: input.max_chars_per_page ?? 30_000,
@@ -106,9 +107,11 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         maxTokens: 4000,
         timeoutMs: input.timeout_ms ?? 180_000,
       });
-      const rendered = renderAskResults(input.question, results, adapter.name, model);
-      const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(results, null, 2)}\n`);
-      return `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;
+      const rendered = renderAskResults(input.question, report, adapter.name, model);
+      const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
+      if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
+      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;
+      return untrusted(`${documents.length} page(s), answered by ${adapter.name}`, body);
     },
   });
 }

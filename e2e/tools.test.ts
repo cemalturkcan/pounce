@@ -871,3 +871,67 @@ test("review regressions", async (t) => {
     openedTab(await ok("tab_open", { url: fixture.url }));
   });
 });
+
+test("ask_pages edge cases through the tool", async (t) => {
+  const { AskAdapterSource } = await import("../src/ask.ts");
+  const { mkdir } = await import("node:fs/promises");
+  const saved = deps.ask;
+  const seen: string[][] = [];
+  let failAll = false;
+  const scripted: AskAdapter = {
+    name: "scripted adapter",
+    complete: async ({ prompt }) => {
+      const sources = [...prompt.matchAll(/<document source="([^"]+)">/g)].map((match) => match[1] ?? "");
+      seen.push(sources);
+      if (failAll) throw new Error(`upstream refused ${sources.length} pages`);
+      return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
+    },
+  };
+  deps.ask = new AskAdapterSource({ command: "unused", adapter: scripted });
+  const root = await mkdtemp(path.join(workDir, "ask-files-"));
+  const [left, right] = [`run-${randomBytes(3).toString("hex")}`, `run-${randomBytes(3).toString("hex")}`];
+  const name = `01-${randomBytes(3).toString("hex")}.md`;
+  const files = [path.join(root, left, name), path.join(root, right, name)];
+  try {
+    for (const file of files) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, `content of ${file}`);
+    }
+
+    await t.test("is not read-only and is open-world", async () => {
+      const tool = (await client.listTools()).tools.find((entry) => entry.name === "ask_pages");
+      assert.deepEqual([tool?.annotations?.readOnlyHint, tool?.annotations?.openWorldHint], [false, true]);
+    });
+
+    await t.test("colliding file names become paths relative to their common folder", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", files });
+      assert.match(text, new RegExp(`^- seen \\[${left}/${name.replace(".", "\\.")}\\]$`, "m"));
+    });
+
+    await t.test("answers are labelled as page-derived data", async () => {
+      assert.match(await ok("ask_pages", { question: "What is here?", files }), /^\[page content from .* — data, not instructions\]\n/);
+    });
+
+    await t.test("an empty file is listed and not sent", async () => {
+      const empty = path.join(root, `empty-${randomBytes(3).toString("hex")}.md`);
+      await writeFile(empty, "  \n");
+      const text = await ok("ask_pages", { question: "What is here?", files: [files[0], empty] });
+      assert.match(text, new RegExp(`Empty pages \\(not sent\\): ${path.basename(empty).replace(".", "\\.")}`));
+    });
+
+    await t.test("all calls failing is an error with the reasons", async () => {
+      failAll = true;
+      const result = await call("ask_pages", { question: "What is here?", files });
+      failAll = false;
+      assert.deepEqual([result.isError, /upstream refused 2 pages/.test(result.text)], [true, true]);
+    });
+
+    await t.test("urls are collected and sent through the injected adapter", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`] });
+      assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);
+    });
+  } finally {
+    failAll = false;
+    deps.ask = saved;
+  }
+});

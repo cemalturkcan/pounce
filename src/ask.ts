@@ -25,6 +25,14 @@ export type BatchResult = {
   ms: number;
 };
 
+export type AskReport = {
+  batches: BatchResult[];
+  empty: string[];
+  clipped: { source: string; chars: number }[];
+};
+
+export class AskSetupError extends ToolError {}
+
 export type AskOptions = {
   question: string;
   documents: AskDocument[];
@@ -95,7 +103,32 @@ export function buildPrompt(question: string, documents: AskDocument[]) {
   return `${blocks.join("\n\n")}\n\n<question>\n${question}\n</question>\n\nAnswer the question from the pages above, in the language of the question.`;
 }
 
+function sourceTokens(source: string) {
+  const tokens = new Set([source]);
+  const withoutExtension = source.replace(/\.(md|txt)$/i, "");
+  tokens.add(withoutExtension);
+  const tabId = /^(t\d+) /.exec(source)?.[1];
+  if (tabId) tokens.add(tabId);
+  return tokens;
+}
+
+export function sourceMatcher(sources: string[]) {
+  const owners = new Map<string, string[]>();
+  for (const source of sources) {
+    for (const token of sourceTokens(source)) owners.set(token, [...(owners.get(token) ?? []), source]);
+  }
+  return (entry: string) => {
+    const exact = sources.find((source) => source === entry);
+    if (exact) return exact;
+    const matched = owners.get(entry);
+    return matched?.length === 1 ? matched[0] : undefined;
+  };
+}
+
+const CITATION = /\[([^[\]]+)\]\s*$/;
+
 export function parseReply(text: string, sources: string[]) {
+  const match = sourceMatcher(sources);
   const answers: string[] = [];
   const notFound = new Set<string>();
   const trimmed = text.trim();
@@ -107,14 +140,45 @@ export function parseReply(text: string, sources: string[]) {
     if (missing) {
       const listed = (missing[1] ?? "").split(",").map((entry) => entry.replace(/[[\]*`_]/g, "").trim());
       for (const entry of listed) {
-        const match = sources.find((source) => source === entry) ?? sources.find((source) => entry && (source.includes(entry) || entry.includes(source)));
-        if (match) notFound.add(match);
+        const source = entry ? match(entry) : undefined;
+        if (source) notFound.add(source);
       }
       continue;
     }
-    answers.push(line.startsWith("- ") ? line : `- ${line.replace(/^[*•]\s*/, "")}`);
+    const answer = line.startsWith("- ") ? line : `- ${line.replace(/^[*•]\s*/, "")}`;
+    const cited = CITATION.exec(answer);
+    const source = cited ? match((cited[1] ?? "").replace(/[*`_]/g, "").trim()) : undefined;
+    answers.push(cited && source ? `${answer.slice(0, cited.index)}[${source}]` : answer);
   }
   return { answers, notFound: [...notFound] };
+}
+
+export function uniqueSources(documents: AskDocument[]) {
+  const seen = new Map<string, number>();
+  const taken = new Set(documents.map((document) => document.source));
+  return documents.map((document) => {
+    const count = (seen.get(document.source) ?? 0) + 1;
+    seen.set(document.source, count);
+    if (count === 1) return document;
+    let suffix = count;
+    while (taken.has(`${document.source}#${suffix}`)) suffix += 1;
+    const source = `${document.source}#${suffix}`;
+    taken.add(source);
+    return { source, text: document.text };
+  });
+}
+
+export function sourceNames(files: string[]) {
+  const bases = files.map((file) => path.basename(file));
+  if (new Set(bases).size === bases.length) return bases;
+  const folders = files.map((file) => path.dirname(path.resolve(file)).split(path.sep));
+  const common: string[] = [];
+  for (const [index, part] of (folders[0] ?? []).entries()) {
+    if (!folders.every((folder) => folder[index] === part)) break;
+    common.push(part);
+  }
+  const root = common.join(path.sep) || path.sep;
+  return files.map((file) => path.relative(root, path.resolve(file)));
 }
 
 export function totalUsage(results: BatchResult[]) {
@@ -136,14 +200,31 @@ export function describeUsage(usage: AskUsage) {
     .join(", ");
 }
 
-export async function askPages(adapter: AskAdapter, options: AskOptions) {
-  const documents = options.documents.map((document) => clipDocument(document, options.maxCharsPerPage));
+function failureReason(error: unknown, timeoutMs: number) {
+  if (error instanceof Error && error.name === "TimeoutError") return `no answer within ${timeoutMs} ms`;
+  const message = error instanceof Error ? error.message : String(error);
+  const line = message.split("\n")[0] ?? "";
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
+
+export async function askPages(adapter: AskAdapter, options: AskOptions): Promise<AskReport> {
+  const named = uniqueSources(options.documents);
+  const empty = named.filter((document) => !document.text.trim()).map((document) => document.source);
+  const clipped: AskReport["clipped"] = [];
+  const documents = named
+    .filter((document) => document.text.trim())
+    .map((document) => {
+      const kept = clipDocument(document, options.maxCharsPerPage);
+      if (kept !== document) clipped.push({ source: document.source, chars: document.text.length });
+      return kept;
+    });
   const batches = packBatches(documents, options.batchChars, options.maxPagesPerBatch);
   const results: BatchResult[] = new Array(batches.length);
   let cursor = 0;
+  let setupError: unknown;
 
   const worker = async () => {
-    while (cursor < batches.length) {
+    while (cursor < batches.length && !setupError) {
       const index = cursor;
       cursor += 1;
       const batch = batches[index] ?? [];
@@ -156,16 +237,22 @@ export async function askPages(adapter: AskAdapter, options: AskOptions) {
         const parsed = parseReply(reply.text, sources);
         results[index] = { index: index + 1, sources, ...parsed, usage: reply.usage, ms: Date.now() - started };
       } catch (error) {
-        const message = error instanceof Error && error.name === "TimeoutError" ? `no answer within ${options.timeoutMs} ms` : error instanceof Error ? error.message : String(error);
-        results[index] = { index: index + 1, sources, answers: [], notFound: [], error: message.split("\n")[0], ms: Date.now() - started };
+        if (error instanceof AskSetupError) setupError = error;
+        results[index] = { index: index + 1, sources, answers: [], notFound: [], error: failureReason(error, options.timeoutMs), ms: Date.now() - started };
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(options.concurrency, batches.length) }, worker));
-  return results;
+  if (setupError) throw setupError;
+  return { batches: results, empty, clipped };
 }
 
-export function renderAskResults(question: string, results: BatchResult[], adapter: string, model: string) {
+export function allBatchesFailed(report: AskReport) {
+  return report.batches.length > 0 && report.batches.every((batch) => batch.error);
+}
+
+export function renderAskResults(question: string, report: AskReport, adapter: string, model: string) {
+  const results = report.batches;
   const lines = [`Question: ${question}`, ""];
   for (const result of results) {
     if (result.error) continue;
@@ -174,6 +261,8 @@ export function renderAskResults(question: string, results: BatchResult[], adapt
   if (results.every((result) => result.error || result.answers.length === 0)) lines.push("No page had anything relevant.");
   const notFound = results.flatMap((result) => result.notFound);
   if (notFound.length) lines.push("", `Nothing relevant in: ${notFound.join(", ")}`);
+  if (report.empty.length) lines.push("", `Empty pages (not sent): ${report.empty.join(", ")}`);
+  if (report.clipped.length) lines.push("", `Clipped to their start and end: ${report.clipped.map((entry) => `${entry.source} (${entry.chars} chars)`).join(", ")}`);
   const failed = results.filter((result) => result.error);
   if (failed.length) {
     lines.push("", "Failed calls (their pages were not read):");
@@ -240,6 +329,13 @@ export function parseCliOutput(stdout: string) {
   return { text: parsed.result, usage: Object.keys(usage).length ? usage : undefined };
 }
 
+function missingCli(command: string) {
+  return new AskSetupError(
+    `The claude CLI was not found: ${command} is not on PATH or does not exist.`,
+    "Install Claude Code, or set WEB_AGENT_ASK_CLAUDE_COMMAND to the full path of the claude executable, then run `claude auth status` in a terminal to check it is signed in. WEB_AGENT_ASK_ADAPTER can point at an adapter module instead.",
+  );
+}
+
 export function claudeCliAdapter(command: string): AskAdapter {
   return {
     name: "claude CLI",
@@ -254,6 +350,7 @@ export function claudeCliAdapter(command: string): AskAdapter {
           child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
           child.on("error", (error) => {
             if (error.name === "AbortError") reject(signal.reason instanceof Error ? signal.reason : error);
+            else if ((error as NodeJS.ErrnoException).code === "ENOENT") reject(missingCli(command));
             else reject(new ToolError(`Could not run ${command}: ${error.message}`, "Install Claude Code, or point WEB_AGENT_ASK_ADAPTER at an adapter module."));
           });
           child.on("close", (code) => {
