@@ -347,7 +347,7 @@ test("a batch cut off at the output limit keeps its partial lines and is marked 
   assert.equal(report.batches.find((batch) => batch.sources.includes("short.md"))?.truncated, undefined);
   const text = renderAskResults("q", report, "limited", "m");
   assert.match(text, /^- first fact \[long\.md\]$/m);
-  assert.match(text, /call 1 \[long\.md\]: answer cut off at the output limit; raise max_output_tokens or lower batch_chars/);
+  assert.match(text, /call 1 \[long\.md\]: answer cut off at the output limit or the context window; raise max_output_tokens or lower batch_chars/);
 });
 
 test("an interrupted batch reports its partial answer separately from output cutoffs", async () => {

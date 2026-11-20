@@ -42,7 +42,6 @@ const MAX_RETRY_DELAY_MS = 60_000;
 const RETRY_JITTER_MS = 250;
 const RETRY_OUTPUT_TOKEN_LIMIT = 4_096;
 const RETRY_BASE_DELAY_MS = 500;
-const RETRY_MAX_BACKOFF_MS = 8_000;
 const REFRESH_WINDOW_MS = 5 * 60_000;
 const REFRESH_TIMEOUT_MS = 30_000;
 const REFRESH_RACE_WAIT_MS = 2_000;
@@ -50,6 +49,7 @@ const REFRESH_RACE_POLL_MS = 100;
 const REFRESH_LOCK_STALE_MS = 60_000;
 const STORAGE_LOCK_STALE_MS = 15_000;
 const SAVE_ATTEMPTS = 3;
+const IN_PLACE_SAVE_CODES = new Set(["EACCES", "EPERM", "EROFS", "EBUSY", "EXDEV"]);
 
 type ApiError = { type?: unknown; message?: unknown };
 type ClaudeCredentials = {
@@ -154,7 +154,7 @@ async function withRetries<T>(signal: AbortSignal, run: (attempt: number) => Pro
     } catch (error) {
       signal.throwIfAborted();
       if (!(error instanceof RetryableAnthropicError)) throw error;
-      const wait = error.retryAfterMs ?? Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_BACKOFF_MS);
+      const wait = error.retryAfterMs ?? RETRY_BASE_DELAY_MS * 2 ** attempt;
       if (wait > MAX_RETRY_DELAY_MS) {
         const failure = error.failure;
         const Failure = failure.constructor as typeof ToolError;
@@ -172,14 +172,13 @@ async function withRetries<T>(signal: AbortSignal, run: (attempt: number) => Pro
 
 async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: string; clientId: string }, scope: string | undefined, signal: AbortSignal) {
   const secrets = [tokens.accessToken, tokens.refreshToken];
-  const refreshToken = tokens.refreshToken;
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     redirect: "error",
     headers: { "content-type": "application/json", "user-agent": CLAUDE_CODE_USER_AGENT },
     body: JSON.stringify({
       grant_type: "refresh_token",
-      refresh_token: refreshToken,
+      refresh_token: tokens.refreshToken,
       client_id: tokens.clientId,
       ...(scope ? { scope } : {}),
     }),
@@ -198,8 +197,7 @@ async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: 
   } | undefined;
   if (!response.ok) {
     if (shouldRetry(response)) {
-      const failure = new ToolError(`Claude session refresh failed (HTTP ${response.status})${refreshErrorDetail(payload, secrets)}`);
-      throw new RetryableAnthropicError(failure, retryDelay(response));
+      throw new RetryableAnthropicError(new ToolError(refreshFailure(response.status, payload, secrets)), retryDelay(response));
     }
     return { response, payload };
   }
@@ -216,10 +214,10 @@ function refreshErrorCode(payload: { error?: unknown } | undefined) {
   return undefined;
 }
 
-function refreshErrorDetail(payload: { error?: unknown; error_description?: unknown } | undefined, secrets: string[]) {
+function refreshFailure(status: number, payload: { error?: unknown; error_description?: unknown } | undefined, secrets: string[]) {
   const type = refreshErrorCode(payload);
   const message = typeof payload?.error_description === "string" ? payload.error_description : undefined;
-  return errorDetail({ type, message }, secrets);
+  return `Claude session refresh failed (HTTP ${status})${errorDetail({ type, message }, secrets)}`;
 }
 
 function isExpiring(credentials: { expiresAt?: number }) {
@@ -267,7 +265,7 @@ async function acquireLock(lockPath: string, signal: AbortSignal, staleMs: numbe
   }
 }
 
-function withoutLockOnFsError(error: unknown) {
+function proceedWithoutLock(error: unknown) {
   if (errorCode(error) === undefined) throw error;
   return NO_LOCK;
 }
@@ -276,8 +274,13 @@ async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal,
   const configDir = path.dirname(credentialsPath);
   const legacyLockPath = `${await realpath(configDir).catch(() => configDir)}.lock`;
   while (true) {
-    const releaseLock = await acquireLock(path.join(configDir, ".oauth_refresh.lock"), signal, REFRESH_LOCK_STALE_MS);
-    const releaseLegacyLock = await tryLock(legacyLockPath, REFRESH_LOCK_STALE_MS).catch(withoutLockOnFsError);
+    const lockPath = path.join(configDir, ".oauth_refresh.lock");
+    const releaseLock = await acquireLock(lockPath, signal, REFRESH_LOCK_STALE_MS).catch((error: unknown) => {
+      const code = errorCode(error);
+      if (code === undefined || signal.aborted) throw error;
+      throw new ToolError(`Could not lock ${lockPath} to refresh the Claude session (${code}).`);
+    });
+    const releaseLegacyLock = await tryLock(legacyLockPath, REFRESH_LOCK_STALE_MS).catch(proceedWithoutLock);
     if (!releaseLegacyLock) {
       await releaseLock();
       await delay(REFRESH_RACE_POLL_MS, undefined, { signal });
@@ -294,7 +297,7 @@ async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal,
 
 async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number; scopes?: string[] }) {
   const releaseLock = await acquireLock(path.join(path.dirname(credentialsPath), ".storage-write.lock"), AbortSignal.timeout(REFRESH_TIMEOUT_MS), STORAGE_LOCK_STALE_MS)
-    .catch(withoutLockOnFsError);
+    .catch(proceedWithoutLock);
   try {
     await writeRefreshedTokens(credentialsPath, stale, tokens);
   } finally {
@@ -316,11 +319,24 @@ async function writeRefreshedTokens(credentialsPath: string, stale: { accessToke
     await delay(REFRESH_RACE_POLL_MS);
   }
   try {
-    await replaceFile(target, content).catch(() => writeFile(target, content, { mode: 0o600 }));
+    await replaceFile(target, content).catch((error: unknown) => {
+      if (!IN_PLACE_SAVE_CODES.has(errorCode(error) ?? "")) throw error;
+      return overwriteFile(target, content);
+    });
   } catch (error) {
     const reason = errorCode(error) ?? (error instanceof Error ? error.message : String(error));
     logEvent("claude_session_save_failed", { path: target, error: reason }, "warn");
     throw new ToolError(`Could not save the refreshed Claude session to ${target} (${reason}).`, SIGN_IN);
+  }
+}
+
+async function overwriteFile(target: string, content: string) {
+  const previous = await readFile(target, "utf8");
+  try {
+    await writeFile(target, content);
+  } catch (error) {
+    await writeFile(target, previous).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -347,7 +363,7 @@ function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, de
     let answer = await refresh([...new Set([...OAUTH_SCOPES, ...credentials.scopes])].join(" "));
     if (!answer.response.ok && refreshErrorCode(answer.payload) === "invalid_scope") answer = await refresh(storedScopes);
     if (!answer.response.ok) {
-      const failure = `Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`;
+      const failure = refreshFailure(answer.response.status, answer.payload, [tokens.accessToken, tokens.refreshToken]);
       if (refreshErrorCode(answer.payload) !== "invalid_grant") throw new ToolError(failure);
       if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
       deadRefreshTokens.add(tokens.refreshToken);
@@ -489,6 +505,9 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
     if (!text.trim() && stopReason === "max_tokens") {
       throw new ToolError("Anthropic Messages reached max_tokens before producing text. Raise max_output_tokens.");
     }
+    if (!text.trim() && stopReason === "model_context_window_exceeded") {
+      throw new ToolError("Anthropic Messages stopped with model_context_window_exceeded before producing text.");
+    }
     if (!text.trim() && stopReason !== "refusal") {
       throw new ToolError("Anthropic Messages returned no text.");
     }
@@ -548,12 +567,9 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
     const partial = text.trim().length > 0;
     const timedOut = signal.reason instanceof Error && signal.reason.name === "TimeoutError";
     if (stopReason !== undefined && (error instanceof RetryableAnthropicError || timedOut)) return finish();
-    if (partial && timedOut) {
-      return { text, usage, stopReason: stopReason === "refusal" ? stopReason : "interrupted" };
-    }
+    if (partial && timedOut) return { text, usage, stopReason: "interrupted" };
     signal.throwIfAborted();
     if (!(error instanceof RetryableAnthropicError)) throw error;
-    if (stopReason === "refusal") return { text, usage, stopReason };
     if (partial) return { text, usage, stopReason: "interrupted" };
     const outputTokens = usage.output_tokens ?? 0;
     if (outputTokens >= RETRY_OUTPUT_TOKEN_LIMIT) {
@@ -609,22 +625,24 @@ function completeMessage(body: string, token: string, sessionId: string, signal:
 const inFlightRefreshes = new Set<Promise<unknown>>();
 
 export async function settleClaudeRefreshes() {
-  await Promise.allSettled([...inFlightRefreshes]);
+  while (inFlightRefreshes.size) await Promise.allSettled([...inFlightRefreshes]);
 }
 
-async function readGlobalAccountUuid(globalConfigPath: string) {
-  try {
-    const config = JSON.parse(await readFile(globalConfigPath, "utf8")) as { oauthAccount?: { accountUuid?: unknown } } | null;
-    const uuid = config?.oauthAccount?.accountUuid;
-    return typeof uuid === "string" && uuid ? uuid : undefined;
-  } catch {
-    return undefined;
+async function readGlobalAccountUuid(configPaths: string[]) {
+  for (const configPath of configPaths) {
+    try {
+      const config = JSON.parse(await readFile(configPath, "utf8")) as { oauthAccount?: { accountUuid?: unknown } } | null;
+      const uuid = config?.oauthAccount?.accountUuid;
+      if (typeof uuid === "string" && uuid) return uuid;
+    } catch {}
   }
+  return undefined;
 }
 
 export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude")): AskAdapter {
   const credentialsPath = path.join(configDir, ".credentials.json");
-  const globalConfigPath = path.join(configDir === path.join(homedir(), ".claude") ? homedir() : configDir, ".claude.json");
+  const globalConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim() || configDir !== path.join(homedir(), ".claude") ? configDir : homedir();
+  const globalConfigPaths = [path.join(configDir, ".config.json"), path.join(globalConfigDir, ".claude.json")];
   const sessionId = randomUUID();
   const localDeviceId = deviceId();
   let profile: { token: string; uuid: Promise<string> } | undefined;
@@ -664,7 +682,7 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
     name: "Anthropic Claude account",
     async complete({ system, prompt, model, maxTokens, images, signal }) {
       const send = async (credentials: Awaited<ReturnType<typeof readCredentials>>) => {
-        const accountUuid = credentials.accountUuid ?? await readGlobalAccountUuid(globalConfigPath) ?? await accountUuidFor(credentials.accessToken, signal);
+        const accountUuid = credentials.accountUuid ?? await readGlobalAccountUuid(globalConfigPaths) ?? await accountUuidFor(credentials.accessToken, signal);
         const body = JSON.stringify({
           model: modelId(model),
           max_tokens: maxTokens,

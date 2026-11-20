@@ -110,7 +110,7 @@ async function main() {
     return;
   }
 
-  const shutdown = () => void Promise.allSettled([deps.manager.shutdown(), settleClaudeRefreshes()]).finally(() => process.exit(0));
+  const shutdown = () => void deps.manager.shutdown().catch(() => undefined).then(settleClaudeRefreshes).finally(() => process.exit(0));
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, shutdown);
   await createServer(config, deps).connect(new StdioServerTransport());
   console.error("web-agent-mcp running on stdio");

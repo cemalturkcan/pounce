@@ -49,7 +49,7 @@ export type CompareReport = {
   diffRatio: number;
   regions: ComparedRegion[];
   missing?: Finding[];
-  model?: { id: string; adapter: string; calls: number; usage?: Record<string, number>; overviewError?: string; setupError?: string; images: string };
+  model?: { id: string; adapter: string; calls: number; usage?: Record<string, number>; overviewError?: string; overviewTruncated?: boolean; setupError?: string; images: string };
   files: { dir: string; screenshot: string; diff: string; report: string };
   text: string;
 };
@@ -183,7 +183,8 @@ function findingLine(finding: Finding) {
 
 function regionLine(region: ComparedRegion, deviceScaleFactor: number) {
   const css = deviceScaleFactor === 1 ? "" : ` (CSS ${Math.round(region.x / deviceScaleFactor)},${Math.round(region.y / deviceScaleFactor)} ${Math.round(region.width / deviceScaleFactor)}x${Math.round(region.height / deviceScaleFactor)})`;
-  const head = `${region.id} x ${region.x} y ${region.y}, ${region.width}x${region.height} px${css}, ${Math.round(region.mismatch * 100)}% differ`;
+  const cutOff = region.truncated ? " (model answer cut off, findings may be incomplete)" : "";
+  const head = `${region.id} x ${region.x} y ${region.y}, ${region.width}x${region.height} px${css}, ${Math.round(region.mismatch * 100)}% differ${cutOff}`;
   if (region.findings?.length) return [`${head}: ${findingLine(region.findings[0] as Finding)}`, ...region.findings.slice(1).map((finding) => `   ${findingLine(finding)}`)];
   if (region.same) return [`${head}: the model saw no real difference (likely rendering noise)`];
   if (region.modelError) return [`${head}: pixel difference only (model call failed: ${region.modelError})`];
@@ -212,6 +213,7 @@ export function renderReport(report: Omit<CompareReport, "text">, modelNote?: st
     const usage = report.model.usage ? describeUsage(report.model.usage) : "not reported";
     lines.push("", `Model: ${report.model.id} through ${report.model.adapter}, ${report.model.calls} call(s). Usage: ${usage}.`, report.model.images);
     if (report.model.overviewError) lines.push(`The whole-image check failed: ${report.model.overviewError}`);
+    if (report.model.overviewTruncated) lines.push("The whole-image check was cut off; its list may be incomplete.");
   }
   if (modelNote) lines.push("", modelNote);
   lines.push("", `Diff image: ${report.files.diff}`, `Screenshot: ${report.files.screenshot}`, `Report JSON: ${report.files.report}`);
@@ -301,7 +303,7 @@ export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: 
         if (verdict.truncated) target.truncated = true;
       }
       missing = outcome.result.overview?.findings;
-      model = { id: outcome.id, adapter: outcome.adapter, calls: outcome.result.calls, usage: outcome.result.usage, overviewError: outcome.result.overview?.error, setupError: outcome.result.setupError, images: describeSent(outcome.result.sent) };
+      model = { id: outcome.id, adapter: outcome.adapter, calls: outcome.result.calls, usage: outcome.result.usage, overviewError: outcome.result.overview?.error, ...(outcome.result.overview?.truncated ? { overviewTruncated: true } : {}), setupError: outcome.result.setupError, images: describeSent(outcome.result.sent) };
     }
   }
   if (regions.length > maxRegions && (options.model ?? "haiku") !== "none") notes.push(`The model looked at the ${maxRegions} largest region(s); raise max_regions to describe more.`);

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { anthropicAskAdapter, settleClaudeRefreshes } from "./ask-anthropic.ts";
-import { AskSetupError } from "./ask.ts";
+import { AskSetupError, exceedsContextWindow } from "./ask.ts";
 import { ToolError } from "./errors.ts";
 
 const input = {
@@ -241,7 +241,7 @@ test("Anthropic adapter stops waiting for a shared refresh when its call is abor
   const controller = new AbortController();
   const hanging: Array<(error: Error) => void> = [];
   t.after(() => hanging.forEach((reject) => reject(new Error("test finished"))));
-  t.mock.method(globalThis, "fetch", (url: string, request?: RequestInit) => new Promise((_, reject) => {
+  t.mock.method(globalThis, "fetch", (_url: string, request?: RequestInit) => new Promise((_, reject) => {
     hanging.push(reject);
     request?.signal?.addEventListener("abort", () => reject(request.signal?.reason), { once: true });
     controller.abort(new Error("caller cancelled"));
@@ -777,6 +777,91 @@ test("Anthropic adapter reports an unreadable credentials file as a call failure
   } finally {
     await chmod(credentialsPath, 0o600);
   }
+});
+
+test("Anthropic adapter reports a config dir it cannot lock as a call failure", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const dir = path.dirname(credentialsPath);
+  await chmod(dir, 0o555);
+  t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  try {
+    await assert.rejects(adapter.complete(input), (error: unknown) => {
+      assert.ok(error instanceof ToolError, String(error));
+      return true;
+    });
+  } finally {
+    await chmod(dir, 0o755);
+  }
+});
+
+test("Anthropic adapter reads the global config inside an explicit CLAUDE_CONFIG_DIR", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "web-agent-ask-home-"));
+  const saved = { HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+  t.after(async () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(home, { recursive: true, force: true });
+  });
+  const configDir = path.join(home, ".claude");
+  await mkdir(configDir);
+  process.env.HOME = home;
+  process.env.CLAUDE_CONFIG_DIR = configDir;
+  await writeFile(path.join(configDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", expiresAt: Date.now() + 60 * 60_000 } }));
+  await writeFile(path.join(configDir, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "inner-account" } }));
+  await writeFile(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "home-account" } }));
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  await anthropicAskAdapter().complete(input);
+  assert.equal(JSON.parse(JSON.parse(String(fetch.mock.calls[0]?.arguments[1]?.body)).metadata.user_id).account_uuid, "inner-account");
+});
+
+test("Anthropic adapter prefers Claude Code's legacy .config.json for the account UUID", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60 * 60_000, null);
+  const dir = path.dirname(credentialsPath);
+  await writeFile(path.join(dir, ".config.json"), JSON.stringify({ oauthAccount: { accountUuid: "legacy-account" } }));
+  await writeFile(path.join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: "config-account" } }));
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  await adapter.complete(input);
+  assert.equal(JSON.parse(JSON.parse(String(fetch.mock.calls[0]?.arguments[1]?.body)).metadata.user_id).account_uuid, "legacy-account");
+});
+
+test("Anthropic reports an empty reply stopped at the context window as a context overflow", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(globalThis, "fetch", async () => eventStream([
+    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
+    { type: "message_delta", delta: { stop_reason: "model_context_window_exceeded" }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ]));
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(exceedsContextWindow(error), String(error));
+    return true;
+  });
+});
+
+test("settleClaudeRefreshes also waits for a refresh that starts while it is waiting", async (t) => {
+  const first = await credentialFixture(t);
+  const second = await credentialFixture(t);
+  await first.writeSession("a-access", Date.now() - 1, "account-test", "a-refresh");
+  await second.writeSession("b-access", Date.now() - 1, "account-test", "b-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const prefix = String(JSON.parse(String(request?.body)).refresh_token).slice(0, 1);
+      return Response.json({ access_token: `${prefix}-new-access`, refresh_token: `${prefix}-new-refresh`, expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  const calls = [first.adapter.complete(input)];
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const settled = settleClaudeRefreshes();
+  setTimeout(() => calls.push(second.adapter.complete(input)), 100);
+  await settled;
+  assert.equal(JSON.parse(await readFile(second.credentialsPath, "utf8")).claudeAiOauth.refreshToken, "b-new-refresh");
+  await Promise.all(calls);
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {

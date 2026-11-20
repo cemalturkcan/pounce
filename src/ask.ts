@@ -13,7 +13,7 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 export const DEFAULT_BATCH_CHARS = 3_000_000;
 export const IMAGE_CHARS = 6000;
 export const MAX_IMAGES_PER_CALL = 100;
-export const TRUNCATED_NOTE = "answer cut off at the output limit; raise max_output_tokens or lower batch_chars";
+export const TRUNCATED_NOTE = "answer cut off at the output limit or the context window; raise max_output_tokens or lower batch_chars";
 
 const MODEL_IDS: Record<string, string> = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
 
@@ -339,16 +339,16 @@ const CONTEXT_OVERFLOW = /prompt is too long|exceeds? (?:the )?(?:model'?s? )?co
 
 export function exceedsContextWindow(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /\binvalid_request_error\b/.test(message) && CONTEXT_OVERFLOW.test(message);
+  return /\bmodel_context_window_exceeded\b/.test(message) || (/\binvalid_request_error\b/.test(message) && CONTEXT_OVERFLOW.test(message));
 }
 
 export const TOO_LARGE_FOR_CONTEXT = "the page does not fit the model's context window on its own";
 
-export function exceedsRequestSize(error: unknown) {
+function exceedsRequestSize(error: unknown) {
   return /\brequest_too_large\b|\bHTTP 413\b/.test(error instanceof Error ? error.message : String(error));
 }
 
-export const TOO_LARGE_FOR_REQUEST = "the page is too large for one request on its own";
+const TOO_LARGE_FOR_REQUEST = "the page is too large for one request on its own";
 
 function callSignal(options: AskOptions) {
   const signals = [...(options.timeoutMs === undefined ? [] : [AbortSignal.timeout(options.timeoutMs)]), ...(options.signal ? [options.signal] : [])];
