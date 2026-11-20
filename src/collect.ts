@@ -1,14 +1,20 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runPool, TIMED_OUT, withDeadline } from "./async.ts";
+import { type BodyType, classifyBody, extractPdfText, fetchBody, isDownloadError, isTextKind } from "./body.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { describeError } from "./errors.ts";
 import { extractPage, summarizeStructured } from "./extract.ts";
 import { pageMarkdown } from "./markdown.ts";
 import { slugify, timestampSlug, type OutputStore } from "./output.ts";
+import { waitForContent } from "./settle.ts";
 import { pageLinks, pageText, pageTitle, rawSnapshot, sleep } from "./page.ts";
 
 export type CollectPart = "text" | "markdown" | "links" | "snapshot" | "screenshot" | "structured";
+
+export type ScrollInput = { maxSteps: number; stepPx?: number; idleMs: number };
+
+export type ScrollOutcome = { steps: number; height: number; capped: boolean };
 
 export type CollectInput = {
   urls: string[];
@@ -17,9 +23,11 @@ export type CollectInput = {
   concurrency: number;
   waitUntil: "commit" | "domcontentloaded" | "load";
   settleMs: number;
+  maxWaitMs: number;
   timeoutMs: number;
   fullPage: boolean;
   previewChars: number;
+  scroll?: ScrollInput;
   label?: string;
   signal?: AbortSignal;
 };
@@ -30,6 +38,11 @@ export type CollectedPage = {
   finalUrl?: string;
   status?: number;
   title?: string;
+  type?: string;
+  bytes?: number;
+  note?: string;
+  scrolled?: ScrollOutcome;
+  unsettledMs?: number;
   chars?: number;
   links?: number;
   files: string[];
@@ -39,6 +52,7 @@ export type CollectedPage = {
 };
 
 const LINK_LIMIT = 500;
+const SCROLL_PROBE_MS = 2000;
 const CLOSE_GRACE_MS = 5000;
 
 const HOST_PORT = /^(\[[0-9a-f:.]+\]|[a-z0-9-]+(\.[a-z0-9-]+)*):\d{1,5}(?=$|[/?#])/i;
@@ -61,7 +75,7 @@ export function normalizeUrl(url: string) {
 
 async function collectOne(
   manager: BrowserManager,
-  owner: string,
+  openTab: () => Promise<Tab>,
   dir: string,
   input: CollectInput,
   url: string,
@@ -69,10 +83,10 @@ async function collectOne(
 ): Promise<CollectedPage> {
   const base = `${String(index + 1).padStart(2, "0")}-${slugify(url)}`;
   const result: CollectedPage = { index: index + 1, url, files: [] };
-  const tab = await manager.openTab(owner);
+  const tab = await openTab();
 
   try {
-    const limit = 2 * input.timeoutMs + input.settleMs;
+    const limit = 2 * input.timeoutMs + input.settleMs + (input.scroll ? input.scroll.maxSteps * (input.scroll.idleMs + SCROLL_PROBE_MS) : 0);
     const outcome = await withDeadline(saveOne(manager, tab, dir, input, url, base, result), limit);
     if (outcome === TIMED_OUT) result.error = `timed out after ${limit} ms; the page did not load or did not answer while its content was saved`;
   } catch (error) {
@@ -93,8 +107,26 @@ async function saveOne(
   result: CollectedPage,
 ) {
   const { page } = tab;
-  const response = await page.goto(url, { waitUntil: input.waitUntil, timeout: input.timeoutMs });
-  if (input.settleMs > 0) await sleep(input.settleMs);
+  let response;
+  try {
+    response = await page.goto(url, { waitUntil: input.waitUntil, timeout: input.timeoutMs });
+  } catch (error) {
+    if (!isDownloadError(error)) throw error;
+    const fetched = await fetchBody(page.context(), url, input.timeoutMs);
+    result.status = fetched.status;
+    result.finalUrl = fetched.url;
+    return saveBody(dir, base, classifyBody(fetched.contentType, fetched.url), fetched.body, input, result);
+  }
+  const bodyType = classifyBody(response?.headers()["content-type"], page.url());
+  if (response && bodyType.kind !== "html") {
+    result.status = response.status();
+    result.finalUrl = response.url();
+    const body = bodyType.kind === "pdf" ? (await fetchBody(page.context(), response.url(), input.timeoutMs)).body : await response.body();
+    return saveBody(dir, base, bodyType, body, input, result);
+  }
+  const settle = await waitForContent(page, { quietMs: input.settleMs, maxWaitMs: Math.min(input.maxWaitMs, input.timeoutMs) });
+  if (!settle.settled && !settle.unresponsive) result.unsettledMs = settle.ms;
+  if (input.scroll) result.scrolled = await autoScroll(page, input.scroll);
   result.status = response?.status();
   result.finalUrl = page.url();
   result.title = await pageTitle(page);
@@ -140,10 +172,68 @@ async function saveOne(
   }
 }
 
+function scrollStep(stepPx: number | null) {
+  window.scrollBy(0, stepPx ?? Math.max(200, Math.floor(window.innerHeight * 0.9)));
+  const root = document.scrollingElement ?? document.documentElement;
+  return { height: root.scrollHeight, bottom: window.scrollY + window.innerHeight >= root.scrollHeight - 2 };
+}
+
+function pageHeight() {
+  return (document.scrollingElement ?? document.documentElement).scrollHeight;
+}
+
+async function probe<T>(promise: Promise<T>) {
+  const value = await withDeadline(promise, SCROLL_PROBE_MS);
+  if (value === TIMED_OUT) throw new Error(`the page did not answer within ${SCROLL_PROBE_MS} ms while scrolling`);
+  return value;
+}
+
+export async function autoScroll(page: Tab["page"], scroll: ScrollInput): Promise<ScrollOutcome> {
+  let height = await probe(page.evaluate(pageHeight));
+  for (let step = 1; step <= scroll.maxSteps; step += 1) {
+    const moved = await probe(page.evaluate(scrollStep, scroll.stepPx ?? null));
+    await sleep(scroll.idleMs);
+    const grown = await probe(page.evaluate(pageHeight));
+    const grew = grown > height || moved.height > height;
+    height = Math.max(grown, moved.height);
+    if (moved.bottom && !grew) return { steps: step, height, capped: false };
+  }
+  return { steps: scroll.maxSteps, height, capped: true };
+}
+
+function keepText(result: CollectedPage, text: string, previewChars: number) {
+  result.chars = text.length;
+  result.preview = text.slice(0, previewChars).replace(/\s+/g, " ");
+}
+
+async function saveBody(dir: string, base: string, type: BodyType, body: Buffer, input: CollectInput, result: CollectedPage) {
+  result.type = type.mime;
+  result.bytes = body.length;
+  const raw = `${base}.${type.extension}`;
+  await writeFile(path.join(dir, raw), body);
+  result.files.push(raw);
+  if (isTextKind(type.kind)) keepText(result, body.toString("utf8"), input.previewChars);
+  if (type.kind !== "pdf") return;
+  const extracted = await extractPdfText(path.join(dir, raw));
+  if (extracted.text === undefined) {
+    result.note = extracted.unavailable;
+    return;
+  }
+  await writeFile(path.join(dir, `${base}.txt`), extracted.text);
+  result.files.push(`${base}.txt`);
+  keepText(result, extracted.text, input.previewChars);
+}
+
 export async function collectPages(manager: BrowserManager, store: OutputStore, owner: string, input: CollectInput) {
   const dir = await store.dir("collect", `${timestampSlug()}-${slugify(input.label ?? "pages", 40)}`);
   const urls = input.urls.map(normalizeUrl);
-  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, owner, dir, input, url, index), input.signal);
+  let opening: Promise<unknown> = Promise.resolve();
+  const openTab = () => {
+    const next = opening.then(() => manager.openTab(owner));
+    opening = next.catch(() => undefined);
+    return next;
+  };
+  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, openTab, dir, input, url, index), input.signal);
   const results = collected.map((result, index): CollectedPage => result ?? { index: index + 1, url: urls[index] ?? "", files: [], error: "not started: the call was cancelled" });
 
   await writeFile(path.join(dir, "index.json"), JSON.stringify(results, null, 2));
@@ -154,7 +244,7 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
   const failed = results.filter((result) => result.error).length;
   const lines = [
     `Collected ${results.length - failed} of ${results.length} pages into ${dir}`,
-    "Each line: number, HTTP status, final URL, title, text length, files. Read or grep the files for the content; index.json has the same list.",
+    "Each line: number, HTTP status, final URL, title (or [content type] for PDFs, JSON, images and other files, which are saved as they are), text length, files. Read or grep the files for the content; index.json has the same list.",
   ];
   for (const result of results) {
     const number = String(result.index).padStart(2, "0");
@@ -162,8 +252,15 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
       lines.push(`${number} FAILED ${result.url} — ${result.error}`);
       continue;
     }
-    const size = result.chars === undefined ? "" : ` ${result.chars} chars`;
-    lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} "${result.title ?? ""}"${size} → ${result.files.join(", ")}`);
+    const size = result.chars !== undefined ? ` ${result.chars} chars` : result.bytes !== undefined ? ` ${result.bytes} bytes` : "";
+    const label = result.type ? `[${result.type}]` : `"${result.title ?? ""}"`;
+    lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} ${label}${size} → ${result.files.join(", ")}`);
+    if (result.note) lines.push(`   ${result.note}`);
+    if (result.unsettledMs !== undefined) lines.push(`   content still changing after ${Math.round(result.unsettledMs / 1000)} s; saved as it was then`);
+    if (result.scrolled) {
+      const { steps, height, capped } = result.scrolled;
+      lines.push(`   scrolled ${steps} step${steps === 1 ? "" : "s"}${capped ? " (max_steps reached)" : ""}, page height ${height}px`);
+    }
     if (result.data) lines.push(`   ${result.data}`);
     if (result.preview) lines.push(`   ${result.preview}`);
   }

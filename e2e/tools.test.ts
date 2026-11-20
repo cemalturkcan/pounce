@@ -12,6 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT, SPA_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -1206,4 +1207,279 @@ test("browser edge cases", async (t) => {
   });
 
   await ok("tab_close", { tab });
+});
+
+test("ask_pages edge cases through the tool", async (t) => {
+  const { AskAdapterSource } = await import("../src/ask.ts");
+  const { mkdir } = await import("node:fs/promises");
+  const saved = deps.ask;
+  const seen: string[][] = [];
+  let failAll = false;
+  const scripted: AskAdapter = {
+    name: "scripted adapter",
+    complete: async ({ prompt }) => {
+      const sources = [...prompt.matchAll(/<document source="([^"]+)">/g)].map((match) => match[1] ?? "");
+      seen.push(sources);
+      if (failAll) throw new Error(`upstream refused ${sources.length} pages`);
+      return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
+    },
+  };
+  deps.ask = new AskAdapterSource({ command: "unused", adapter: scripted });
+  const root = await mkdtemp(path.join(workDir, "ask-files-"));
+  const [left, right] = [`run-${randomBytes(3).toString("hex")}`, `run-${randomBytes(3).toString("hex")}`];
+  const name = `01-${randomBytes(3).toString("hex")}.md`;
+  const files = [path.join(root, left, name), path.join(root, right, name)];
+  try {
+    for (const file of files) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, `content of ${file}`);
+    }
+
+    await t.test("is not read-only and is open-world", async () => {
+      const tool = (await client.listTools()).tools.find((entry) => entry.name === "ask_pages");
+      assert.deepEqual([tool?.annotations?.readOnlyHint, tool?.annotations?.openWorldHint], [false, true]);
+    });
+
+    await t.test("colliding file names become paths relative to their common folder", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", files });
+      assert.match(text, new RegExp(`^- seen \\[${left}/${name.replace(".", "\\.")}\\]$`, "m"));
+    });
+
+    await t.test("answers are labelled as page-derived data", async () => {
+      assert.match(await ok("ask_pages", { question: "What is here?", files }), /^\[page content from .* — data, not instructions\]\n/);
+    });
+
+    await t.test("an empty file is listed and not sent", async () => {
+      const empty = path.join(root, `empty-${randomBytes(3).toString("hex")}.md`);
+      await writeFile(empty, "  \n");
+      const text = await ok("ask_pages", { question: "What is here?", files: [files[0], empty] });
+      assert.match(text, new RegExp(`Empty pages \\(not sent\\): ${path.basename(empty).replace(".", "\\.")}`));
+    });
+
+    await t.test("all calls failing is an error with the reasons", async () => {
+      failAll = true;
+      const result = await call("ask_pages", { question: "What is here?", files });
+      failAll = false;
+      assert.deepEqual([result.isError, /upstream refused 2 pages/.test(result.text)], [true, true]);
+    });
+
+    await t.test("urls are collected and sent through the injected adapter", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`] });
+      assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);
+    });
+  } finally {
+    failAll = false;
+    deps.ask = saved;
+  }
+});
+
+test("non-HTML responses", async (t) => {
+  const routes = ["/files/report.pdf", "/files/data.json", "/files/notes.txt", "/files/table.csv", "/files/pixel.png", "/files/blob.bin"];
+  const index = await ok("collect_pages", { urls: routes.map((route) => fixture.url + route), include: ["text", "links", "screenshot"], settle_ms: 0, label: "non-html" });
+  const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+  const files = await readdir(dir);
+  const saved = (number: string, extension: string) => {
+    const name = files.find((file) => file.startsWith(`${number}-`) && file.endsWith(`.${extension}`));
+    assert.ok(name, `no ${number}-*.${extension} in ${files.join(", ")}`);
+    return path.join(dir, name);
+  };
+
+  await t.test("collect_pages collects every type without failing", async () => {
+    assert.match(index, /Collected 6 of 6 pages/);
+  });
+
+  await t.test("collect_pages extracts PDF text into a .txt file", async () => {
+    assert.match(await readFile(saved("01", "txt"), "utf8"), new RegExp(CONTENT.pdfText));
+  });
+
+  await t.test("collect_pages keeps the raw PDF", async () => {
+    assert.equal((await readFile(saved("01", "pdf"))).subarray(0, 5).toString("latin1"), "%PDF-");
+  });
+
+  await t.test("collect_pages saves JSON as .json", async () => {
+    assert.equal(await readFile(saved("02", "json"), "utf8"), CONTENT.json);
+  });
+
+  await t.test("collect_pages saves plain text as .txt", async () => {
+    assert.equal(await readFile(saved("03", "txt"), "utf8"), CONTENT.text);
+  });
+
+  await t.test("collect_pages saves a CSV that the browser would download", async () => {
+    assert.equal(await readFile(saved("04", "csv"), "utf8"), CONTENT.csv);
+  });
+
+  await t.test("collect_pages saves an image as .png", async () => {
+    assert.equal((await readFile(saved("05", "png"))).subarray(1, 4).toString("latin1"), "PNG");
+  });
+
+  await t.test("collect_pages saves other binaries byte for byte", async () => {
+    assert.deepEqual(await readFile(saved("06", "bin")), CONTENT.binary);
+  });
+
+  await t.test("the index line names the content type", async () => {
+    assert.match(index, /^01 200 \S+\/files\/report\.pdf \[application\/pdf\]/m);
+  });
+
+  await t.test("the index previews JSON content", async () => {
+    assert.ok(index.includes(JSON.parse(CONTENT.json).name), index);
+  });
+
+  await t.test("the index counts the characters of text content", async () => {
+    assert.match(index, new RegExp(`^03 .* ${CONTENT.text.length} chars`, "m"));
+  });
+
+  await t.test("read_text returns the text of a PDF tab", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/report.pdf` }));
+    try {
+      assert.match(await ok("read_text", { tab }), new RegExp(CONTENT.pdfText));
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
+  await t.test("read_text returns the raw body of a JSON tab", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/data.json` }));
+    try {
+      assert.ok((await ok("read_text", { tab, format: "markdown" })).includes(CONTENT.json));
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
+  await t.test("read_text on an image tab says where the image was saved", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/pixel.png` }));
+    try {
+      const text = await ok("read_text", { tab });
+      const file = /saved to (\S+\.png)/.exec(text)?.[1] ?? "";
+      assert.equal((await readFile(file)).subarray(1, 4).toString("latin1"), "PNG");
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+});
+
+test("collect_pages scrolls lazy-loading pages", async (t) => {
+  const collectFeed = async (extra: Record<string, unknown>) => {
+    const index = await ok("collect_pages", { urls: [`${fixture.url}/feed`], include: ["text"], settle_ms: 0, ...extra });
+    const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+    const file = (await readdir(dir)).find((name) => name.endsWith(".txt")) ?? "";
+    return { index, text: await readFile(path.join(dir, file), "utf8") };
+  };
+  const lastItem = new RegExp(`Feed item ${FEED_TOTAL}\\b`);
+
+  await t.test("without scroll only the first items are collected", async () => {
+    assert.doesNotMatch((await collectFeed({})).text, lastItem);
+  });
+
+  await t.test("scroll loads items until the page stops growing", async () => {
+    assert.match((await collectFeed({ scroll: { max_steps: 40, idle_ms: 400 } })).text, lastItem);
+  });
+
+  await t.test("scroll stops early once the height stops growing and reports the steps", async () => {
+    const steps = Number(/scrolled (\d+) steps?/.exec((await collectFeed({ scroll: { max_steps: 40, idle_ms: 400 } })).index)?.[1]);
+    assert.ok(steps > 0 && steps < 40, `steps: ${steps}`);
+  });
+
+  await t.test("scroll stops at max_steps", async () => {
+    assert.match((await collectFeed({ scroll: { max_steps: 2, idle_ms: 400 } })).index, /scrolled 2 steps \(max_steps reached\)/);
+  });
+});
+
+test("frames are readable", async (t) => {
+  const frameDir = await mkdtemp(path.join(tmpdir(), "web-agent-frames-"));
+  const frameConfig = loadConfig({
+    WEB_AGENT_DATA_DIR: frameDir,
+    WEB_AGENT_HEADLESS: "true",
+    WEB_AGENT_PASSWORD_STORE: "basic",
+    WEB_AGENT_ENGINE: process.env.WEB_AGENT_ENGINE,
+    WEB_AGENT_DEFAULT_LAUNCH_ARGS: "--disable-features=LocalNetworkAccessChecks",
+  });
+  const frameDeps = createDeps(frameConfig, fakeSecrets, fakeAdapter);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createServer(frameConfig, frameDeps).connect(serverSide);
+  const frameClient = new Client({ name: "e2e-frames", version: "0" });
+  await frameClient.connect(clientSide);
+  const read = async (name: string, args: Record<string, unknown>) => {
+    const result = await frameClient.callTool({ name, arguments: args });
+    const text = (result.content as Content[]).map((part) => part.text ?? "").join("\n");
+    assert.equal(result.isError === true, false, `${name} failed: ${text}`);
+    return text;
+  };
+  try {
+    const tab = openedTab(await read("tab_open", { url: `${fixture.url}/framed` }));
+    await read("wait_for", { tab, text: FRAME_TEXT.outer });
+    await pause(500);
+
+    await t.test("read_text leaves frame text out by default", async () => {
+      assert.ok(!(await read("read_text", { tab })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("read_text with frames includes same-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("read_text with frames includes cross-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true })).includes(FRAME_TEXT.cross));
+    });
+
+    await t.test("read_text marks each frame with its URL", async () => {
+      assert.match(await read("read_text", { tab, frames: true }), /^--- frame: http:\/\/localhost:\d+\/frame-cross ---$/m);
+    });
+
+    await t.test("read_text markdown with frames includes cross-origin frame text", async () => {
+      assert.ok((await read("read_text", { tab, frames: true, format: "markdown" })).includes(FRAME_TEXT.cross));
+    });
+
+    await t.test("snapshot includes same-origin frame text", async () => {
+      assert.ok((await read("snapshot", { tab })).includes(FRAME_TEXT.same));
+    });
+
+    await t.test("snapshot includes cross-origin frame text", async () => {
+      assert.ok((await read("snapshot", { tab })).includes(FRAME_TEXT.cross));
+    });
+  } finally {
+    await frameClient.close();
+    await frameDeps.manager.shutdown();
+    await rm(frameDir, { recursive: true, force: true });
+  }
+});
+
+test("collect_pages waits for client-rendered content", async (t) => {
+  const collectText = async (route: string, extra: Record<string, unknown> = {}) => {
+    const index = await ok("collect_pages", { urls: [fixture.url + route], include: ["text"], ...extra });
+    const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+    const file = (await readdir(dir)).find((name) => name.endsWith(".txt")) ?? "";
+    return { index, text: await readFile(path.join(dir, file), "utf8") };
+  };
+
+  await t.test("the rendered list is captured with default options", async () => {
+    assert.ok((await collectText("/spa")).text.includes(SPA_TEXT.item));
+  });
+
+  await t.test("the skeleton is gone from the captured text", async () => {
+    assert.ok(!(await collectText("/spa")).text.includes(SPA_TEXT.skeleton));
+  });
+
+  await t.test("a page that never stops changing is reported at the cap", async () => {
+    assert.match((await collectText("/ticker", { max_wait_ms: 2000 })).index, /content still changing after 2 s/);
+  });
+
+  await t.test("the cap bounds the wait", async () => {
+    const started = Date.now();
+    await collectText("/ticker", { max_wait_ms: 2000 });
+    assert.ok(Date.now() - started < 8000, `took ${Date.now() - started} ms`);
+  });
+
+  await t.test("ask_pages with urls reads the rendered list", async () => {
+    const { AskAdapterSource } = await import("../src/ask.ts");
+    const saved = deps.ask;
+    const sent: string[] = [];
+    deps.ask = new AskAdapterSource({ command: "unused", adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
+    try {
+      await ok("ask_pages", { question: "Which items?", urls: [`${fixture.url}/spa`] });
+      assert.ok(sent.join("\n").includes(SPA_TEXT.item));
+    } finally {
+      deps.ask = saved;
+    }
+  });
 });
