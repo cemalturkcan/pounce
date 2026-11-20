@@ -247,11 +247,13 @@ test("sourceNames uses paths relative to the common folder when base names colli
   assert.deepEqual(sourceNames([path.join("/out/collect", left, name), path.join("/out/collect", right, name)]), [path.join(left, name), path.join(right, name)]);
 });
 
-test("without an adapter module the source fails fast and names the env var, the default path and the example", async () => {
+const writeAdapter = (file: string, name: string) => writeFile(file, `export default { name: ${JSON.stringify(name)}, complete: async () => ({ text: "ok" }) };`);
+
+test("with no module, no default file and no code adapter the source fails fast naming the env var, the default path and the example", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ask-default-"));
   try {
-    const missing = path.join(dir, "ask-adapter.mjs");
-    const source = new AskAdapterSource({ modulePath: missing, explicit: false });
+    const defaultPath = path.join(dir, "ask-adapter.mjs");
+    const source = new AskAdapterSource({ defaultPath });
     assert.equal(source.configured, false);
     assert.equal(source.label, "none configured");
     await assert.rejects(source.get(), (error: Error) => {
@@ -259,7 +261,7 @@ test("without an adapter module the source fails fast and names the env var, the
       const text = describeError(error);
       assert.match(text, /No model adapter is configured/);
       assert.match(text, /WEB_AGENT_ASK_ADAPTER/);
-      assert.ok(text.includes(missing), text);
+      assert.ok(text.includes(defaultPath), text);
       assert.match(text, /examples\/ask-adapter\.example\.mjs/);
       return true;
     });
@@ -268,36 +270,37 @@ test("without an adapter module the source fails fast and names the env var, the
   }
 });
 
-test("the default adapter path is used once the file exists, without a restart", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-default-"));
+test("resolution order is modulePath, then the default file when it exists, then the code adapter", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-order-"));
   try {
-    const file = path.join(dir, "ask-adapter.mjs");
-    const source = new AskAdapterSource({ modulePath: file, explicit: false });
-    await assert.rejects(source.get(), /No model adapter is configured/);
-    await writeFile(file, 'export default { name: "owner default", complete: async () => ({ text: "ok" }) };');
-    assert.equal(source.configured, true);
+    const modulePath = path.join(dir, "env.mjs");
+    const defaultPath = path.join(dir, "ask-adapter.mjs");
+    await writeAdapter(modulePath, "from env");
+    const code: AskAdapter = { name: "from code", complete: async () => ({ text: "" }) };
+    assert.equal((await new AskAdapterSource({ modulePath, defaultPath, adapter: code }).get()).name, "from env");
+    const source = new AskAdapterSource({ defaultPath, adapter: code });
+    assert.equal((await source.get()).name, "from code");
+    assert.equal(source.label, "from code");
+    await writeAdapter(defaultPath, "owner default");
     assert.equal((await source.get()).name, "owner default");
+    assert.equal(source.label, `owner default (${defaultPath})`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("an explicit adapter path that does not exist is a load error, not a silent fallback", async () => {
+test("a modulePath that does not exist is a load error, not a silent fallback", async () => {
   const missing = path.join(tmpdir(), `no-adapter-${token()}.mjs`);
-  const source = new AskAdapterSource({ modulePath: missing, explicit: true });
+  const source = new AskAdapterSource({ modulePath: missing, adapter: { name: "from code", complete: async () => ({ text: "" }) } });
   assert.equal(source.configured, true);
   await assert.rejects(source.get(), /Could not load the ask adapter/);
 });
 
-test("the adapter source label names the injected adapter, or the module until it loads", async () => {
-  const adapter: AskAdapter = { name: "injected", complete: async () => ({ text: "" }) };
-  const injected = new AskAdapterSource({ adapter });
-  assert.equal(injected.configured, true);
-  assert.equal(injected.label, "injected");
+test("the label names a module by path until it has loaded", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ask-adapter-"));
   try {
     const file = path.join(dir, "named.mjs");
-    await writeFile(file, 'export default { name: "named module", complete: async () => ({ text: "" }) };');
+    await writeAdapter(file, "named module");
     const fromModule = new AskAdapterSource({ modulePath: file });
     assert.equal(fromModule.label, `module ${file}`);
     await fromModule.get();

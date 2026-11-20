@@ -76,6 +76,7 @@ before(async () => {
   fixture = await startFixture();
   workDir = await mkdtemp(path.join(tmpdir(), "web-agent-e2e-"));
   const config = loadConfig({
+    HOME: workDir,
     WEB_AGENT_DATA_DIR: workDir,
     WEB_AGENT_HEADLESS: "true",
     WEB_AGENT_PASSWORD_STORE: "basic",
@@ -1072,6 +1073,7 @@ test("collect_pages scrolls lazy-loading pages", async (t) => {
 test("frames are readable", async (t) => {
   const frameDir = await mkdtemp(path.join(tmpdir(), "web-agent-frames-"));
   const frameConfig = loadConfig({
+    HOME: frameDir,
     WEB_AGENT_DATA_DIR: frameDir,
     WEB_AGENT_HEADLESS: "true",
     WEB_AGENT_PASSWORD_STORE: "basic",

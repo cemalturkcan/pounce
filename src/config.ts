@@ -24,8 +24,8 @@ export type Config = {
   timezoneId?: string;
   extraArgs: string[];
   secretsBackend: "gopass" | "none";
+  askAdapter?: string;
   askAdapterPath: string;
-  askAdapterExplicit: boolean;
 };
 
 const DEFAULT_PORT = 29741;
@@ -93,7 +93,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     timezoneId: source.WEB_AGENT_DEFAULT_TIMEZONE_ID?.trim() || undefined,
     extraArgs: parseLaunchArgs(source.WEB_AGENT_DEFAULT_LAUNCH_ARGS),
     secretsBackend: source.WEB_AGENT_SECRETS === "none" ? "none" : "gopass",
-    askAdapterPath: source.WEB_AGENT_ASK_ADAPTER?.trim() || defaultAskAdapterPath(source),
-    askAdapterExplicit: Boolean(source.WEB_AGENT_ASK_ADAPTER?.trim()),
+    askAdapter: source.WEB_AGENT_ASK_ADAPTER?.trim() || undefined,
+    askAdapterPath: defaultAskAdapterPath(source),
   };
 }

@@ -1,30 +1,13 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { AskAdapter, AskUsage } from "./ask-adapter.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail } from "./output.ts";
 
 export type AskDocument = { source: string; text: string };
 
-export type AskUsage = Record<string, number>;
-
-export type AskImage = { mediaType: "image/png" | "image/jpeg" | "image/webp"; data: string };
-
-export type AskInput = {
-  system: string;
-  prompt: string;
-  model: string;
-  maxTokens: number;
-  signal: AbortSignal;
-  images?: AskImage[];
-};
-
-export type AskAdapter = {
-  name: string;
-  complete(input: AskInput): Promise<AskReply>;
-};
-
-export type AskReply = { text: string; usage?: Record<string, number>; stopReason?: string };
+export type { AskAdapter, AskImage, AskImageMediaType, AskInput, AskReply, AskUsage } from "./ask-adapter.ts";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 export const DEFAULT_BATCH_CHARS = 3_000_000;
@@ -336,48 +319,59 @@ export async function loadAdapterModule(modulePath: string): Promise<AskAdapter>
   return candidate;
 }
 
+type AdapterChoice = { key: string; path?: string; load: () => Promise<AskAdapter> };
+
 export class AskAdapterSource {
   private readonly modulePath?: string;
-  private readonly explicit: boolean;
-  private loaded?: Promise<AskAdapter>;
-  private name?: string;
-  private readonly injected: boolean;
+  private readonly defaultPath?: string;
+  private readonly adapter?: AskAdapter;
+  private readonly loaded = new Map<string, Promise<AskAdapter>>();
+  private readonly names = new Map<string, string>();
 
-  constructor(options: { modulePath?: string; explicit?: boolean; adapter?: AskAdapter }) {
+  constructor(options: { modulePath?: string; defaultPath?: string; adapter?: AskAdapter }) {
     this.modulePath = options.modulePath;
-    this.explicit = options.explicit ?? true;
-    this.injected = Boolean(options.adapter);
-    if (options.adapter) {
-      this.name = options.adapter.name;
-      this.loaded = Promise.resolve(options.adapter);
-    }
+    this.defaultPath = options.defaultPath;
+    this.adapter = options.adapter;
+  }
+
+  private choice(): AdapterChoice | undefined {
+    const fromFile = (file: string) => ({ key: `file:${file}`, path: file, load: () => loadAdapterModule(file) });
+    if (this.modulePath) return fromFile(this.modulePath);
+    if (this.defaultPath && existsSync(this.defaultPath)) return fromFile(this.defaultPath);
+    const { adapter } = this;
+    if (adapter) return { key: "code", load: () => Promise.resolve(adapter) };
+    return undefined;
   }
 
   get configured() {
-    if (this.loaded) return true;
-    if (!this.modulePath) return false;
-    return this.explicit || existsSync(this.modulePath);
+    return this.choice() !== undefined;
   }
 
   get label() {
-    if (!this.configured) return "none configured";
-    if (this.injected || !this.modulePath) return this.name ?? "injected adapter";
-    return this.name ? `${this.name} (${this.modulePath})` : `module ${this.modulePath}`;
+    const choice = this.choice();
+    if (!choice) return "none configured";
+    if (!choice.path) return this.adapter?.name ?? "adapter";
+    const name = this.names.get(choice.key);
+    return name ? `${name} (${choice.path})` : `module ${choice.path}`;
   }
 
   get() {
-    if (!this.configured) return Promise.reject(noAdapterError(this.explicit ? undefined : this.modulePath));
-    const modulePath = this.modulePath ?? "";
-    this.loaded ??= loadAdapterModule(modulePath).then(
-      (adapter) => {
-        this.name = adapter.name;
-        return adapter;
-      },
-      (error: unknown) => {
-        this.loaded = undefined;
-        throw error;
-      },
-    );
-    return this.loaded;
+    const choice = this.choice();
+    if (!choice) return Promise.reject(noAdapterError(this.defaultPath));
+    let pending = this.loaded.get(choice.key);
+    if (!pending) {
+      pending = choice.load().then(
+        (adapter) => {
+          this.names.set(choice.key, adapter.name);
+          return adapter;
+        },
+        (error: unknown) => {
+          this.loaded.delete(choice.key);
+          throw error;
+        },
+      );
+      this.loaded.set(choice.key, pending);
+    }
+    return pending;
   }
 }
