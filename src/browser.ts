@@ -6,6 +6,7 @@ import { TIMED_OUT, withDeadline } from "./async.ts";
 import { ToolError } from "./errors.ts";
 import { isStreamingMime, isTextualMime } from "./mime.ts";
 import { timestampSlug } from "./output.ts";
+import { clearStaleProfileLock } from "./profile-lock.ts";
 import { ProfileSettings } from "./profile-settings.ts";
 import { parseRef } from "./snapshot.ts";
 
@@ -205,6 +206,7 @@ export class BrowserManager {
     const { config } = this;
     await mkdir(config.profileDir, { recursive: true });
     const chromium = await loadChromium(config.engine);
+    await clearStaleProfileLock(config.profileDir);
     const context = await chromium.launchPersistentContext(config.profileDir, {
       handleSIGINT: false,
       handleSIGTERM: false,
