@@ -20,10 +20,12 @@ const RETRY_JITTER_MS = 250;
 type ApiError = { type?: unknown; message?: unknown };
 
 class RetryableAnthropicError extends ToolError {
+  readonly failure: ToolError;
   readonly retryAfterMs?: number;
 
-  constructor(message: string, retryAfterMs?: number) {
-    super(message);
+  constructor(failure: string | ToolError, retryAfterMs?: number) {
+    super(typeof failure === "string" ? failure : failure.message);
+    this.failure = typeof failure === "string" ? new ToolError(failure) : failure;
     this.retryAfterMs = retryAfterMs;
   }
 }
@@ -140,7 +142,9 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
             break;
           case "error": {
             const message = `Anthropic Messages stream error${errorDetail(event.error, token)}`;
-            if (event.error?.type === "overloaded_error") throw new RetryableAnthropicError(message);
+            if (event.error?.type === "overloaded_error" || event.error?.type === "api_error") {
+              throw new RetryableAnthropicError(message);
+            }
             throw new ToolError(message);
           }
           case "message_stop": {
@@ -153,6 +157,13 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
         }
       }
     }
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!(error instanceof RetryableAnthropicError)) throw error;
+    const text = parts.join("");
+    if (stopReason === "refusal") return { text, usage, stopReason };
+    if (text) return { text, usage, stopReason: "interrupted" };
+    throw error;
   } finally {
     signal.removeEventListener("abort", cancel);
     await reader.cancel().catch(() => undefined);
@@ -194,14 +205,15 @@ async function postMessage(body: string, token: string, signal: AbortSignal) {
   const payload = await response.json().catch(() => undefined) as { error?: ApiError } | undefined;
   signal.throwIfAborted();
   const detail = errorDetail(payload?.error, token);
-  if (response.status === 401) {
-    throw new AskSetupError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN);
+  const failure = response.status === 401
+    ? new AskSetupError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
+    : new ToolError(`Anthropic Messages returned HTTP ${response.status}${detail}`);
+  const retry = response.headers.get("x-should-retry");
+  const retryableStatus = response.status === 429 || (response.status >= 500 && response.status < 600);
+  if (retry === "true" || (retry !== "false" && retryableStatus)) {
+    throw new RetryableAnthropicError(failure, retryDelay(response));
   }
-  const message = `Anthropic Messages returned HTTP ${response.status}${detail}`;
-  if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
-    throw new RetryableAnthropicError(message, retryDelay(response));
-  }
-  throw new ToolError(message);
+  throw failure;
 }
 
 async function completeMessage(body: string, token: string, signal: AbortSignal) {
@@ -215,7 +227,7 @@ async function completeMessage(body: string, token: string, signal: AbortSignal)
       if (wait > MAX_RETRY_DELAY_MS) {
         throw new ToolError(`${error.message} Retry-After exceeds the 60-second wait limit.`);
       }
-      if (attempt >= MAX_RETRIES) throw error;
+      if (attempt >= MAX_RETRIES) throw error.failure;
       const withJitter = Math.min(wait + Math.random() * RETRY_JITTER_MS, MAX_RETRY_DELAY_MS);
       await delay(withJitter, undefined, { signal }).catch((abort: unknown) => {
         signal.throwIfAborted();
