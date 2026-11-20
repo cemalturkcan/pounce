@@ -1,11 +1,13 @@
 import type { Frame, Page } from "playwright-core";
 
-export type OverlayKind = "reject" | "necessary" | "close" | "cancel" | "accept";
+export type OverlayKind = "reject" | "necessary" | "close" | "cancel" | "accept_all" | "accept";
+export type ConsentChoice = "accept" | "reject";
 
 export type OverlayCandidate = {
   marker?: string;
   kind: OverlayKind;
   name: string;
+  label: string;
   container: string;
   consent: boolean;
 };
@@ -35,6 +37,13 @@ const PATTERNS: Record<OverlayKind, string[]> = {
     "^cerrar$", "^no,? gracias", "^ahora no$", "^más tarde$",
   ],
   cancel: ["^cancel$", "^iptal$", "^vazgeç$", "^abbrechen$", "^annuler$", "^cancelar$"],
+  accept_all: [
+    "accept all", "accept cookies", "accept all cookies", "allow all", "agree to all", "agree and close", "^agree$", "^i agree$",
+    "tümünü kabul", "hepsini kabul", "tüm çerezleri kabul", "kabul et$",
+    "alle akzeptieren", "alle cookies akzeptieren", "alle zulassen", "alle erlauben",
+    "tout accepter", "accepter tout", "accepter et fermer",
+    "aceptar todo", "aceptar todas", "aceptar cookies",
+  ],
   accept: [
     "accept", "agree", "allow all", "allow cookies", "^allow$", "^ok$", "^okay$", "got it", "i understand", "^continue$",
     "kabul", "^onayla$", "^tamam$", "anladım", "izin ver",
@@ -71,8 +80,10 @@ function findCandidates(input: {
   selector: string;
   wholeFrame: boolean;
   seed: string;
+  consentOrder: string[];
+  consentOnly: boolean;
 }) {
-  const consentOrder = ["reject", "necessary", "close", "cancel", "accept"];
+  const consentOrder = input.consentOrder;
   const genericOrder = ["close", "cancel"];
   const compile = (kinds: string[]) => kinds.map((kind) => ({ kind, regexes: (input.patterns[kind] ?? []).map((source) => new RegExp(source, "iu")) }));
   const consentMatchers = compile(consentOrder);
@@ -105,29 +116,30 @@ function findCandidates(input: {
       );
   const outer = containers.filter((element) => !containers.some((other) => other !== element && other.contains(element)));
 
-  const results: { marker?: string; kind: string; name: string; container: string; consent: boolean }[] = [];
+  const results: { marker?: string; kind: string; name: string; label: string; container: string; consent: boolean }[] = [];
   outer.forEach((container, containerIndex) => {
     const consent = isConsent(container);
+    if (input.consentOnly && !consent) return;
     const matchers = consent ? consentMatchers : genericMatchers;
     const controls = container.querySelectorAll("button, [role=button], a, input[type=button], input[type=submit], [aria-label], [title]");
-    let best: { element: Element; rank: number; name: string } | undefined;
+    let best: { element: Element; rank: number; name: string; label: string } | undefined;
     for (const control of controls) {
       if (!visible(control)) continue;
-      const name = (control.getAttribute("aria-label") || (control as HTMLElement).innerText || (control as HTMLInputElement).value || control.getAttribute("title") || "")
+      const label = (control.getAttribute("aria-label") || (control as HTMLElement).innerText || (control as HTMLInputElement).value || control.getAttribute("title") || "")
         .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
+        .trim();
+      const name = label.toLowerCase();
       if (!name || name.length > 60) continue;
       const rank = matchers.findIndex((matcher) => matcher.regexes.some((regex) => regex.test(name)));
       if (rank === -1 || (best && best.rank <= rank)) continue;
-      if (matchers[rank]?.kind === "accept" && commit.test(name)) continue;
-      best = { element: control, rank, name };
+      if ((matchers[rank]?.kind ?? "").startsWith("accept") && commit.test(name)) continue;
+      best = { element: control, rank, name, label };
     }
     if (!best) return;
     const marker = `${input.seed}-${containerIndex}`;
     best.element.setAttribute("data-web-agent-dismiss", marker);
     const label = container.id ? `#${container.id}` : container.getAttribute("role") ? `[role=${container.getAttribute("role")}]` : container.tagName.toLowerCase();
-    results.push({ marker, kind: matchers[best.rank]?.kind ?? "close", name: best.name, container: label, consent });
+    results.push({ marker, kind: matchers[best.rank]?.kind ?? "close", name: best.name, label: best.label, container: label, consent });
   });
   return results;
 }
@@ -136,7 +148,15 @@ function frameLabel(page: Page, frame: Frame) {
   return frame === page.mainFrame() ? "main frame" : `frame ${frame.url().slice(0, 80) || frame.name()}`;
 }
 
-export async function dismissOverlays(page: Page, allowAccept: boolean) {
+export type DismissOptions = { consent?: ConsentChoice; allowAccept?: boolean; consentOnly?: boolean };
+
+function consentOrder(choice: ConsentChoice) {
+  return choice === "accept" ? ["accept_all", "accept", "close", "cancel"] : ["reject", "necessary", "close", "cancel", "accept_all", "accept"];
+}
+
+export async function dismissOverlays(page: Page, options: DismissOptions = {}) {
+  const choice = options.consent ?? "accept";
+  const allowAccept = options.allowAccept ?? true;
   const clicks: OverlayClick[] = [];
   const seed = Date.now().toString(36);
   for (const [index, frame] of page.frames().entries()) {
@@ -151,11 +171,14 @@ export async function dismissOverlays(page: Page, allowAccept: boolean) {
         selector: CONTAINER_SELECTOR,
         wholeFrame,
         seed: `${seed}-${index}`,
+        consentOrder: consentOrder(choice),
+        consentOnly: options.consentOnly ?? false,
       })
       .catch(() => [] as OverlayCandidate[]);
     for (const candidate of found as OverlayCandidate[]) {
-      const click: OverlayClick = { ...candidate, frame: frameLabel(page, frame), clicked: false };
-      if (candidate.kind === "accept" && !allowAccept) {
+      const kind: OverlayKind = candidate.kind === "accept_all" ? "accept" : candidate.kind;
+      const click: OverlayClick = { ...candidate, kind, frame: frameLabel(page, frame), clicked: false };
+      if (kind === "accept" && choice === "reject" && !allowAccept) {
         clicks.push({ ...click, skipped: true });
         continue;
       }
@@ -171,19 +194,15 @@ export async function dismissOverlays(page: Page, allowAccept: boolean) {
   return clicks;
 }
 
-export function describeOverlayClicks(clicks: OverlayClick[], allowAccept: boolean) {
-  if (clicks.length === 0) {
-    return allowAccept
-      ? "No cookie banner or modal with a reject, close, cancel or accept control was found."
-      : "No cookie banner or modal with a reject, close or cancel control was found.";
-  }
+export function describeOverlayClicks(clicks: OverlayClick[]) {
+  if (clicks.length === 0) return "No cookie banner or modal with a control to dismiss it was found.";
   return clicks
     .map((click) =>
       click.skipped
-        ? `Left "${click.name}" (accept) in ${click.container}, ${click.frame} unclicked: the consent banner offers no reject or close control. Pass allow_accept: true to accept it.`
+        ? `Left "${click.label}" (accept) in ${click.container}, ${click.frame} unclicked: the consent banner offers no reject or close control. Pass allow_accept: true to accept it.`
         : click.clicked
-          ? `Clicked "${click.name}" (${click.kind}) in ${click.container}, ${click.frame}.`
-          : `Found "${click.name}" (${click.kind}) in ${click.container}, ${click.frame}, but the click failed: ${click.error}`,
+          ? `Clicked "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}.`
+          : `Found "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}, but the click failed: ${click.error}`,
     )
     .join("\n");
 }

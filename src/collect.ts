@@ -3,6 +3,7 @@ import path from "node:path";
 import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
 import { type BodyType, classifyBody, extractPdfText, fetchBody, isDownloadError, isTextKind } from "./body.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
+import { acceptConsentOnce } from "./consent.ts";
 import { describeError } from "./errors.ts";
 import { extractPage, summarizeStructured } from "./extract.ts";
 import { pageMarkdown } from "./markdown.ts";
@@ -132,6 +133,7 @@ async function saveOne(
   }
   const settle = await waitForContent(page, { quietMs: input.settleMs, maxWaitMs: Math.min(input.maxWaitMs, input.timeoutMs) });
   if (!settle.settled && !settle.unresponsive) result.unsettledMs = settle.ms;
+  await acceptConsentOnce(tab, manager.config.autoConsent);
   if (input.scroll) result.scrolled = await autoScroll(page, input.scroll);
   result.status = response?.status();
   result.finalUrl = page.url();

@@ -67,6 +67,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_DEFAULT_LAUNCH_ARGS` | | Extra Chrome flags, space-separated |
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
+| `WEB_AGENT_AUTO_CONSENT` | `accept` | Cookie banners on the agent's own tabs after `tab_open`, `navigate` and `collect_pages`: `accept`, `reject`, or `off` |
 | `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` when it exists, else the built-in Anthropic adapter | Absolute path of an ES module that replaces the model adapter of `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
 | `WEB_AGENT_LOG_DIR` | `<data dir>/logs` | Where the daemon writes its JSON Lines log (config key `logDir`) |
 | `WEB_AGENT_LOG_LEVEL` | `info` | Lowest level written: `debug`, `info`, `warn` or `error`. `debug` adds the first 500 characters of every tool result. |

@@ -28,11 +28,19 @@ export type Config = {
   timezoneId?: string;
   extraArgs: string[];
   secretsBackend: "gopass" | "none";
+  autoConsent: AutoConsent;
   askAdapter?: string;
   askAdapterPath: string;
 };
 
 const DEFAULT_PORT = 29741;
+
+export type AutoConsent = "accept" | "reject" | "off";
+
+export function parseAutoConsent(value: string | undefined): AutoConsent {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "reject" || normalized === "off" ? normalized : "accept";
+}
 
 function homeDir(source: NodeJS.ProcessEnv) {
   return source.HOME?.trim() || homedir();
@@ -100,6 +108,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     timezoneId: source.WEB_AGENT_DEFAULT_TIMEZONE_ID?.trim() || undefined,
     extraArgs: parseLaunchArgs(source.WEB_AGENT_DEFAULT_LAUNCH_ARGS),
     secretsBackend: source.WEB_AGENT_SECRETS === "none" ? "none" : "gopass",
+    autoConsent: parseAutoConsent(source.WEB_AGENT_AUTO_CONSENT),
     askAdapter: source.WEB_AGENT_ASK_ADAPTER?.trim() || undefined,
     askAdapterPath: defaultAskAdapterPath(source),
   };

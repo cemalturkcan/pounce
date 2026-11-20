@@ -560,17 +560,16 @@ test("browser flow", async (t) => {
     assert.equal((await call("site_notes", { action: "append", tab })).isError, true);
   });
 
-  await t.test("dismiss_overlays rejects cookie banners, closes modals and handles iframes", async () => {
-    await ok("navigate", { tab, url: `${fixture.url}/consent` });
-    const text = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.match(text, /Clicked "reject all" \(reject\) in #cookie-banner, main frame/);
-    assert.match(text, /Clicked "kapat" \(close\)/);
-    assert.match(text, /Clicked "alle ablehnen" \(reject\) in #consent, frame/);
+  await t.test("navigate accepts cookie banners and dismiss_overlays closes modals and handles iframes", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/consent` }), /^Event: accepted the cookie banner \(Accept all\)$/m);
+    const text = await ok("dismiss_overlays", { tab, consent: "reject" });
+    assert.match(text, /Clicked "Kapat" \(close\)/);
+    assert.doesNotMatch(text, /Accept all|Reject all/);
     const state = await ok("evaluate", {
       tab,
       expression: "[...['status', 'modal-state', 'frame-state']].map((id) => document.getElementById(id).textContent).join('|')",
     });
-    assert.match(state, /rejected\|modal closed\|frame rejected/);
+    assert.match(state, /accepted\|modal closed\|frame accepted/);
     assert.match(await ok("dismiss_overlays", { tab }), /No cookie banner or modal/);
   });
 
@@ -754,15 +753,12 @@ test("review regressions", async (t) => {
   await t.test("dismiss_overlays never clicks commit buttons", async () => {
     const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/checkout` }));
     const text = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.match(text, /Clicked "vazgeç" \(cancel\)/);
+    assert.match(text, /Clicked "Vazgeç" \(cancel\)/);
     assert.doesNotMatch(text, /onayla|payment/i);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
     const again = await ok("dismiss_overlays", { tab, allow_accept: true });
     assert.doesNotMatch(again, /Clicked/);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
-    await ok("navigate", { tab, url: `${fixture.url}/consent` });
-    const defaults = await ok("dismiss_overlays", { tab });
-    assert.match(defaults, /Clicked "reject all"/);
     await ok("tab_close", { tab });
   });
 

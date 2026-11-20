@@ -381,3 +381,10 @@ test("the browser launches without a color scheme override so pages follow the s
   assert.equal(options.colorScheme, null);
   assert.equal(options.viewport, null);
 });
+
+test("WEB_AGENT_AUTO_CONSENT defaults to accept and takes reject or off", () => {
+  assert.equal(loadConfig({ HOME: "/tmp/x" }).autoConsent, "accept");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: "reject" }).autoConsent, "reject");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: " OFF " }).autoConsent, "off");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: "maybe" }).autoConsent, "accept");
+});

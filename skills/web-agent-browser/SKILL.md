@@ -29,7 +29,7 @@ Bulky results are files under the output directory that `tabs_list` reports. You
 | Find a button or field and act on it | `find` when you know the label, `snapshot` (`interactive: true`) otherwise, then `click` / `fill` / `press` with the ref |
 | Fill and submit a form | `fill_form` with every field and `submit`; it reports fields the browser marks invalid |
 | Sign in | check whether the session is already signed in; `secrets_list`, then `fill` / `fill_form` with `secret`; `http_auth` for the browser's own login dialog |
-| A cookie banner or pop-up in the way | `dismiss_overlays` |
+| A cookie banner or pop-up in the way | `tab_open`, `navigate` and `collect_pages` accept cookie banners by themselves (reported as `Event: accepted the cookie banner (…)`); `dismiss_overlays` for anything still covering the page |
 | A CAPTCHA, SMS or email code, passkey, bank approval | `handoff` |
 | A site asks for location, camera, notifications | `permissions` |
 | Upload a file | `upload` |

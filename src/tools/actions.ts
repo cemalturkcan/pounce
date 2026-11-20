@@ -447,18 +447,19 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "dismiss_overlays",
     title: "Dismiss cookie banners and modals",
     description: [
-      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that closes each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it prefers reject all, then only necessary, then close or cancel, and clicks accept only with allow_accept and when nothing else is offered. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never a confirm, continue, order or pay button. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found.",
-      "Use it when a banner or pop-up covers the page, or a click reports that another element intercepts pointer events. It does not install anything that runs later, so call it again after a navigation if a new banner appears. A dialog that asks to confirm an order or payment the task wants is answered with click.",
+      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that dismisses each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it clicks accept all (accept all, allow all, agree, OK, tümünü kabul et, alle akzeptieren, tout accepter, aceptar todo and the like), falling back to close or cancel; with consent: reject it prefers reject all, then only necessary, then close or cancel, and accepts only when nothing else is offered and allow_accept is not false. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never an accept, confirm, continue, order or pay button, and a button whose name contains an order or payment word is never clicked anywhere. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found.",
+      "tab_open, navigate and collect_pages already accept cookie banners on the agent's own tabs by themselves (WEB_AGENT_AUTO_CONSENT=accept, reject or off on the server), so call this when a banner or pop-up still covers the page, or a click reports that another element intercepts pointer events. It does not install anything that runs later. A dialog that asks to confirm an order or payment the task wants is answered with click.",
     ].join("\n"),
     input: {
       tab: tabParam,
-      allow_accept: z.boolean().optional().describe("In a consent banner that offers no reject, close or cancel control, click its accept or OK button. Default false."),
+      consent: z.enum(["accept", "reject"]).optional().describe("What to click in a consent banner: accept (default) or reject."),
+      allow_accept: z.boolean().optional().describe("With consent: reject, click accept in a consent banner that offers no reject, close or cancel control. Default true."),
       include_snapshot: includeSnapshotParam,
     },
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
-      const allowAccept = input.allow_accept ?? false;
-      return runAction(manager, store, tab, async () => describeOverlayClicks(await dismissOverlays(tab.page, allowAccept), allowAccept), {
+      const options = { consent: input.consent ?? ("accept" as const), allowAccept: input.allow_accept ?? true };
+      return runAction(manager, store, tab, async () => describeOverlayClicks(await dismissOverlays(tab.page, options)), {
         includeSnapshot: input.include_snapshot,
       });
     },
