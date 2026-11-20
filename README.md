@@ -97,3 +97,5 @@ npm run typecheck
 npm test                 # unit
 npm run test:e2e         # headless Chrome against a local fixture
 ```
+
+`eval/` measures which tools Claude Code picks for plain-language tasks: `node eval/run.ts --label after` starts the fixture site and an isolated headless daemon with a fake model adapter, runs each task in `eval/tasks.ts` through `claude -p`, and scores the first decisive tool and any detours (`--server <dir>` runs another checkout, `--only <ids>` a subset); `node eval/score.ts eval/results before after` compares two runs. It calls the Claude Code CLI with your sign-in and is not part of `npm test`.
