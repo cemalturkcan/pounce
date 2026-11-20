@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AskAdapterSource } from "../ask.ts";
 import { type BrowserManager, ORPHANED_OWNER, type Tab, UNCLAIMED_OWNER } from "../browser.ts";
 import { withTimeout } from "../async.ts";
+import { explainPolicyBlock } from "../chrome-policy.ts";
 import { describeError, ToolError } from "../errors.ts";
 import type { JobRunner } from "../jobs.ts";
 import { type Logger, newRequestId, summarizeInput } from "../log.ts";
@@ -114,7 +115,9 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
           ],
         };
       } catch (error) {
-        const described = describeError(error);
+        const base = describeError(error);
+        const policy = await explainPolicyBlock(base, deps.manager.config.chromePolicyDirs).catch(() => undefined);
+        const described = policy ? `${base}\n${policy}` : base;
         record({
           ok: false,
           error: described.split("\n").slice(0, ERROR_LOG_LINES).join("\n"),

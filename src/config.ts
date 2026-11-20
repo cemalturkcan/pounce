@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import path from "node:path";
+import { DEFAULT_CHROME_POLICY_DIRS } from "./chrome-policy.ts";
 import { type LogLevel, parseLogLevel } from "./log.ts";
 import { SERVER_VERSION } from "./version.ts";
 
@@ -23,6 +24,7 @@ export type Config = {
   executablePath?: string;
   headless: boolean;
   chromeSandbox: boolean;
+  chromePolicyDirs: string[];
   passwordStore: string;
   locale?: string;
   timezoneId?: string;
@@ -77,6 +79,14 @@ export function parseLaunchArgs(value: string | undefined) {
     .filter(Boolean);
 }
 
+function parseDirList(value: string | undefined) {
+  const dirs = (value ?? "")
+    .split(":")
+    .map((dir) => dir.trim())
+    .filter(Boolean);
+  return dirs.length ? dirs : undefined;
+}
+
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const dataDir =
     source.WEB_AGENT_DAEMON_DATA_DIR?.trim() ||
@@ -103,6 +113,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     executablePath: source.WEB_AGENT_CHROME_EXECUTABLE?.trim() || undefined,
     headless: parseBoolean(source.WEB_AGENT_HEADLESS) ?? !hasDisplay,
     chromeSandbox: parseBoolean(source.WEB_AGENT_CHROME_SANDBOX) ?? true,
+    chromePolicyDirs: parseDirList(source.WEB_AGENT_CHROME_POLICY_DIRS) ?? [...DEFAULT_CHROME_POLICY_DIRS],
     passwordStore: source.WEB_AGENT_PASSWORD_STORE?.trim() || "gnome-libsecret",
     locale: source.WEB_AGENT_DEFAULT_LOCALE?.trim() || undefined,
     timezoneId: source.WEB_AGENT_DEFAULT_TIMEZONE_ID?.trim() || undefined,

@@ -297,6 +297,16 @@ test("config enables the Chrome sandbox unless WEB_AGENT_CHROME_SANDBOX turns it
   assert.equal(loadConfig({ WEB_AGENT_CHROME_SANDBOX: "maybe" }).chromeSandbox, true);
 });
 
+test("config reads Chrome policy files from the system folders unless WEB_AGENT_CHROME_POLICY_DIRS names others", () => {
+  assert.deepEqual(loadConfig({}).chromePolicyDirs, [
+    "/etc/opt/chrome/policies/managed",
+    "/etc/opt/chrome/policies/recommended",
+    "/etc/chromium/policies/managed",
+    "/etc/chromium/policies/recommended",
+  ]);
+  assert.deepEqual(loadConfig({ WEB_AGENT_CHROME_POLICY_DIRS: " /tmp/a/managed : /tmp/b " }).chromePolicyDirs, ["/tmp/a/managed", "/tmp/b"]);
+});
+
 test("a launch failure caused by the Chrome sandbox points at WEB_AGENT_CHROME_SANDBOX", () => {
   const messages = [
     "browserType.launchPersistentContext: Target page, context or browser has been closed\n[pid=1][err] No usable sandbox! If you are running on Ubuntu 23.10+ ...",

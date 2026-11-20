@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -170,5 +170,28 @@ test("tabs that open or close outside a tool action name the opener, the time an
   await pause(4000);
   const later = await ok(client, "press", { tab, key: "Shift" });
   assert.match(later, new RegExp(`^Earlier event \\(\\d\\d:\\d\\d:\\d\\d, before this call\\): opened new tab t\\d+ from ${tab} \\(${opener}\\), with no tool call running on ${tab}$`, "m"));
+  await stopDaemon(daemon);
+});
+
+test("a navigation blocked by the client names the Chrome policy file and pattern that match it", async () => {
+  const policyRoot = path.join(workDir, "policies");
+  await mkdir(path.join(policyRoot, "managed"), { recursive: true });
+  const blockedPath = `${new URL(fixture.url).host}/blocked`;
+  await writeFile(path.join(policyRoot, "managed", "agent.json"), JSON.stringify({ URLBlocklist: [blockedPath] }));
+  const daemon = await startDaemon(path.join(workDir, "policy"), { WEB_AGENT_CHROME_POLICY_DIRS: `${path.join(policyRoot, "managed")}:${path.join(policyRoot, "recommended")}` });
+  const client = await connect(daemon);
+  const tab = openedId(await ok(client, "tab_open", { url: fixture.url }));
+  await ok(client, "intercept", { tab, action: "add", url: "/blocked", mode: "block" });
+  await ok(client, "intercept", { tab, action: "add", url: "/other-block", mode: "block" });
+
+  const blocked = await call(client, "navigate", { tab, url: `${fixture.url}/blocked/page` });
+  assert.equal(blocked.isError, true, blocked.text);
+  assert.match(blocked.text, /ERR_BLOCKED_BY_CLIENT/);
+  assert.ok(blocked.text.includes(`Chrome policy: URLBlocklist pattern "${blockedPath}" in ${path.join(policyRoot, "managed", "agent.json")} matches ${fixture.url}/blocked/page.`), blocked.text);
+
+  const other = await call(client, "navigate", { tab, url: `${fixture.url}/other-block` });
+  assert.equal(other.isError, true, other.text);
+  assert.match(other.text, /ERR_BLOCKED_BY_CLIENT/);
+  assert.doesNotMatch(other.text, /Chrome policy/);
   await stopDaemon(daemon);
 });

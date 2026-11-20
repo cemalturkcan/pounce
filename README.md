@@ -63,6 +63,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_CHROME_CHANNEL` / `WEB_AGENT_CHROME_EXECUTABLE` | `chrome` | Which browser to launch |
 | `WEB_AGENT_HEADLESS` | headed when a display exists | Force headless or headed |
 | `WEB_AGENT_CHROME_SANDBOX` | `true` | Launch Chrome with its sandbox; `false` or `0` turns it off for containers and kernels without unprivileged user namespaces (config key `chromeSandbox`) |
+| `WEB_AGENT_CHROME_POLICY_DIRS` | `/etc/opt/chrome/policies/{managed,recommended}` and `/etc/chromium/policies/{managed,recommended}` | Colon-separated folders whose `*.json` policy files are searched for the `URLBlocklist`/`URLAllowlist` pattern behind an `ERR_BLOCKED_BY_ADMINISTRATOR` or `ERR_BLOCKED_BY_CLIENT` error (config key `chromePolicyDirs`) |
 | `WEB_AGENT_PASSWORD_STORE` | `gnome-libsecret` | Chrome password store, so imported cookies and passwords decrypt |
 | `WEB_AGENT_DEFAULT_LAUNCH_ARGS` | | Extra Chrome flags, space-separated |
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
