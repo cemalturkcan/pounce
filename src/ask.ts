@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { type AskAdapter, type AskImage, type AskUsage, completeLogged } from "./ask-adapter.ts";
+import { type AskAdapter, type AskImage, type AskUsage, completeLogged, isCutOff } from "./ask-adapter.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail } from "./output.ts";
 
@@ -344,6 +344,12 @@ export function exceedsContextWindow(error: unknown) {
 
 export const TOO_LARGE_FOR_CONTEXT = "the page does not fit the model's context window on its own";
 
+export function exceedsRequestSize(error: unknown) {
+  return /\brequest_too_large\b/.test(error instanceof Error ? error.message : String(error));
+}
+
+export const TOO_LARGE_FOR_REQUEST = "the page is too large for one request on its own";
+
 function callSignal(options: AskOptions) {
   const signals = [...(options.timeoutMs === undefined ? [] : [AbortSignal.timeout(options.timeoutMs)]), ...(options.signal ? [options.signal] : [])];
   return signals.length ? AbortSignal.any(signals) : new AbortController().signal;
@@ -382,20 +388,22 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
       if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
       if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
       const parsed = review ? parseReview(reply.text, sources) : parseReply(reply.text, sources);
-      const truncated = reply.stopReason === "max_tokens" ? { truncated: true } : {};
+      const truncated = isCutOff(reply.stopReason) ? { truncated: true } : {};
       const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
       return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, reply: reply.text, ms: Date.now() - started }];
     } catch (error) {
       if (error instanceof AskSetupError) setupError = error;
-      const overflow = !setupError && !options.signal?.aborted && exceedsContextWindow(error);
-      if (overflow && batch.length > 1) {
+      const splittable = !setupError && !options.signal?.aborted;
+      const overflow = splittable && exceedsContextWindow(error);
+      const oversized = splittable && exceedsRequestSize(error);
+      if ((overflow || oversized) && batch.length > 1) {
         const half = Math.ceil(batch.length / 2);
         const first = await run(batch.slice(0, half), `${call}.1`);
         const second = await run(batch.slice(half), `${call}.2`);
         return [...first, ...second];
       }
       const reason = failureReason(error, options.timeoutMs);
-      return [{ sources, answers: [], notFound: [], error: overflow ? `${TOO_LARGE_FOR_CONTEXT}: ${reason}` : reason, ms: Date.now() - started }];
+      return [{ sources, answers: [], notFound: [], error: overflow ? `${TOO_LARGE_FOR_CONTEXT}: ${reason}` : oversized ? `${TOO_LARGE_FOR_REQUEST}: ${reason}` : reason, ms: Date.now() - started }];
     }
   };
 

@@ -30,6 +30,10 @@ export type AskAdapter = {
   complete(input: AskInput): Promise<AskReply>;
 };
 
+export function isCutOff(stopReason: string | undefined) {
+  return stopReason === "max_tokens" || stopReason === "model_context_window_exceeded";
+}
+
 export type ModelCallContext = { tool: string; call: number | string; pages?: number };
 
 function firstLine(error: unknown) {
@@ -51,7 +55,7 @@ export async function completeLogged(adapter: AskAdapter, input: AskInput, conte
   };
   try {
     const reply = await adapter.complete(input);
-    const partial = reply?.stopReason === "interrupted" || reply?.stopReason === "max_tokens" || reply?.stopReason === "refusal";
+    const partial = reply?.stopReason === "interrupted" || reply?.stopReason === "refusal" || isCutOff(reply?.stopReason);
     logEvent("model_call", { ...fields, ms: Date.now() - startedAt, ok: true, stopReason: reply?.stopReason, usage: reply?.usage }, partial ? "warn" : "info");
     return reply;
   } catch (error) {

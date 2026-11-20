@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { anthropicAskAdapter } from "./ask-anthropic.ts";
 import { AskSetupError } from "./ask.ts";
+import { ToolError } from "./errors.ts";
 
 const input = {
   system: "Answer from the page.",
@@ -17,9 +18,17 @@ const input = {
 async function credentialFixture(t: TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "web-agent-ask-test-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const writeSession = (accessToken: string, expiresAt = Date.now() + 60_000) =>
-    writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken, expiresAt } }));
-  return { adapter: anthropicAskAdapter(dir), writeSession };
+  const credentialsPath = path.join(dir, ".credentials.json");
+  const writeSession = (
+    accessToken: string,
+    expiresAt = Date.now() + 10 * 60_000,
+    accountUuid: string | null = "account-test",
+    refreshToken?: string,
+  ) => writeFile(credentialsPath, JSON.stringify({
+    claudeAiOauth: { accessToken, expiresAt, ...(refreshToken ? { refreshToken } : {}) },
+    ...(accountUuid ? { accountUuid } : {}),
+  }));
+  return { adapter: anthropicAskAdapter(dir), credentialsPath, writeSession };
 }
 
 function encodeEvents(events: Array<Record<string, unknown>>) {
@@ -76,20 +85,396 @@ test("Anthropic adapter forwards the prompt, Haiku model, token limit and abort 
   const retryRequest = second?.[1];
   assert.ok(request);
   assert.ok(retryRequest);
-  assert.equal(url, "https://api.anthropic.com/v1/messages");
+  assert.equal(url, "https://api.anthropic.com/v1/messages?beta=true");
   assert.equal(request.redirect, "error");
   assert.equal(request.signal, input.signal);
   assert.equal(new Headers(request.headers).get("authorization"), "Bearer test-token");
-  assert.deepEqual(JSON.parse(String(request.body)), {
-    model: "claude-haiku-5-5",
-    max_tokens: 123,
-    stream: true,
-    system: input.system,
-    messages: [{ role: "user", content: input.prompt }],
+  const body = JSON.parse(String(request.body));
+  assert.equal(body.model, "claude-haiku-5-5");
+  assert.equal(body.max_tokens, 123);
+  assert.equal(body.stream, true);
+  assert.deepEqual(body.messages, [{ role: "user", content: input.prompt }]);
+  assert.match(body.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.296\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;$/);
+  assert.equal(body.system[1].text, "You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+  assert.equal(body.system[2].text, input.system);
+  assert.deepEqual(JSON.parse(body.metadata.user_id), {
+    device_id: JSON.parse(body.metadata.user_id).device_id,
+    account_uuid: "account-test",
+    session_id: JSON.parse(body.metadata.user_id).session_id,
   });
+  assert.match(JSON.parse(body.metadata.user_id).device_id, /^[0-9a-f]{64}$/);
+  assert.match(JSON.parse(body.metadata.user_id).session_id, /^[0-9a-f-]{36}$/);
+  const headers = new Headers(request.headers);
+  assert.match(headers.get("anthropic-beta") ?? "", /claude-code-20250219/);
+  assert.match(headers.get("anthropic-beta") ?? "", /oauth-2025-04-20/);
+  assert.equal(headers.get("anthropic-dangerous-direct-browser-access"), "true");
+  assert.equal(headers.get("user-agent"), "claude-cli/2.1.296 (external, sdk-cli)");
+  assert.equal(headers.get("x-app"), "cli");
+  assert.equal(headers.get("x-claude-code-session-id"), JSON.parse(body.metadata.user_id).session_id);
   assert.equal(new Headers(retryRequest.headers).get("authorization"), "Bearer new-token");
   assert.equal(JSON.parse(String(retryRequest.body)).model, "claude-custom");
   assert.deepEqual(aliases.map((args) => JSON.parse(String(args[1]?.body)).model), ["claude-sonnet-5-5", "claude-opus-5-5"]);
+});
+
+test("Anthropic adapter resolves and caches the account UUID from the Claude profile", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 10 * 60_000, null);
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) return Response.json({ account: { uuid: "profile-account" } });
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).endsWith("/api/oauth/profile")).length, 1);
+  const messageCall = fetch.mock.calls.find((call) => String(call.arguments[0]).includes("/v1/messages"));
+  const body = JSON.parse(String(messageCall?.arguments[1]?.body));
+  assert.equal(JSON.parse(body.metadata.user_id).account_uuid, "profile-account");
+});
+
+test("Anthropic adapter refreshes an expiring session once and atomically saves the rotated tokens", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      const body = JSON.parse(String(request?.body));
+      assert.equal(body.refresh_token, "old-refresh");
+      assert.equal(body.client_id, "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+      assert.match(body.scope, /user:inference/);
+      return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 7200 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer new-access");
+    return streamReply("OK");
+  });
+  const [first, second] = await Promise.all([adapter.complete(input), adapter.complete(input)]);
+  assert.equal(first.text, "OK");
+  assert.equal(second.text, "OK");
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).includes("/v1/oauth/token")).length, 1);
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "new-access");
+  assert.equal(saved.claudeAiOauth.refreshToken, "new-refresh");
+  assert.ok(saved.claudeAiOauth.expiresAt > Date.now() + 60 * 60_000);
+});
+
+test("Anthropic adapter retries token refresh without scopes when the endpoint rejects the scope", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      const body = JSON.parse(String(request?.body));
+      if (refreshCalls === 1) return Response.json({ error: "invalid_scope" }, { status: 400 });
+      assert.equal(body.scope, undefined);
+      return Response.json({ access_token: "new-access", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(refreshCalls, 2);
+});
+
+test("Anthropic adapter does not overwrite credentials refreshed concurrently by Claude Code", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh");
+      return Response.json({ access_token: "mcp-access", refresh_token: "mcp-refresh", expires_in: 3600 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "external-access");
+  assert.equal(saved.claudeAiOauth.refreshToken, "external-refresh");
+});
+
+test("Anthropic adapter uses credentials Claude Code refreshed while its own refresh was rejected", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh");
+      return Response.json({ error: "invalid_grant", error_description: "Refresh token already used" }, { status: 400 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter refreshes a rejected session once and retries the request", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    if (new Headers(request?.headers).get("authorization") === "Bearer revoked-access") {
+      return Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "new-access");
+});
+
+test("Anthropic adapter reports a session still rejected after one refresh", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      return Response.json({ access_token: `new-access-${refreshCalls}`, refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    return Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+  });
+  await assert.rejects(adapter.complete(input), AskSetupError);
+  assert.equal(refreshCalls, 1);
+});
+
+test("Anthropic adapter stops waiting for a shared refresh when its call is aborted", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", (url: string, request?: RequestInit) => new Promise((_, reject) => {
+    request?.signal?.addEventListener("abort", () => reject(request.signal?.reason), { once: true });
+  }));
+  const controller = new AbortController();
+  const pending = adapter.complete({ ...input, signal: controller.signal });
+  setTimeout(() => controller.abort(new Error("caller cancelled")), 20);
+  const startedAt = Date.now();
+  await assert.rejects(pending, /caller cancelled/);
+  assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test("Anthropic adapter refreshes a session the profile endpoint rejects", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, null, "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    const authorized = new Headers(request?.headers).get("authorization") === "Bearer new-access";
+    if (url.endsWith("/api/oauth/profile")) {
+      return authorized
+        ? Response.json({ account: { uuid: "profile-account" } })
+        : Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+    }
+    assert.ok(authorized);
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter waits briefly for a concurrent refresh that writes after its own was rejected", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      setTimeout(() => void writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh"), 300);
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter keeps using a still valid token when its refresh fails transiently", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("current-access", Date.now() + 60_000, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) throw new TypeError("fetch failed", { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer current-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter retries a transient refresh failure and reports it as a call failure, not a sign-in problem", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      return Response.json({ error: "server_error" }, { status: 503 });
+    }
+    return streamReply("OK");
+  });
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(!(error instanceof AskSetupError));
+    assert.match(String((error as Error).message), /refresh.*HTTP 503/);
+    return true;
+  });
+  assert.equal(refreshCalls, 3);
+});
+
+test("Anthropic adapter retries a transient profile failure", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60 * 60_000, null);
+  let profileCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) {
+      profileCalls += 1;
+      return profileCalls === 1 ? new Response("unavailable", { status: 503 }) : Response.json({ account: { uuid: "profile-account" } });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(profileCalls, 2);
+});
+
+test("Anthropic adapter reads the profile once for concurrent first calls", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60 * 60_000, null);
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return Response.json({ account: { uuid: "profile-account" } });
+    }
+    return streamReply("OK");
+  });
+  await Promise.all([adapter.complete(input), adapter.complete(input), adapter.complete(input)]);
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).endsWith("/api/oauth/profile")).length, 1);
+});
+
+test("Anthropic adapter masks both tokens in refresh errors", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: "invalid_grant", error_description: "old-access and old-refresh are revoked" }, { status: 400 }));
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    const message = String((error as Error).message);
+    assert.doesNotMatch(message, /old-access|old-refresh/);
+    assert.match(message, /\[REDACTED\] and \[REDACTED\] are revoked/);
+    return true;
+  });
+});
+
+test("Anthropic adapter uses a token without a refresh token until it really expires", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("short-lived", Date.now() + 60_000);
+  t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter waits for Claude Code's refresh lock and uses the tokens it saved", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const lock = path.join(path.dirname(credentialsPath), ".oauth_refresh.lock");
+  await mkdir(lock);
+  setTimeout(async () => {
+    await writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh");
+    await rmdir(lock);
+  }, 300);
+  const fetch = t.mock.method(globalThis, "fetch", async (_url: string, request?: RequestInit) => {
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).includes("/v1/oauth/token")).length, 0);
+});
+
+test("Anthropic adapter holds both refresh locks while refreshing and releases them after", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const dir = path.dirname(credentialsPath);
+  const locks = [path.join(dir, ".oauth_refresh.lock"), `${dir}.lock`];
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      for (const lock of locks) assert.ok((await lstat(lock)).isDirectory(), lock);
+      return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  for (const lock of locks) await assert.rejects(lstat(lock), { code: "ENOENT" });
+});
+
+test("Anthropic adapter takes over a stale refresh lock", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const lock = path.join(path.dirname(credentialsPath), ".oauth_refresh.lock");
+  await mkdir(lock);
+  const old = new Date(Date.now() - 120_000);
+  await utimes(lock, old, old);
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter saves its refreshed tokens over credentials another client blanked", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeFile(credentialsPath, JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 }, accountUuid: "account-test" }));
+      return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "new-access");
+  assert.equal(saved.claudeAiOauth.refreshToken, "new-refresh");
+});
+
+test("Anthropic adapter refreshes with the client id stored in the credentials", async (t) => {
+  const { adapter, credentialsPath } = await credentialFixture(t);
+  await writeFile(credentialsPath, JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() - 1, clientId: "stored-client" }, accountUuid: "account-test" }));
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      assert.equal(JSON.parse(String(request?.body)).client_id, "stored-client");
+      return Response.json({ access_token: "new-access", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter writes refreshed tokens through a symlinked credentials file", async (t) => {
+  const { adapter, credentialsPath } = await credentialFixture(t);
+  const target = `${credentialsPath}.real`;
+  await writeFile(target, JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() - 1 }, accountUuid: "account-test" }));
+  await symlink(target, credentialsPath);
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.ok((await lstat(credentialsPath)).isSymbolicLink());
+  assert.equal(JSON.parse(await readFile(target, "utf8")).claudeAiOauth.accessToken, "new-access");
+});
+
+test("Anthropic treats a stream that drops after its stop reason as complete", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const fetch = t.mock.method(globalThis, "fetch", async () => eventStream([
+    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    textDelta("Complete answer"),
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } },
+  ]));
+  const reply = await adapter.complete(input);
+  assert.equal(reply.text, "Complete answer");
+  assert.equal(reply.stopReason, "end_turn");
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
+test("Anthropic parses LF-framed streams", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const frames = [
+    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    textDelta("Hello"),
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+    { type: "message_stop" },
+  ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  t.mock.method(globalThis, "fetch", async () => new Response(frames, { headers: { "content-type": "text/event-stream" } }));
+  assert.equal((await adapter.complete(input)).text, "Hello");
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {
@@ -131,12 +516,19 @@ test("Anthropic adapter sends ordered base64 image blocks and preserves stop rea
   }]);
 });
 
+test("Anthropic adapter rejects an output limit reached before any text", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(globalThis, "fetch", async () => streamReply("", "max_tokens"));
+  await assert.rejects(adapter.complete(input), /reached max_tokens before producing text/);
+});
+
 test("missing or expired session is reported before sending the prompt", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   const fetch = t.mock.method(globalThis, "fetch", async () => new Response());
   await assert.rejects(adapter.complete(input), AskSetupError);
   await writeSession("expired-token", Date.now() - 1);
-  await assert.rejects(adapter.complete(input), /local Claude Code session has expired/);
+  await assert.rejects(adapter.complete(input), /expired without a refresh token/);
   assert.equal(fetch.mock.callCount(), 0);
 });
 
@@ -184,6 +576,7 @@ test("Anthropic retries 429 twice and obeys the abort signal during backoff", as
   const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift() ?? throttled());
   assert.equal((await adapter.complete(input)).text, "OK");
   assert.equal(fetch.mock.callCount(), 3);
+  assert.deepEqual(fetch.mock.calls.slice(0, 3).map((call) => new Headers(call.arguments[1]?.headers).get("x-stainless-retry-count")), ["0", "1", "2"]);
   await assert.rejects(adapter.complete(input), {
     message: "Anthropic Messages returned HTTP 429.",
   });
@@ -392,4 +785,19 @@ test("Anthropic exposes masked network causes for request and stream failures", 
   })));
   await assert.rejects(adapter.complete(input), /while reading the Anthropic Messages stream: HPE_INVALID_HEADER_TOKEN: Invalid header \[REDACTED\]/);
   assert.equal(fetch.mock.callCount(), 6);
+});
+
+test("Anthropic retries profile network failures, then reports them with their cause and masks the token", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 10 * 60_000, null);
+  const fetch = t.mock.method(globalThis, "fetch", async () => {
+    const cause = Object.assign(new Error("DNS failed for test-token"), { code: "ENOTFOUND" });
+    throw new TypeError("fetch failed", { cause });
+  });
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(error instanceof ToolError && !(error instanceof AskSetupError));
+    assert.equal(fetch.mock.callCount(), 3);
+    assert.match(error.message, /profile: ENOTFOUND: DNS failed for \[REDACTED\]/);
+    return true;
+  });
 });
