@@ -45,7 +45,7 @@ Bulky results are files under the output directory that `tabs_list` reports. You
 | Keep the whole traffic | `network_export` (HAR, unmasked) |
 | Many steps you can already describe (repeat, paginate, loop over rows or tabs) | `run_script`; runs of minutes with `background: true` and `jobs` |
 | Read one JavaScript value in the page | `evaluate` |
-| A page's JavaScript errors | `console_logs` (local development hosts with the default engine) |
+| A page's JavaScript errors | `console_logs` (the page's own messages on local development hosts with the default engine) |
 | A tool failed, often with `[req <id>]` | `server_log` with that `request_id` |
 | What a site taught you last time | `site_notes` (read when a result says notes exist, append what took effort) |
 
@@ -72,7 +72,7 @@ These show the shape of a good route, not templates.
 - A result that starts with `Note: the tab moved to …` means the page navigated since your last call on that tab, by the user or by itself. `Note: this looks like a sign-in page` means the session probably expired.
 - A click that reports another element intercepting pointer events has a banner, modal or sticky header over the target; `dismiss_overlays` handles banners and modals, iframes included.
 - `evaluate` runs in the page's own JavaScript world. In `run_script`, functions passed to `page.evaluate` or `locator.evaluate` run in an isolated world that shares the DOM but not the page's globals.
-- Console capture is off on ordinary sites with the default stealth engine; `console_logs` works on localhost, 127.0.0.1, `*.localhost` and `*.test`.
+- With the default stealth engine, `console_logs` captures the page's own console calls and uncaught errors only on localhost, 127.0.0.1, `*.localhost` and `*.test`; on other sites it returns only messages Chrome itself logs about the page, such as Permissions-Policy header errors.
 - Secrets typed with `secret` are masked in tool results, in the text files the server writes (collect_pages files, overflow files, reports, script and job output), in page text sent to the `ask_pages` model and in the server log; one-time codes for 2 minutes. Usernames, raw exports (`cookies` export, `network_export`, `storage` export), downloads, binary files and screenshots keep values as they are. Do not read a secret back out of the page.
 - `ask_pages` answers come from a fast model reading quickly; check the facts a decision rests on against the page. When each page needs work it cannot do, such as following a link, use `run_script` or Claude Code subagents over the collected files instead.
 - When the user closes the window or Chrome dies, the next `tab_open` starts it again with the same profile; earlier tab ids are gone.

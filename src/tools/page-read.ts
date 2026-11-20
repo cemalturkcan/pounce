@@ -145,7 +145,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "console_logs",
     title: "Console logs",
     description:
-      "Return the console messages and uncaught errors captured for a tab, newest last. Use it when a page misbehaves or shows a blank area, to look for JavaScript errors, or to check a local app for warnings. With the default stealth engine, capture works on local development hosts (localhost, 127.0.0.1, *.localhost, *.test); other sites return nothing unless the server runs with WEB_AGENT_CONSOLE_HOOK=all or WEB_AGENT_ENGINE=playwright. Failed requests are in network_requests, and failures of this server's own tools in server_log.",
+      "Return the console messages and uncaught errors captured for a tab, newest last. Use it when a page misbehaves or shows a blank area, to look for JavaScript errors, or to check a local app for warnings. With the default stealth engine, the page's own console calls and uncaught errors are captured only on local development hosts (localhost, 127.0.0.1, *.localhost, *.test), unless the server runs with WEB_AGENT_CONSOLE_HOOK=all or WEB_AGENT_ENGINE=playwright. Messages Chrome itself logs about the page, such as a Permissions-Policy header error, are captured on every site. Failed requests are in network_requests, and failures of this server's own tools in server_log.",
     input: {
       tab: tabParam,
       level: z.enum(["all", "errors"]).optional().describe("errors keeps only error and warning entries. Default all."),

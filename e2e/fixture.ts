@@ -160,7 +160,7 @@ export async function startFixture(): Promise<Fixture> {
     if (pathname === "/framed") {
       response.writeHead(200, { "content-type": "text/html" }).end(framedPage(`http://${request.headers.host ?? "127.0.0.1"}`));
     } else if (content) {
-      response.writeHead(200, { "content-type": content.type }).end(content.body());
+      response.writeHead(200, { "content-type": content.type, ...(pathname === "/console" ? { "permissions-policy": "fixture-feature=()" } : {}) }).end(content.body());
     } else if (pages[pathname]) {
       response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
     } else if (pathname === "/pixel.png") {
@@ -501,4 +501,9 @@ document.querySelectorAll(".reveal, #count").forEach((element) => seen.observe(e
 CONTENT_ROUTES["/files/swatch.svg"] = {
   type: "image/svg+xml",
   body: () => `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><rect width="600" height="300" fill="rgb(${REVEAL_COLORS.image.join(",")})"/></svg>`,
+};
+
+CONTENT_ROUTES["/console"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><title>Fixture Console</title></head><body><p>Console page</p><script>console.log("page log line"); setTimeout(() => { throw new Error("uncaught page error"); }, 0);</script></body></html>`,
 };
