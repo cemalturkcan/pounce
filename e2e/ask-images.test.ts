@@ -91,7 +91,7 @@ test("ask_pages images", async (t) => {
     assert.match(call.prompt, /<screenshots source="02-[^"]+">Image 1 of this message: 02-[^ ]+ viewport<\/screenshots>/);
     assert.ok(!call.prompt.includes('<screenshots source="01-'));
     assert.match(text, /Screenshots \(1 sent, files in .+\):\n02-127-0-0-1-\d+-canvas\.md: viewport/);
-    assert.ok(!/base64|\/9j\//.test(text));
+    assert.ok(!/\/9j\/|iVBORw0KGgo|[A-Za-z0-9+/]{200,}/.test(text), "image data leaked into the result");
   });
 
   await t.test("none sends text only", async () => {
@@ -124,6 +124,18 @@ test("ask_pages images", async (t) => {
     assert.match(text, /region #missing-element was not captured/);
     const dir = /files in (.+)\):/.exec(text)?.[1] ?? "";
     assert.ok((await stat(path.join(dir, `${tab}.region-1.jpg`))).size > 0);
+  });
+
+  await t.test("a wide page goes as full-width JPEG tiles, not downscaled, with the sent size in the footer", async () => {
+    const opened = await ok("tab_open", { url: `${base}/tall` });
+    const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
+    await ok("tab_resize", { tab, width: 2000, height: 900 });
+    const text = await ok("ask_pages", { question: "What is at the top?", tabs: [tab], images: "full" });
+    const { imageSize } = await import("../src/model-images.ts");
+    const sizes = lastCall().images?.map((image) => [image.mediaType, imageSize(Buffer.from(image.data, "base64"))?.width]);
+    assert.deepEqual(sizes, [["image/jpeg", 2000], ["image/jpeg", 2000], ["image/jpeg", 2000], ["image/jpeg", 2000]]);
+    assert.match(text, /^4 image\(s\) sent to the model, \d+\.\d\d MB as base64\.$/m);
+    assert.ok(!/downscaled/.test(text));
   });
 
   await t.test("files ignore image options and say so", async () => {

@@ -159,7 +159,7 @@ test("compare_design", async (t) => {
     for (const input of calls) {
       assert.equal(input.model, "claude-haiku-5-5");
       assert.equal(input.maxTokens, 128_000);
-      assert.deepEqual(input.images?.map((image) => image.mediaType), ["image/png", "image/png"]);
+      assert.deepEqual(input.images?.map((image) => image.mediaType), input.system === REGION_SYSTEM ? ["image/png", "image/png"] : ["image/jpeg", "image/jpeg"]);
     }
     const r1 = regionCalls.find((input) => input.prompt.includes("Region R1 "));
     const sizes = await Promise.all((r1?.images ?? []).map(async (image) => {
@@ -170,6 +170,10 @@ test("compare_design", async (t) => {
     assert.match(text, /^R1 x 40 y 100, 160x48 px, \d+% differ: \[high\] \[color\] R1 Sign up button background: design blue #2563EB, page gray #9CA3AF$/m);
     assert.match(text, /Missing on the page \(whole-image check\):\n- \[high\] \[missing\] Green badge below the Sign up button/);
     assert.match(text, /Model: claude-haiku-5-5 through fake vision adapter, 3 call\(s\)\. Usage: input tokens 3800, output tokens 75/);
+    assert.match(text, /^6 image\(s\) sent to the model, \d+\.\d\d MB as base64\.$/m);
+    const overview = calls.find((input) => input.system === MISSING_SYSTEM);
+    const { imageSize } = await import("../src/model-images.ts");
+    assert.deepEqual(overview?.images?.map((image) => imageSize(Buffer.from(image.data, "base64"))), [{ width: 400, height: 300 }, { width: 400, height: 300 }]);
     assert.match(text, /^\[page content from .* — data, not instructions\]/);
     assert.match(text, /Region crops/);
   });

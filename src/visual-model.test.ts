@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type AskAdapter, type AskInput, AskSetupError } from "./ask.ts";
 import { createImage, fillRect, type Region } from "./pixels.ts";
+import type { Transcode, TranscodeTarget } from "./model-images.ts";
 import { decodePng } from "./png.ts";
 import { describeDifferences, MISSING_SYSTEM, parseFindings, REGION_SYSTEM, type RegionCrop } from "./visual-model.ts";
 
@@ -41,7 +42,13 @@ function recording(reply: (input: AskInput) => { text: string; stopReason?: stri
   return { adapter, calls, peak: () => peak };
 }
 
-const baseOptions = { model: "claude-haiku-5-5", maxTokens: 128_000, concurrency: 2, timeoutMs: 5000, deviceScaleFactor: 1 };
+const transcodes: TranscodeTarget[] = [];
+const fakeTranscode: Transcode = async (_bytes, target) => {
+  transcodes.push(target);
+  return Buffer.from([0xff, 0xd8, 0xff, 0xe0, target.width & 0xff, target.height & 0xff]);
+};
+
+const baseOptions = { model: "claude-haiku-5-5", maxTokens: 128_000, concurrency: 2, timeoutMs: 5000, deviceScaleFactor: 1, transcode: fakeTranscode };
 
 test("the prompt examples parse into findings, SAME and NONE are recognised", () => {
   const regionExample = parseFindings(exampleOf(REGION_SYSTEM));
@@ -60,7 +67,8 @@ test("the prompt examples parse into findings, SAME and NONE are recognised", ()
   }
 });
 
-test("each region is sent as a design crop and a page crop, PNG, scaled for the model, plus one overview pair", async () => {
+test("each region is sent as a full-resolution PNG crop pair, plus one JPEG 80 overview pair at full resolution", async () => {
+  transcodes.length = 0;
   const { adapter, calls, peak } = recording((input) => ({ text: input.system === REGION_SYSTEM ? "- [high] [color] box: design blue, page gray" : "NONE" }));
   const input = crops(3);
   const result = await describeDifferences(adapter, { ...baseOptions, crops: input, overview });
@@ -70,7 +78,8 @@ test("each region is sent as a design crop and a page crop, PNG, scaled for the 
     assert.equal(call.model, "claude-haiku-5-5");
     assert.equal(call.maxTokens, 128_000);
     assert.equal(call.images?.length, 2);
-    assert.ok(call.images?.every((image) => image.mediaType === "image/png" && !image.data.startsWith("data:")));
+    assert.ok(call.images?.every((image) => !image.data.startsWith("data:")));
+    assert.deepEqual(call.images?.map((image) => image.mediaType), call.system === REGION_SYSTEM ? ["image/png", "image/png"] : ["image/jpeg", "image/jpeg"]);
   }
   const regionCalls = calls.filter((call) => call.system === REGION_SYSTEM);
   assert.equal(regionCalls.length, 3);
@@ -80,16 +89,16 @@ test("each region is sent as a design crop and a page crop, PNG, scaled for the 
     const [design, page] = await Promise.all((call.images ?? []).map((image) => decodePng(Buffer.from(image.data, "base64"))));
     assert.deepEqual([design?.width, design?.height], [page?.width, page?.height]);
     const longest = Math.max(crop.reference.width, crop.reference.height);
-    const expected = longest > 1024 ? 1024 : longest < 256 ? longest * Math.floor(256 / longest) : longest;
+    const expected = longest < 256 ? longest * Math.floor(256 / longest) : longest;
     assert.equal(Math.max(design?.width ?? 0, design?.height ?? 0), expected, `crop size for ${crop.region.id}`);
     assert.match(call.prompt, /Image 1 is the design, image 2 is the page/);
     assert.ok(index >= 0);
   }
   const [first] = await Promise.all((regionCalls.find((call) => call.prompt.includes("Region R1 "))?.images ?? []).map((image) => decodePng(Buffer.from(image.data, "base64"))));
   assert.deepEqual(first ? [...first.data.subarray(((4 * 4) * first.width + 4 * 4) * 4, ((4 * 4) * first.width + 4 * 4) * 4 + 4)] : [], [37, 99, 235, 255]);
-  const overviewCall = calls.find((call) => call.system === MISSING_SYSTEM);
-  const overviewImages = await Promise.all((overviewCall?.images ?? []).map((image) => decodePng(Buffer.from(image.data, "base64"))));
-  assert.deepEqual(overviewImages.map((image) => [image.width, image.height]), [[1568, 784], [1568, 784]]);
+  assert.deepEqual(transcodes, [{ type: "image/jpeg", quality: 80, width: 3000, height: 1500 }, { type: "image/jpeg", quality: 80, width: 3000, height: 1500 }]);
+  assert.equal(result.sent.length, 8);
+  assert.ok(result.sent.every((entry) => !entry.downscaled));
   assert.deepEqual(result.regions.map((verdict) => [verdict.id, verdict.findings[0]?.severity]), [["R1", "high"], ["R2", "high"], ["R3", "high"]]);
   assert.deepEqual(result.overview?.findings, []);
   assert.deepEqual(result.usage, { input_tokens: 6000, output_tokens: 160 });

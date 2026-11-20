@@ -9,6 +9,7 @@ import { ToolError } from "./errors.ts";
 import type { OutputStore } from "./output.ts";
 import { type Box, clusterRegions, crop, diffImages, type Region, renderDiffImage, resize, type RgbaImage } from "./pixels.ts";
 import { decodePng, encodePng, isPng, UnsupportedPngError } from "./png.ts";
+import { browserTranscoder, describeSent } from "./model-images.ts";
 import { describeDifferences, type Finding, type ModelLayerResult } from "./visual-model.ts";
 
 export type CompareOptions = {
@@ -47,7 +48,7 @@ export type CompareReport = {
   diffRatio: number;
   regions: ComparedRegion[];
   missing?: Finding[];
-  model?: { id: string; adapter: string; calls: number; usage?: Record<string, number>; overviewError?: string; setupError?: string };
+  model?: { id: string; adapter: string; calls: number; usage?: Record<string, number>; overviewError?: string; setupError?: string; images: string };
   files: { dir: string; screenshot: string; diff: string; report: string };
   text: string;
 };
@@ -237,7 +238,7 @@ export function renderReport(report: Omit<CompareReport, "text">, modelNote?: st
   }
   if (report.model) {
     const usage = report.model.usage ? describeUsage(report.model.usage) : "not reported";
-    lines.push("", `Model: ${report.model.id} through ${report.model.adapter}, ${report.model.calls} call(s). Usage: ${usage}.`);
+    lines.push("", `Model: ${report.model.id} through ${report.model.adapter}, ${report.model.calls} call(s). Usage: ${usage}.`, report.model.images);
     if (report.model.overviewError) lines.push(`The whole-image check failed: ${report.model.overviewError}`);
   }
   if (modelNote) lines.push("", modelNote);
@@ -246,7 +247,7 @@ export function renderReport(report: Omit<CompareReport, "text">, modelNote?: st
   return lines.join("\n");
 }
 
-async function runModel(deps: CompareDeps, options: CompareOptions, crops: Parameters<typeof describeDifferences>[1]["crops"], overview: { reference: RgbaImage; page: RgbaImage }, deviceScaleFactor: number) {
+async function runModel(deps: CompareDeps, page: Page, options: CompareOptions, crops: Parameters<typeof describeDifferences>[1]["crops"], overview: { reference: RgbaImage; page: RgbaImage }, deviceScaleFactor: number) {
   const id = modelId(options.model ?? "haiku");
   let adapter;
   try {
@@ -262,6 +263,7 @@ async function runModel(deps: CompareDeps, options: CompareOptions, crops: Param
     concurrency: options.concurrency ?? DEFAULTS.concurrency,
     timeoutMs: options.timeoutMs ?? DEFAULTS.timeoutMs,
     deviceScaleFactor,
+    transcode: browserTranscoder(page),
     signal: options.signal,
   });
   const note = result.setupError ? `The model layer stopped: ${result.setupError} Only the pixel layer is shown.` : undefined;
@@ -315,7 +317,7 @@ export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: 
   let model: CompareReport["model"];
   let missing: Finding[] | undefined;
   if ((options.model ?? "haiku") !== "none" && regions.length > 0) {
-    const outcome = await runModel(deps, options, crops, { reference: aligned.reference, page: aligned.page }, deviceScaleFactor);
+    const outcome = await runModel(deps, page, options, crops, { reference: aligned.reference, page: aligned.page }, deviceScaleFactor);
     modelNote = outcome.note;
     if (outcome.result && outcome.id && outcome.adapter) {
       for (const verdict of outcome.result.regions) {
@@ -327,7 +329,7 @@ export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: 
         if (verdict.truncated) target.truncated = true;
       }
       missing = outcome.result.overview?.findings;
-      model = { id: outcome.id, adapter: outcome.adapter, calls: outcome.result.calls, usage: outcome.result.usage, overviewError: outcome.result.overview?.error, setupError: outcome.result.setupError };
+      model = { id: outcome.id, adapter: outcome.adapter, calls: outcome.result.calls, usage: outcome.result.usage, overviewError: outcome.result.overview?.error, setupError: outcome.result.setupError, images: describeSent(outcome.result.sent) };
     }
   }
   if (regions.length > maxRegions && (options.model ?? "haiku") !== "none") notes.push(`The model looked at the ${maxRegions} largest region(s); raise max_regions to describe more.`);

@@ -4,17 +4,17 @@ import type { AskImage } from "./ask-adapter.ts";
 import { withTimeout } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { ToolError } from "./errors.ts";
+import { browserTranscoder, imageSize, JPEG_QUALITY, type PreparedImage, prepareModelImage } from "./model-images.ts";
 
 export type ImageMode = "none" | "auto" | "viewport" | "full";
 export type RegionRequest = { target: string };
 export type PageVisualStats = { textChars: number; viewport: { width: number; height: number }; pageHeight: number; mediaArea: number };
-export type PageImages = { images: AskImage[]; files: string[]; kind: "none" | "viewport" | "tiles"; tiles: number; regions: number; notes: string[] };
+export type PageImages = { images: AskImage[]; prepared: PreparedImage[]; files: string[]; kind: "none" | "viewport" | "tiles"; tiles: number; regions: number; notes: string[] };
 
 export const TILE_HEIGHT = 1600;
 export const TILE_OVERLAP = 80;
 const MEDIA_SHARE = 0.4;
 const CHARS_PER_10K_PX = 2;
-const JPEG_QUALITY = 80;
 const STEP_MS = 20_000;
 
 export function looksVisual(stats: PageVisualStats) {
@@ -68,13 +68,18 @@ export async function capturePageImages(
   tab: Tab,
   options: { mode: ImageMode; regions: RegionRequest[]; source: string; dir: string; base: string },
 ): Promise<PageImages> {
-  const result: PageImages = { images: [], files: [], kind: "none", tiles: 0, regions: 0, notes: [] };
+  const result: PageImages = { images: [], prepared: [], files: [], kind: "none", tiles: 0, regions: 0, notes: [] };
   const { page } = tab;
+  const transcode = browserTranscoder(page);
   const keep = async (buffer: Buffer, suffix: string, label: string) => {
     const name = `${options.base}.${suffix}.jpg`;
     await writeFile(path.join(options.dir, name), buffer);
     result.files.push(path.join(options.dir, name));
-    result.images.push({ mediaType: "image/jpeg", data: buffer.toString("base64"), label });
+    const size = imageSize(buffer);
+    if (!size) throw new ToolError(`ask_pages: the screenshot ${name} has no readable size.`);
+    const prepared = await prepareModelImage({ bytes: buffer, ...size, encoded: { type: "image/jpeg", quality: JPEG_QUALITY } }, "jpeg", transcode, label);
+    result.prepared.push(prepared);
+    result.images.push(prepared.image);
   };
   let mode = options.mode;
   if (mode === "auto") mode = looksVisual(await measurePage(tab)) ? "viewport" : "none";

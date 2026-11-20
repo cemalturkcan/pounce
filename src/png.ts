@@ -143,7 +143,7 @@ function chunk(type: string, body: Buffer) {
   return Buffer.concat([head, body, crc]);
 }
 
-export async function encodePng(image: RgbaImage) {
+export async function encodePng(image: RgbaImage, options: { level?: number } = {}) {
   const stride = image.width * 4;
   const raw = Buffer.alloc((stride + 1) * image.height);
   for (let y = 0; y < image.height; y += 1) {
@@ -160,5 +160,5 @@ export async function encodePng(image: RgbaImage) {
   header.writeUInt32BE(image.height, 4);
   header[8] = 8;
   header[9] = 6;
-  return Buffer.concat([SIGNATURE, chunk("IHDR", header), chunk("IDAT", await deflateAsync(raw, { level: 6 })), chunk("IEND", Buffer.alloc(0))]);
+  return Buffer.concat([SIGNATURE, chunk("IHDR", header), chunk("IDAT", await deflateAsync(raw, { level: options.level ?? 6 })), chunk("IEND", Buffer.alloc(0))]);
 }

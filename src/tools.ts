@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { allBatchesFailed, type AskDocument, askPages, DEFAULT_BATCH_CHARS, DEFAULT_MAX_OUTPUT_TOKENS, modelId, renderAskResults, sourceNames } from "./ask.ts";
 import { capturePageImages, describePageImages, type PageImages } from "./ask-images.ts";
+import { describeSent } from "./model-images.ts";
 import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
@@ -141,8 +142,9 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         maxTokens: input.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         timeoutMs: input.timeout_ms ?? 180_000,
       });
-      const sentImages = [...shots.values()].reduce((total, captured) => total + captured.images.length, 0);
-      const imageFooter = imageLines.length || sentImages ? `\n\nScreenshots (${sentImages} sent${imageDir && sentImages ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}` : "";
+      const prepared = [...shots.values()].flatMap((captured) => captured.prepared);
+      const sentLine = prepared.length ? `\n${describeSent(prepared)}` : "";
+      const imageFooter = imageLines.length || prepared.length ? `\n\nScreenshots (${prepared.length} sent${imageDir && prepared.length ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}${sentLine}` : "";
       const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${imageFooter}`;
       const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
       if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
