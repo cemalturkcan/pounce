@@ -388,3 +388,25 @@ test("WEB_AGENT_AUTO_CONSENT defaults to accept and takes reject or off", () => 
   assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: " OFF " }).autoConsent, "off");
   assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: "maybe" }).autoConsent, "accept");
 });
+
+test("code after an await is time-limited unless async hooks are on and their stack cannot be repaired", async () => {
+  const scriptModule = new URL("./script.ts", import.meta.url).href;
+  const run = (hooks: boolean) =>
+    new Promise<string>((resolve) => {
+      const source = `
+        import { createHook } from "node:async_hooks";
+        if (${hooks}) createHook({ init() {} }).enable();
+        let repairable = true;
+        try { process.noDeprecation = true; repairable = typeof process.binding("async_wrap").popAsyncContext === "function"; } catch { repairable = false; }
+        const { canTimeMicrotasks } = await import(${JSON.stringify(scriptModule)});
+        process.stdout.write(JSON.stringify({ timed: await canTimeMicrotasks(), repairable }));
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "ignore"] });
+      let out = "";
+      child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+      child.once("exit", () => resolve(out));
+    });
+  assert.equal(JSON.parse(await run(false)).timed, true);
+  const hooked = JSON.parse(await run(true)) as { timed: boolean; repairable: boolean };
+  assert.equal(hooked.timed, hooked.repairable);
+});

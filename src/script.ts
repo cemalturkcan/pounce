@@ -251,7 +251,15 @@ function restoreAsyncStack(stack: AsyncStack, expected: number) {
   }
 }
 
-export const TIMED_MICROTASKS = asyncStack !== undefined;
+function promiseHooksActive() {
+  return new Promise<boolean>((resolve) => {
+    void Promise.resolve().then(() => resolve(executionAsyncId() !== 0));
+  });
+}
+
+export async function canTimeMicrotasks() {
+  return asyncStack !== undefined || !(await promiseHooksActive());
+}
 
 class ScriptClock {
   private readonly context: vm.Context;
@@ -475,7 +483,9 @@ export async function runScript(
   };
 
   const script = new vm.Script(`(async () => {\n${code}\n})()`, { filename: "run_script.js" });
-  const clock = new ScriptClock(vm.createContext(sandbox, TIMED_MICROTASKS ? { microtaskMode: "afterEvaluate" } : {}), guard, options.timeoutMs);
+  const timedMicrotasks = await canTimeMicrotasks();
+  if (!timedMicrotasks) recordFault("run_script", new Error("async hooks are enabled in this process and cannot be repaired here, so code after an await is not time-limited"));
+  const clock = new ScriptClock(vm.createContext(sandbox, timedMicrotasks ? { microtaskMode: "afterEvaluate" } : {}), guard, options.timeoutMs);
   guard.invoke = (fn, args) => clock.enter(fn, args);
   guard.settled = () => clock.queuePump();
   let timer: NodeJS.Timeout | undefined;
