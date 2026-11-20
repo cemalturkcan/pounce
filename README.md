@@ -31,6 +31,12 @@ claude mcp add --transport http --scope user web-agent-mcp http://127.0.0.1:2974
 
 The daemon only accepts requests whose `Host` and `Origin` point at its loopback endpoint.
 
+## Ask Pages
+
+The built-in `ask_pages` adapter sends selected page text to Claude Haiku by default. It runs the local Claude Code CLI with the Claude account signed in via `claude auth login`. Run the MCP server as the same OS user and check the active login with `claude auth status`.
+
+Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question. The built-in adapter drops inherited Anthropic environment overrides before launching the CLI.
+
 ## Profile import
 
 With the daemon stopped, copy cookies, saved passwords, history, bookmarks and site storage from your Chrome profile into the agent profile (the previous agent profile is kept as a backup):
@@ -53,6 +59,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
 | `WEB_AGENT_ASK_ADAPTER` | | Path to an ES module that replaces the `claude -p` backend of `ask_pages`; see `examples/ask-adapter.example.mjs` |
+| `WEB_AGENT_ASK_CLAUDE_COMMAND` | `claude` | Claude Code executable used by the built-in adapter |
 
 ## Tests
 
