@@ -928,17 +928,6 @@ test("ask_pages edge cases through the tool", async (t) => {
       assert.deepEqual([result.isError, /upstream refused 2 pages/.test(result.text)], [true, true]);
     });
 
-    await t.test("without a configured adapter it fails at once and names WEB_AGENT_ASK_ADAPTER", async () => {
-      deps.ask = new AskAdapterSource({});
-      const before = seen.length;
-      const result = await call("ask_pages", { question: "What is here?", files });
-      deps.ask = new AskAdapterSource({ adapter: scripted });
-      assert.equal(result.isError, true);
-      assert.match(result.text, /No model adapter is configured[\s\S]*WEB_AGENT_ASK_ADAPTER[\s\S]*ask-adapter\.example\.mjs/);
-      assert.equal(seen.length, before);
-      assert.match(await ok("tabs_list"), /ask_pages adapter: scripted adapter/);
-    });
-
     await t.test("passes the mapped model id, and other ids unchanged, to the adapter", async () => {
       const models: string[] = [];
       deps.ask = new AskAdapterSource({ adapter: { name: "model probe", complete: async ({ model, maxTokens }) => (models.push(`${model} ${maxTokens}`), { text: "NOT FOUND" }) } });

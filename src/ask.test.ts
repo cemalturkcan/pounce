@@ -249,27 +249,6 @@ test("sourceNames uses paths relative to the common folder when base names colli
 
 const writeAdapter = (file: string, name: string) => writeFile(file, `export default { name: ${JSON.stringify(name)}, complete: async () => ({ text: "ok" }) };`);
 
-test("with no module, no default file and no code adapter the source fails fast naming the env var, the default path and the example", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-default-"));
-  try {
-    const defaultPath = path.join(dir, "ask-adapter.mjs");
-    const source = new AskAdapterSource({ defaultPath });
-    assert.equal(source.configured, false);
-    assert.equal(source.label, "none configured");
-    await assert.rejects(source.get(), (error: Error) => {
-      assert.ok(error instanceof ToolError);
-      const text = describeError(error);
-      assert.match(text, /No model adapter is configured/);
-      assert.match(text, /WEB_AGENT_ASK_ADAPTER/);
-      assert.ok(text.includes(defaultPath), text);
-      assert.match(text, /examples\/ask-adapter\.example\.mjs/);
-      return true;
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("resolution order is modulePath, then the default file when it exists, then the code adapter", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ask-order-"));
   try {
@@ -292,7 +271,6 @@ test("resolution order is modulePath, then the default file when it exists, then
 test("a modulePath that does not exist is a load error, not a silent fallback", async () => {
   const missing = path.join(tmpdir(), `no-adapter-${token()}.mjs`);
   const source = new AskAdapterSource({ modulePath: missing, adapter: { name: "from code", complete: async () => ({ text: "" }) } });
-  assert.equal(source.configured, true);
   await assert.rejects(source.get(), /Could not load the ask adapter/);
 });
 
@@ -301,7 +279,7 @@ test("the label names a module by path until it has loaded", async () => {
   try {
     const file = path.join(dir, "named.mjs");
     await writeAdapter(file, "named module");
-    const fromModule = new AskAdapterSource({ modulePath: file });
+    const fromModule = new AskAdapterSource({ modulePath: file, adapter: { name: "from code", complete: async () => ({ text: "" }) } });
     assert.equal(fromModule.label, `module ${file}`);
     await fromModule.get();
     assert.equal(fromModule.label, `named module (${file})`);

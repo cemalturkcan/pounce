@@ -19,16 +19,6 @@ export function modelId(model: string) {
   return MODEL_IDS[model.trim().toLowerCase()] ?? model;
 }
 
-export const ADAPTER_EXAMPLE = "examples/ask-adapter.example.mjs";
-
-export function noAdapterError(defaultPath?: string) {
-  const fallback = defaultPath ? `, or put that module at ${defaultPath} (picked up without a restart)` : "";
-  return new AskSetupError(
-    "No model adapter is configured, so no model can be asked.",
-    `Set WEB_AGENT_ASK_ADAPTER in the server's environment to the absolute path of an ES module that default-exports an AskAdapter ({ name, complete(input) })${fallback}; see ${ADAPTER_EXAMPLE} in the server directory.`,
-  );
-}
-
 export type BatchResult = {
   index: number;
   sources: string[];
@@ -324,40 +314,32 @@ type AdapterChoice = { key: string; path?: string; load: () => Promise<AskAdapte
 export class AskAdapterSource {
   private readonly modulePath?: string;
   private readonly defaultPath?: string;
-  private readonly adapter?: AskAdapter;
+  private readonly adapter: AskAdapter;
   private readonly loaded = new Map<string, Promise<AskAdapter>>();
   private readonly names = new Map<string, string>();
 
-  constructor(options: { modulePath?: string; defaultPath?: string; adapter?: AskAdapter }) {
+  constructor(options: { modulePath?: string; defaultPath?: string; adapter: AskAdapter }) {
     this.modulePath = options.modulePath;
     this.defaultPath = options.defaultPath;
     this.adapter = options.adapter;
   }
 
-  private choice(): AdapterChoice | undefined {
+  private choice(): AdapterChoice {
     const fromFile = (file: string) => ({ key: `file:${file}`, path: file, load: () => loadAdapterModule(file) });
     if (this.modulePath) return fromFile(this.modulePath);
     if (this.defaultPath && existsSync(this.defaultPath)) return fromFile(this.defaultPath);
-    const { adapter } = this;
-    if (adapter) return { key: "code", load: () => Promise.resolve(adapter) };
-    return undefined;
-  }
-
-  get configured() {
-    return this.choice() !== undefined;
+    return { key: "code", load: () => Promise.resolve(this.adapter) };
   }
 
   get label() {
     const choice = this.choice();
-    if (!choice) return "none configured";
-    if (!choice.path) return this.adapter?.name ?? "adapter";
+    if (!choice.path) return this.adapter.name;
     const name = this.names.get(choice.key);
     return name ? `${name} (${choice.path})` : `module ${choice.path}`;
   }
 
   get() {
     const choice = this.choice();
-    if (!choice) return Promise.reject(noAdapterError(this.defaultPath));
     let pending = this.loaded.get(choice.key);
     if (!pending) {
       pending = choice.load().then(

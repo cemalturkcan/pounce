@@ -11,7 +11,7 @@ The agent-facing guide is [`skills/web-agent-browser/SKILL.md`](skills/web-agent
 
 ## Requirements
 
-Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, and a model adapter module for `ask_pages` and the model layer of `compare_design`.
+Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, a local Claude Code sign-in for the built-in model adapter used by `ask_pages` and the model layer of `compare_design`.
 
 ## Run
 
@@ -33,9 +33,11 @@ The daemon only accepts requests whose `Host` and `Origin` point at its loopback
 
 ## Ask Pages
 
-`ask_pages` needs a model adapter: an ES module that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists (picked up without a restart), otherwise from an adapter wired into the server in code. Adapter files can `import type { AskAdapter } from "./src/ask-adapter.ts"` for the contract: `complete({ system, prompt, model, maxTokens, images?, signal })` resolves to `{ text, usage?, stopReason? }`, and `images` (`{ mediaType, data, label? }`, base64 without a `data:` prefix) are in order. Without either, `ask_pages` fails at once with a message saying how to add one, and `tabs_list` shows `ask_pages adapter: none configured`. `examples/ask-adapter.example.mjs` shows the shape, including how image blocks (used by `compare_design`) map to Messages API content blocks. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
+The built-in adapter sends requests directly to the Anthropic Messages API. It uses the Claude account session saved by `claude auth login` in `~/.claude/.credentials.json` or in the directory set by `CLAUDE_CONFIG_DIR`. Run the MCP server as the signed-in OS user. Claude Code manages the session, and the adapter rereads the file for each call.
 
-The adapter returns `{ text, usage?, stopReason? }`; pass the API's `stop_reason` through as `stopReason` so a call cut off at the output limit (`max_tokens`) is reported as cut off with its partial answers and a `refusal` is reported as a failed call. With `max_tokens` up to 128000, the adapter should use the streaming API to avoid HTTP timeouts.
+Another adapter can replace it: an ES module that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists (picked up without a restart), otherwise it uses the built-in adapter; `tabs_list` names the active one. Adapter files can `import type { AskAdapter } from "./src/ask-adapter.ts"` for the contract: `complete({ system, prompt, model, maxTokens, images?, signal })` resolves to `{ text, usage?, stopReason? }`, and `images` (`{ mediaType, data, label? }`, base64 without a `data:` prefix) are in order. `examples/ask-adapter.example.mjs` shows the shape, including image blocks. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
+
+Adapters pass the API's `stop_reason` through as `stopReason`, so a call cut off at the output limit (`max_tokens`) is reported as cut off with its partial answers and a `refusal` is reported as a failed call. With `max_tokens` up to 128000, an adapter should use the streaming API to avoid HTTP timeouts.
 
 There are no default limits: pages are not clipped, one call takes as many pages as fit about 3 million characters (under the 1M-token context), and the output limit is the model maximum (128000 tokens). Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens` lower them.
 
@@ -64,7 +66,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_DEFAULT_LAUNCH_ARGS` | | Extra Chrome flags, space-separated |
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
-| `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` (used when it exists) | Absolute path of the model adapter module for `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
+| `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` when it exists, else the built-in Anthropic adapter | Absolute path of an ES module that replaces the model adapter of `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
 
 ## Tests
 

@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AskAdapterSource, type AskAdapter } from "./ask.ts";
+import { anthropicAskAdapter } from "./ask-anthropic.ts";
 import { BrowserManager } from "./browser.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { daemonStatus, startDaemon, stopDaemon } from "./daemon.ts";
@@ -31,7 +32,7 @@ export function createDeps(config: Config, secrets?: SecretStore, askAdapter?: A
     secrets: secrets ?? (config.secretsBackend === "gopass" ? new GopassStore() : new NoSecretStore()),
     redactor,
     jobs: new JobRunner(),
-    ask: new AskAdapterSource({ modulePath: config.askAdapter, defaultPath: config.askAdapterPath, adapter: askAdapter }),
+    ask: new AskAdapterSource(askAdapter ? { adapter: askAdapter } : { modulePath: config.askAdapter, defaultPath: config.askAdapterPath, adapter: anthropicAskAdapter() }),
   };
 }
 
