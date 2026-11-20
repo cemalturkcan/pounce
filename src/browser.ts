@@ -23,6 +23,8 @@ const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const POPUP_GRACE_MS = 600;
+const DOWNLOAD_START_MS = 3000;
+const DOWNLOAD_SAVE_MS = 60_000;
 const CLOSED_OUTSIDE_LIMIT = 200;
 export const LEAVE_CANCELLED = "the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
 const PASSKEY_KEY = "webAgent.passkey";
@@ -68,6 +70,7 @@ export type Tab = {
   ruleCounter: number;
   document?: { url: string; status: number; redirected: boolean };
   popupChecks: Set<PopupCheck>;
+  downloads: { at: number; name: string; saving: Promise<string> }[];
   openerId?: string;
   lastSeenUrl?: string;
   closingByTool?: boolean;
@@ -260,6 +263,7 @@ export class BrowserManager {
       rules: [],
       ruleCounter: 0,
       popupChecks: new Set(),
+      downloads: [],
     };
     this.tabs.set(tab.id, tab);
     this.byPage.set(page, tab);
@@ -302,8 +306,11 @@ export class BrowserManager {
     page.on("download", (download) => {
       const fileName = `${timestampSlug()}-${download.suggestedFilename().replace(/[^\w.-]+/g, "_").slice(-120)}`;
       const target = path.join(this.config.outputDir, "downloads", fileName);
-      void mkdir(path.dirname(target), { recursive: true })
+      const saving = mkdir(path.dirname(target), { recursive: true })
         .then(() => download.saveAs(target))
+        .then(() => target);
+      pushBounded(tab.downloads, { at: Date.now(), name: download.suggestedFilename(), saving }, 10);
+      void saving
         .then(() => pushEvent(tab, `download saved to ${target}`))
         .catch((error: Error) => pushEvent(tab, `download of ${download.suggestedFilename()} failed: ${error.message.split("\n")[0]}`));
     });
@@ -407,6 +414,17 @@ export class BrowserManager {
     };
     const timer = setTimeout(() => check.finish(!appeared()), POPUP_GRACE_MS);
     tab.popupChecks.add(check);
+  }
+
+  async downloadSince(tab: Tab, since: number) {
+    const find = () => tab.downloads.find((entry) => entry.at >= since);
+    if (!find() && !tab.page.isClosed()) await tab.page.waitForEvent("download", { timeout: DOWNLOAD_START_MS }).catch(() => undefined);
+    const entry = find();
+    if (!entry) return undefined;
+    const saved = await withDeadline(entry.saving, DOWNLOAD_SAVE_MS).catch((error: Error) => error);
+    if (saved === TIMED_OUT) return { name: entry.name, note: `is still downloading after ${DOWNLOAD_SAVE_MS / 1000} s; the result is reported as an event when it finishes` };
+    if (saved instanceof Error) return { name: entry.name, note: `failed: ${saved.message.split("\n")[0]}` };
+    return { name: entry.name, file: saved };
   }
 
   async settlePopups(tab: Tab) {

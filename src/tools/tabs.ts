@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Response } from "playwright-core";
 import { z } from "zod";
-import { LEAVE_CANCELLED, pushEvent, type Tab } from "../browser.ts";
+import { type BrowserManager, LEAVE_CANCELLED, pushEvent, type Tab } from "../browser.ts";
 import { normalizeUrl } from "../collect.ts";
 import { recentFaults } from "../errors.ts";
 import { describeEmulation, emulate, resetEmulation, VIEWPORT_PRESETS } from "../emulate.ts";
@@ -11,6 +11,14 @@ import { siteNotesHint } from "../sites.ts";
 import { defineTool, includeSnapshotParam, tabLine, tabParam, timeoutParam, type ToolDeps, waitUntilParam } from "./common.ts";
 
 const LEFT_PAGE_CANCELLED = Symbol("leave cancelled");
+
+async function downloadInstead(manager: BrowserManager, tab: Tab, since: number, error: unknown) {
+  if (!/Download is starting|net::ERR_ABORTED/i.test(error instanceof Error ? error.message : String(error))) throw error;
+  const download = await manager.downloadSince(tab, since);
+  if (!download) throw error;
+  const outcome = download.file ? `Downloaded ${download.name} to ${download.file}` : `The download of ${download.name} ${download.note}.`;
+  return `${outcome}\nThe URL is a file download, so the tab stays at ${await describePage(tab.page)}.`;
+}
 
 async function leaveGuarded(tab: Tab, force: boolean, navigation: () => Promise<Response | null>) {
   let cancel = () => undefined as void;
@@ -72,7 +80,14 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
         return `Opened ${tab.id} (blank).`;
       }
       const startedAt = Date.now();
-      const response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
+      let response: Response | null;
+      try {
+        response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
+      } catch (error) {
+        const text = await downloadInstead(manager, tab, startedAt, error);
+        manager.markSeen(tab);
+        return `Opened ${tab.id}.\n${text}`;
+      }
       manager.markSeen(tab);
       const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`];
       lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
@@ -120,7 +135,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "navigate",
     title: "Navigate",
     description:
-      "Load a URL in an existing tab, or move through its history. Returns the final URL, title and HTTP status, and flags a CAPTCHA or bot wall and a sign-in page that suggests an expired session. Refs from earlier snapshots of this tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; call again with force: true to leave anyway.",
+      "Load a URL in an existing tab, or move through its history. Returns the final URL, title and HTTP status (or, for a URL that downloads a file, the saved file path while the tab stays where it was), and flags a CAPTCHA or bot wall and a sign-in page that suggests an expired session. Refs from earlier snapshots of this tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; call again with force: true to leave anyway.",
     input: {
       tab: tabParam,
       url: z.string().describe("URL to load, or one of back, forward, reload. https:// is assumed when no scheme is given."),
@@ -136,15 +151,20 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       const options = { waitUntil: input.wait_until ?? ("domcontentloaded" as const), timeout: input.timeout_ms };
       const history = { waitUntil: "commit" as const, timeout: input.timeout_ms };
       const requestedUrl = input.url === "reload" ? previousUrl : input.url === "back" || input.url === "forward" ? undefined : normalizeUrl(input.url);
-      const outcome = await leaveGuarded(tab, input.force ?? false, () =>
-        input.url === "back"
-          ? tab.page.goBack(history)
-          : input.url === "forward"
-            ? tab.page.goForward(history)
-            : input.url === "reload"
-              ? tab.page.reload(options)
-              : tab.page.goto(requestedUrl ?? input.url, options),
-      );
+      let outcome: Awaited<ReturnType<typeof leaveGuarded>>;
+      try {
+        outcome = await leaveGuarded(tab, input.force ?? false, () =>
+          input.url === "back"
+            ? tab.page.goBack(history)
+            : input.url === "forward"
+              ? tab.page.goForward(history)
+              : input.url === "reload"
+                ? tab.page.reload(options)
+                : tab.page.goto(requestedUrl ?? input.url, options),
+        );
+      } catch (error) {
+        return [await downloadInstead(manager, tab, startedAt, error), ...manager.drainEvents(tab, startedAt)].join("\n");
+      }
       if (outcome === LEFT_PAGE_CANCELLED) {
         return [`Still at ${await describePage(tab.page)}`, ...manager.drainEvents(tab, startedAt)].join("\n");
       }

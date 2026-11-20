@@ -1188,5 +1188,22 @@ test("browser edge cases", async (t) => {
     assert.match(await ok("find", { tab, query: "gönder 👍" }), /button "Gönder 👍"/);
   });
 
+  await t.test("navigate to a file download reports the saved file", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    const text = await ok("navigate", { tab, url: `${fixture.url}/download` });
+    const file = /^Downloaded .* to (\S+)$/m.exec(text)?.[1] ?? "";
+    assert.equal(await readFile(file, "utf8"), "a,b\n1,2\n");
+  });
+
+  await t.test("navigate to a download says the tab stayed on its page", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/download` }), new RegExp(`tab stays at ${fixture.url.replace(/[.]/g, "\\.")}/ `));
+  });
+
+  await t.test("tab_open on a file download reports the saved file", async () => {
+    const text = await ok("tab_open", { url: `${fixture.url}/download` });
+    await ok("tab_close", { tab: openedTab(text) });
+    assert.match(text, /^Downloaded .* to \S+report\.csv$/m);
+  });
+
   await ok("tab_close", { tab });
 });
