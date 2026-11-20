@@ -61,7 +61,7 @@ export async function rawSnapshot(manager: BrowserManager, tab: Tab, options: Pi
   return options.depth ? limitDepth(scoped, options.depth) : scoped;
 }
 
-export function diffSnapshots(before: string, after: string, maxLines: number) {
+function changedLines(before: string, after: string) {
   const clean = (text: string) => text.split("\n").map((line) => line.trim().replace(/ \[active\]/g, "")).filter(Boolean);
   const beforeLines = clean(before);
   const afterLines = clean(after);
@@ -69,7 +69,11 @@ export function diffSnapshots(before: string, after: string, maxLines: number) {
   const afterSet = new Set(afterLines);
   const added = afterLines.filter((line) => !beforeSet.has(line)).map((line) => `+ ${line}`);
   const removed = beforeLines.filter((line) => !afterSet.has(line)).map((line) => `- ${line}`);
-  const lines = [...added, ...removed];
+  return [...added, ...removed];
+}
+
+export function diffSnapshots(before: string, after: string, maxLines: number) {
+  const lines = changedLines(before, after);
   if (lines.length === 0) return "No lines of the snapshot changed.";
   const shown = lines.slice(0, maxLines);
   const more = lines.length > shown.length ? `\n… ${lines.length - shown.length} more changed lines; take a snapshot for the full page.` : "";
@@ -232,13 +236,19 @@ export async function runAction(
   }
 
   const lines = [summary];
+  const moved = navigated || page.url() !== urlBefore;
+  let snapshotAfter: string | undefined;
   if (page.isClosed()) {
     lines.push("The tab closed.");
   } else {
-    if (navigated || page.url() !== urlBefore) lines.push(`Navigated to ${await describePage(page)}`);
+    if (options.includeSnapshot || snapshotBefore !== undefined) await settleRendering(page);
+    if (snapshotBefore !== undefined && !moved) snapshotAfter = await rawSnapshot(manager, tab, {}).catch(() => undefined);
+    if (moved) lines.push(`Navigated to ${await describePage(page)}`);
     else {
       const verdict = await readFrames(page, armed);
+      const snapshotChanged = snapshotBefore !== undefined && snapshotAfter !== undefined && changedLines(snapshotBefore, snapshotAfter).length > 0;
       if (verdict.state === "changed") lines.push("The page changed.");
+      else if (snapshotChanged) lines.push("The page changed: the snapshot differs although the DOM did not, as with a CSS :hover or :focus style.");
       else if (verdict.state === "unknown") {
         lines.push(`Could not tell whether the page changed: ${verdict.silent} of ${verdict.total} frames did not answer. Take a snapshot to check.`);
       } else if (options.noChangeText !== "") lines.push(options.noChangeText ?? "No change detected on the page.");
@@ -246,18 +256,16 @@ export async function runAction(
     const document = currentDocument(tab);
     lines.push(...(await landingLines(manager, tab, { previousUrl: urlBefore, status: document?.status, redirected: navigated && document?.redirected === true })));
   }
-  if ((options.includeSnapshot || snapshotBefore !== undefined) && !page.isClosed()) await settleRendering(page);
   lines.push(...manager.drainEvents(tab, startedAt));
 
   if (options.includeSnapshot && !page.isClosed()) {
     lines.push("", await renderSnapshot(manager, store, tab, { maxChars: options.snapshotMaxChars ?? 12_000 }));
   } else if (snapshotBefore !== undefined && !page.isClosed()) {
-    const moved = navigated || page.url() !== urlBefore;
     lines.push(
       "",
       moved
         ? "The page navigated, so there is no line diff; take a snapshot of the new page."
-        : diffSnapshots(snapshotBefore, await rawSnapshot(manager, tab, {}), DIFF_MAX_LINES),
+        : diffSnapshots(snapshotBefore, snapshotAfter ?? (await rawSnapshot(manager, tab, {})), DIFF_MAX_LINES),
     );
   }
   return lines.join("\n");

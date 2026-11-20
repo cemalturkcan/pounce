@@ -423,6 +423,17 @@ test("browser flow", async (t) => {
     }
   });
 
+  await t.test("hover that reveals a CSS :hover menu says the page changed, in agreement with its diff", async () => {
+    const page = openedTab(await ok("tab_open", { url: `${fixture.url}/hover-menu` }));
+    try {
+      const text = await ok("hover", { tab: page, target: "#menu-label", include_diff: true });
+      assert.match(text, /^\+ .*link "Lamps"/m);
+      assert.match(text, /^The page changed/m);
+    } finally {
+      await ok("tab_close", { tab: page });
+    }
+  });
+
   await t.test("fill_form fills in order, reports invalid fields and submits", async () => {
     const text = await ok("fill_form", {
       tab,

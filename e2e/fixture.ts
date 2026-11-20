@@ -351,6 +351,12 @@ const EDGE_PAGES: Record<string, { status?: number; html: string }> = {
 <script>document.querySelector(".close").addEventListener("click", (event) => { event.preventDefault(); const box = document.getElementById("flash"); const started = performance.now(); const step = () => { const done = (performance.now() - started) / 400; if (done >= 1) { box.remove(); return; } box.style.opacity = String(1 - done); setTimeout(step, 13); }; step(); });</script>`,
     ),
   },
+  "/hover-menu": {
+    html: EDGE_HTML(
+      "Hover Menu",
+      `<style>#submenu{display:none}#menu:hover #submenu{display:block}</style><nav id="menu"><span id="menu-label">Products</span><ul id="submenu"><li><a href="#lamps">Lamps</a></li><li><a href="#desks">Desks</a></li><li><a href="#chairs">Chairs</a></li></ul></nav>`,
+    ),
+  },
   "/text": { html: EDGE_HTML("Text", `<p id="sample">Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا</p><label>Note <input id="note"></label><label>Body <textarea id="body"></textarea></label><button aria-label="Gönder 👍">Gönder 👍</button>`) },
 };
 
