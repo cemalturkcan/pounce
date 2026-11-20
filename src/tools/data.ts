@@ -149,6 +149,14 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
         .optional()
         .describe("Time limit per page in milliseconds for loading it, and the same again for saving its content; settle_ms is added on top. Default 30000."),
       preview_chars: z.number().int().min(0).max(2000).optional().describe("Characters of text shown per page in the index; 0 for none. Default 160."),
+      scroll: z
+        .object({
+          max_steps: z.number().int().min(1).max(200).describe("Most scroll steps per page."),
+          step_px: z.number().int().min(50).max(20_000).optional().describe("Pixels per step. Default 90% of the window height."),
+          idle_ms: z.number().int().min(50).max(10_000).optional().describe("Wait after each step for new content. Default 600."),
+        })
+        .optional()
+        .describe("Scroll each page down before saving it, for lazy-loaded and infinite-scroll pages: stops at the bottom once the page height stops growing, or after max_steps. The index reports the steps taken."),
       label: z.string().optional().describe("Short name used in the output folder name."),
     },
     handler: async (input, owner, signal) => {
@@ -162,6 +170,7 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
         timeoutMs: input.timeout_ms ?? 30_000,
         fullPage: input.full_page ?? true,
         previewChars: input.preview_chars ?? 160,
+        scroll: input.scroll ? { maxSteps: input.scroll.max_steps, stepPx: input.scroll.step_px, idleMs: input.scroll.idle_ms ?? 600 } : undefined,
         label: input.label,
         signal,
       });

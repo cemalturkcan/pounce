@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -1019,5 +1019,32 @@ test("non-HTML responses", async (t) => {
     } finally {
       await ok("tab_close", { tab });
     }
+  });
+});
+
+test("collect_pages scrolls lazy-loading pages", async (t) => {
+  const collectFeed = async (extra: Record<string, unknown>) => {
+    const index = await ok("collect_pages", { urls: [`${fixture.url}/feed`], include: ["text"], settle_ms: 0, ...extra });
+    const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+    const file = (await readdir(dir)).find((name) => name.endsWith(".txt")) ?? "";
+    return { index, text: await readFile(path.join(dir, file), "utf8") };
+  };
+  const lastItem = new RegExp(`Feed item ${FEED_TOTAL}\\b`);
+
+  await t.test("without scroll only the first items are collected", async () => {
+    assert.doesNotMatch((await collectFeed({})).text, lastItem);
+  });
+
+  await t.test("scroll loads items until the page stops growing", async () => {
+    assert.match((await collectFeed({ scroll: { max_steps: 40, idle_ms: 400 } })).text, lastItem);
+  });
+
+  await t.test("scroll stops early once the height stops growing and reports the steps", async () => {
+    const steps = Number(/scrolled (\d+) steps?/.exec((await collectFeed({ scroll: { max_steps: 40, idle_ms: 400 } })).index)?.[1]);
+    assert.ok(steps > 0 && steps < 40, `steps: ${steps}`);
+  });
+
+  await t.test("scroll stops at max_steps", async () => {
+    assert.match((await collectFeed({ scroll: { max_steps: 2, idle_ms: 400 } })).index, /scrolled 2 steps \(max_steps reached\)/);
   });
 });

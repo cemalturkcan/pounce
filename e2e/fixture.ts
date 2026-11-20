@@ -237,3 +237,31 @@ export const CONTENT_ROUTES: Record<string, { type: string; body: () => Buffer |
   "/files/pixel.png": { type: "image/png", body: () => PIXEL },
   "/files/blob.bin": { type: "application/octet-stream", body: () => CONTENT.binary },
 };
+
+export const FEED_TOTAL = 50;
+
+const FEED = `<!doctype html>
+<html><head><title>Fixture Feed</title><style>.item { height: 120px; border-bottom: 1px solid #ccc; }</style></head><body>
+<main id="feed"></main>
+<script>
+let shown = 0;
+let loading = false;
+const more = () => {
+  for (let index = 0; index < 10 && shown < ${FEED_TOTAL}; index += 1) {
+    shown += 1;
+    const item = document.createElement("div");
+    item.className = "item";
+    item.textContent = "Feed item " + shown;
+    document.getElementById("feed").append(item);
+  }
+};
+more();
+addEventListener("scroll", () => {
+  if (loading || shown >= ${FEED_TOTAL} || innerHeight + scrollY < document.body.scrollHeight - 200) return;
+  loading = true;
+  setTimeout(() => { more(); loading = false; }, 150);
+});
+</script>
+</body></html>`;
+
+CONTENT_ROUTES["/feed"] = { type: "text/html", body: () => FEED };

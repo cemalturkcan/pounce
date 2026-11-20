@@ -11,6 +11,10 @@ import { pageLinks, pageText, pageTitle, rawSnapshot, sleep } from "./page.ts";
 
 export type CollectPart = "text" | "markdown" | "links" | "snapshot" | "screenshot" | "structured";
 
+export type ScrollInput = { maxSteps: number; stepPx?: number; idleMs: number };
+
+export type ScrollOutcome = { steps: number; height: number; capped: boolean };
+
 export type CollectInput = {
   urls: string[];
   include: CollectPart[];
@@ -21,6 +25,7 @@ export type CollectInput = {
   timeoutMs: number;
   fullPage: boolean;
   previewChars: number;
+  scroll?: ScrollInput;
   label?: string;
   signal?: AbortSignal;
 };
@@ -34,6 +39,7 @@ export type CollectedPage = {
   type?: string;
   bytes?: number;
   note?: string;
+  scrolled?: ScrollOutcome;
   chars?: number;
   links?: number;
   files: string[];
@@ -43,6 +49,7 @@ export type CollectedPage = {
 };
 
 const LINK_LIMIT = 500;
+const SCROLL_PROBE_MS = 2000;
 const CLOSE_GRACE_MS = 5000;
 
 const HOST_PORT = /^(\[[0-9a-f:.]+\]|[a-z0-9-]+(\.[a-z0-9-]+)*):\d{1,5}(?=$|[/?#])/i;
@@ -76,7 +83,7 @@ async function collectOne(
   const tab = await openTab();
 
   try {
-    const limit = 2 * input.timeoutMs + input.settleMs;
+    const limit = 2 * input.timeoutMs + input.settleMs + (input.scroll ? input.scroll.maxSteps * (input.scroll.idleMs + SCROLL_PROBE_MS) : 0);
     const outcome = await withDeadline(saveOne(manager, tab, dir, input, url, base, result), limit);
     if (outcome === TIMED_OUT) result.error = `timed out after ${limit} ms; the page did not load or did not answer while its content was saved`;
   } catch (error) {
@@ -115,6 +122,7 @@ async function saveOne(
     return saveBody(dir, base, bodyType, body, input, result);
   }
   if (input.settleMs > 0) await sleep(input.settleMs);
+  if (input.scroll) result.scrolled = await autoScroll(page, input.scroll);
   result.status = response?.status();
   result.finalUrl = page.url();
   result.title = await pageTitle(page);
@@ -158,6 +166,35 @@ async function saveOne(
     await writeFile(path.join(dir, `${base}.jpg`), image);
     result.files.push(`${base}.jpg`);
   }
+}
+
+function scrollStep(stepPx: number | null) {
+  window.scrollBy(0, stepPx ?? Math.max(200, Math.floor(window.innerHeight * 0.9)));
+  const root = document.scrollingElement ?? document.documentElement;
+  return { height: root.scrollHeight, bottom: window.scrollY + window.innerHeight >= root.scrollHeight - 2 };
+}
+
+function pageHeight() {
+  return (document.scrollingElement ?? document.documentElement).scrollHeight;
+}
+
+async function probe<T>(promise: Promise<T>) {
+  const value = await withDeadline(promise, SCROLL_PROBE_MS);
+  if (value === TIMED_OUT) throw new Error(`the page did not answer within ${SCROLL_PROBE_MS} ms while scrolling`);
+  return value;
+}
+
+export async function autoScroll(page: Tab["page"], scroll: ScrollInput): Promise<ScrollOutcome> {
+  let height = await probe(page.evaluate(pageHeight));
+  for (let step = 1; step <= scroll.maxSteps; step += 1) {
+    const moved = await probe(page.evaluate(scrollStep, scroll.stepPx ?? null));
+    await sleep(scroll.idleMs);
+    const grown = await probe(page.evaluate(pageHeight));
+    const grew = grown > height || moved.height > height;
+    height = Math.max(grown, moved.height);
+    if (moved.bottom && !grew) return { steps: step, height, capped: false };
+  }
+  return { steps: scroll.maxSteps, height, capped: true };
 }
 
 function keepText(result: CollectedPage, text: string, previewChars: number) {
@@ -215,6 +252,10 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
     const label = result.type ? `[${result.type}]` : `"${result.title ?? ""}"`;
     lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} ${label}${size} → ${result.files.join(", ")}`);
     if (result.note) lines.push(`   ${result.note}`);
+    if (result.scrolled) {
+      const { steps, height, capped } = result.scrolled;
+      lines.push(`   scrolled ${steps} step${steps === 1 ? "" : "s"}${capped ? " (max_steps reached)" : ""}, page height ${height}px`);
+    }
     if (result.data) lines.push(`   ${result.data}`);
     if (result.preview) lines.push(`   ${result.preview}`);
   }
