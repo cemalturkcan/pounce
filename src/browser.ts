@@ -74,6 +74,8 @@ export type Tab = {
   events: TabEvent[];
   rules: InterceptRule[];
   ruleCounter: number;
+  loads: number;
+  snapshotLoads?: number;
   document?: { url: string; status: number; redirected: boolean; response: Response };
   popupChecks: Set<PopupCheck>;
   downloads: { at: number; name: string; saving: Promise<string> }[];
@@ -339,6 +341,7 @@ export class BrowserManager {
       events: [],
       rules: [],
       ruleCounter: 0,
+      loads: 0,
       popupChecks: new Set(),
       downloads: [],
       actions: [],
@@ -371,6 +374,9 @@ export class BrowserManager {
     page.on("close", () => this.onClose(tab));
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) this.history.changed();
+    });
+    page.on("domcontentloaded", () => {
+      tab.loads += 1;
     });
     page.on("load", () => {
       void page
@@ -716,13 +722,16 @@ export class BrowserManager {
   async resolve(tab: Tab, target: string) {
     const locator = this.locate(tab, target);
     const ref = parseRef(target);
-    if (ref && (await locator.count()) === 0) {
-      throw new ToolError(
-        `Ref ${ref} is not in the latest snapshot of tab ${tab.id}.`,
-        "Refs are valid until the page changes. Take a new snapshot and use a ref from it.",
-      );
+    if (!ref) return locator;
+    const count = await locator.count().catch((error: unknown) => {
+      if (error instanceof Error && /Invalid frame in aria-ref selector/.test(error.message)) return 0;
+      throw error;
+    });
+    if (count > 0) return locator;
+    if (tab.snapshotLoads !== undefined && tab.snapshotLoads !== tab.loads) {
+      throw new ToolError(`Ref ${ref} is from a snapshot taken before tab ${tab.id} loaded a new page (navigation or reload); refs from before a page load no longer work.`, "Take a new snapshot and use a ref from it.");
     }
-    return locator;
+    throw new ToolError(`Ref ${ref} is not in the latest snapshot of tab ${tab.id}.`, "Refs are valid until the element changes or the page loads again. Take a new snapshot and use a ref from it.");
   }
 
   evaluateMain<T>(page: Page, expression: string): Promise<T> {

@@ -45,7 +45,7 @@ export const SENSITIVE_HEADERS = new Set(["authorization", "cookie", "set-cookie
 export const tabParam = z.string().describe("Tab id from tabs_list or tab_open, for example t1.");
 export const targetParam = z
   .string()
-  .describe("Element to act on: a ref from the latest snapshot of this tab (e12, or f1e3 inside an iframe), or a Playwright selector such as #id, text=Sign in, or role=button[name=\"Save\"].");
+  .describe("Element to act on: a ref from the latest snapshot of this tab (such as e12 or f2e12; the f number names the document, which is new after every navigation or reload and different inside an iframe), or a Playwright selector such as #id, text=Sign in, or role=button[name=\"Save\"].");
 export const includeSnapshotParam = z
   .boolean()
   .optional()

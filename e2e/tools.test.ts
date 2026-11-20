@@ -148,6 +148,34 @@ test("browser flow", async (t) => {
     assert.match(result.text, /not in the latest snapshot/);
   });
 
+  await t.test("a ref taken before a reload says the page was reloaded", async () => {
+    const page = openedTab(await ok("tab_open", { url: `${fixture.url}/` }));
+    try {
+      const before = refOf(await ok("snapshot", { tab: page }), 'button "Load data"');
+      await ok("navigate", { tab: page, url: "reload" });
+      const result = await call("click", { tab: page, target: before });
+      assert.equal(result.isError, true);
+      assert.match(result.text, new RegExp(`Ref ${before} is from a snapshot taken before tab ${page} loaded a new page \\(navigation or reload\\)`));
+    } finally {
+      await ok("tab_close", { tab: page });
+    }
+  });
+
+  await t.test("a ref from an earlier page load with a frame number says the page was reloaded", async () => {
+    const page = openedTab(await ok("tab_open", { url: `${fixture.url}/` }));
+    try {
+      await ok("navigate", { tab: page, url: "reload" });
+      const before = refOf(await ok("snapshot", { tab: page }), 'button "Load data"');
+      assert.match(before, /^f\d+e\d+$/);
+      await ok("navigate", { tab: page, url: "reload" });
+      const result = await call("click", { tab: page, target: before });
+      assert.equal(result.isError, true);
+      assert.match(result.text, new RegExp(`Ref ${before} is from a snapshot taken before tab ${page} loaded a new page`));
+    } finally {
+      await ok("tab_close", { tab: page });
+    }
+  });
+
   await t.test("fill handles text, select and checkbox", async () => {
     assert.match(await ok("fill", { tab, target: "#email", text: "person@example.test" }), /Filled #email \(19 chars\)/);
     await ok("fill", { tab, target: "#plan", text: "Pro" });

@@ -65,7 +65,7 @@ These show the shape of a good route, not templates.
 
 # Things that behave differently here
 
-- Refs come from the latest snapshot of a tab and stop resolving once the page changes. A "not in the latest snapshot" error means take a new snapshot, not that the element is gone.
+- Refs come from the latest snapshot of a tab. A ref such as f2e12 starts with the number of the document it belongs to: each iframe has its own, and the page gets a new one on every navigation or reload, so every earlier ref stops working after a load. A "not in the latest snapshot" or "loaded a new page" error means take a new snapshot, not that the element is gone.
 - Each action reports whether the page navigated, changed or did not react, plus `Event:` lines for dialogs (accepted automatically), downloads (saved automatically, with the path), new tabs (with their id, including OAuth popups and their closing) and popups the browser blocked. A separate check is needed only when that is not enough; `include_diff: true` returns just the snapshot lines an action changed.
 - Leaving a page that warns about unsaved changes is cancelled and reported; `force: true` on `navigate` or `tab_close` leaves anyway.
 - `fill` on a custom dropdown or picker clicks it open and picks the option by name; when it cannot, the error says what to click.

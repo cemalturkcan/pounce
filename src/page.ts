@@ -48,11 +48,13 @@ async function scopeRefs(manager: BrowserManager, tab: Tab, target: string) {
 
 export async function rawSnapshot(manager: BrowserManager, tab: Tab, options: Pick<SnapshotOptions, "target" | "depth" | "boxes">) {
   const refs = options.target ? await scopeRefs(manager, tab, options.target) : undefined;
+  const loads = tab.loads;
   const full = await tab.page.ariaSnapshot({ mode: "ai", depth: refs ? undefined : options.depth, boxes: options.boxes, timeout: SNAPSHOT_TIMEOUT_MS });
+  tab.snapshotLoads = loads;
   if (!refs || !options.target) return full;
   const parts = refs.map((ref) => cutSubtree(full, ref)).filter((part): part is string => part !== undefined);
   if (parts.length === 0) {
-    throw new ToolError(`${options.target} is not in the current snapshot of tab ${tab.id}.`, "Refs are valid until the page changes. Take a new snapshot and use a ref from it.");
+    throw new ToolError(`${options.target} is not in the current snapshot of tab ${tab.id}.`, "Refs are valid until the element changes or the page loads again. Take a new snapshot and use a ref from it.");
   }
   const scoped = parts.join("\n");
   return options.depth ? limitDepth(scoped, options.depth) : scoped;
