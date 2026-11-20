@@ -199,11 +199,13 @@ test("Anthropic retries 429 twice and obeys the abort signal during backoff", as
   assert.equal(fetch.mock.callCount(), 7);
 });
 
-test("Anthropic retries HTTP 529, other 5xx, network failures and SSE overloads", async (t) => {
+test("Anthropic retries HTTP 408, 409, 5xx, network failures and SSE overloads", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
   const random = t.mock.method(Math, "random", () => 0.5);
   const failures = [
+    () => new Response(null, { status: 408, headers: { "retry-after-ms": "0" } }),
+    () => new Response(null, { status: 409, headers: { "retry-after-ms": "0" } }),
     () => Response.json({ error: { type: "overloaded_error", message: "Busy" } }, { status: 529, headers: { "retry-after-ms": "0" } }),
     () => Response.json({ error: { type: "api_error", message: "Unavailable" } }, { status: 503, headers: { "retry-after": "0" } }),
     () => { throw new TypeError("fetch failed"); },
@@ -287,12 +289,12 @@ test("Anthropic parses retry delays and rejects server waits above 60 seconds", 
   fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 429, headers: { "retry-after": "120", "retry-after-ms": "0" } }));
   await adapter.complete(input);
   assert.equal(fetch.mock.callCount(), 4);
-  for (const headers of [new Headers({ "retry-after": "60.001" }), new Headers({ "retry-after-ms": "60001" })]) {
+  for (const headers of [new Headers({ "retry-after": "3600" }), new Headers({ "retry-after-ms": "3600000" })]) {
     fetch.mock.mockImplementationOnce(async () => Response.json({
       error: { type: "overloaded_error", message: "Try later" },
     }, { status: 529, headers }));
     await assert.rejects(adapter.complete(input), {
-      message: "Anthropic Messages returned HTTP 529: overloaded_error: Try later Retry-After exceeds the 60-second wait limit.",
+      message: "Anthropic Messages returned HTTP 529: overloaded_error: Try later Retry-After (3600 s) exceeds the 60-second wait limit.",
     });
   }
   assert.equal(fetch.mock.callCount(), 6);
@@ -331,4 +333,63 @@ test("Anthropic cancels a stalled stream on abort without retrying", async (t) =
   await assert.rejects(adapter.complete({ ...input, signal: controller.signal }), abortReason);
   assert.equal(canceled, true);
   assert.equal(fetch.mock.callCount(), 1);
+});
+
+test("Anthropic preserves meaningful partial text on timeout and reports a timeout without text", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  for (const text of ["Partial", "   "]) {
+    const controller = new AbortController();
+    const reason = new DOMException("deadline reached", "TimeoutError");
+    const fetch = t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(encodeEvents([textDelta(text)]));
+        setImmediate(() => controller.abort(reason));
+      },
+    })));
+    const completion = adapter.complete({ ...input, signal: controller.signal });
+    if (text.trim()) {
+      assert.deepEqual(await completion, { text, usage: {}, stopReason: "interrupted" });
+    } else {
+      await assert.rejects(completion, reason);
+    }
+    assert.equal(fetch.mock.callCount(), 1);
+    fetch.mock.restore();
+  }
+});
+
+test("Anthropic retries a whitespace-only interruption only below the output token limit", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const interrupted = (outputTokens: number) => eventStream([
+    textDelta("   "),
+    { type: "message_delta", usage: { output_tokens: outputTokens } },
+    { type: "error", error: { type: "overloaded_error", message: "Busy" } },
+  ]);
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  fetch.mock.mockImplementationOnce(async () => interrupted(4095));
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.callCount(), 2);
+  fetch.mock.mockImplementationOnce(async () => interrupted(4096));
+  await assert.rejects(adapter.complete(input), /overloaded_error: Busy.*Retry skipped after 4096 output tokens/);
+  assert.equal(fetch.mock.callCount(), 3);
+});
+
+test("Anthropic exposes masked network causes for request and stream failures", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(Math, "random", () => 0);
+  const fetch = t.mock.method(globalThis, "fetch", async () => {
+    const cause = Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" });
+    throw new TypeError("fetch failed", { cause: new AggregateError([cause]) });
+  });
+  await assert.rejects(adapter.complete(input), /while sending the Anthropic Messages request: ECONNREFUSED: connect refused/);
+  fetch.mock.mockImplementation(async () => new Response(new ReadableStream({
+    start(streamController) {
+      const cause = Object.assign(new Error("Invalid header test-token"), { code: "HPE_INVALID_HEADER_TOKEN" });
+      streamController.error(new TypeError("terminated", { cause }));
+    },
+  })));
+  await assert.rejects(adapter.complete(input), /while reading the Anthropic Messages stream: HPE_INVALID_HEADER_TOKEN: Invalid header \[REDACTED\]/);
+  assert.equal(fetch.mock.callCount(), 6);
 });

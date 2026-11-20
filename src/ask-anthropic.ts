@@ -16,6 +16,7 @@ const SIGN_IN = "Sign in to Claude Code with `claude auth login`, then try ask_p
 const MAX_RETRIES = 2;
 const MAX_RETRY_DELAY_MS = 60_000;
 const RETRY_JITTER_MS = 250;
+const RETRY_OUTPUT_TOKEN_LIMIT = 4_096;
 
 type ApiError = { type?: unknown; message?: unknown };
 
@@ -37,6 +38,18 @@ function errorDetail(error: ApiError | undefined, token: string) {
     .join(": ")
     .slice(0, 500);
   return detail ? `: ${detail}` : ".";
+}
+
+function networkErrorDetail(error: unknown, token: string) {
+  const cause = error instanceof Error ? error.cause ?? error : error;
+  const detail = cause instanceof AggregateError ? cause.errors[0] ?? cause : cause;
+  if (detail && typeof detail === "object") {
+    return errorDetail({
+      type: "code" in detail ? detail.code : undefined,
+      message: "message" in detail ? detail.message : undefined,
+    }, token);
+  }
+  return errorDetail({ message: detail }, token);
 }
 
 async function readAccessToken(credentialsPath: string, signal: AbortSignal) {
@@ -110,9 +123,8 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
   try {
     while (true) {
       signal.throwIfAborted();
-      const { done, value } = await reader.read().catch(() => {
-        signal.throwIfAborted();
-        throw new RetryableAnthropicError("Network error while reading the Anthropic Messages stream.");
+      const { done, value } = await reader.read().catch((error: unknown) => {
+        throw new RetryableAnthropicError(`Network error while reading the Anthropic Messages stream${networkErrorDetail(error, token)}`);
       });
       signal.throwIfAborted();
       if (done) throw new RetryableAnthropicError("Anthropic Messages stream ended before message_stop.");
@@ -158,11 +170,19 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
       }
     }
   } catch (error) {
+    const text = parts.join("");
+    const partial = text.trim().length > 0;
+    if (partial && signal.reason instanceof Error && signal.reason.name === "TimeoutError") {
+      return { text, usage, stopReason: stopReason === "refusal" ? stopReason : "interrupted" };
+    }
     signal.throwIfAborted();
     if (!(error instanceof RetryableAnthropicError)) throw error;
-    const text = parts.join("");
     if (stopReason === "refusal") return { text, usage, stopReason };
-    if (text) return { text, usage, stopReason: "interrupted" };
+    if (partial) return { text, usage, stopReason: "interrupted" };
+    const outputTokens = usage.output_tokens ?? 0;
+    if (outputTokens >= RETRY_OUTPUT_TOKEN_LIMIT) {
+      throw new ToolError(`${error.message} Retry skipped after ${outputTokens} output tokens.`);
+    }
     throw error;
   } finally {
     signal.removeEventListener("abort", cancel);
@@ -196,9 +216,9 @@ async function postMessage(body: string, token: string, signal: AbortSignal) {
     },
     body,
     signal,
-  }).catch(() => {
+  }).catch((error: unknown) => {
     signal.throwIfAborted();
-    throw new RetryableAnthropicError("Network error while sending the Anthropic Messages request.");
+    throw new RetryableAnthropicError(`Network error while sending the Anthropic Messages request${networkErrorDetail(error, token)}`);
   });
   if (response.ok) return response;
 
@@ -209,7 +229,7 @@ async function postMessage(body: string, token: string, signal: AbortSignal) {
     ? new AskSetupError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
     : new ToolError(`Anthropic Messages returned HTTP ${response.status}${detail}`);
   const retry = response.headers.get("x-should-retry");
-  const retryableStatus = response.status === 429 || (response.status >= 500 && response.status < 600);
+  const retryableStatus = [408, 409, 429].includes(response.status) || (response.status >= 500 && response.status < 600);
   if (retry === "true" || (retry !== "false" && retryableStatus)) {
     throw new RetryableAnthropicError(failure, retryDelay(response));
   }
@@ -226,7 +246,7 @@ async function completeMessage(body: string, token: string, signal: AbortSignal)
       const wait = error.retryAfterMs ?? 250 * 2 ** attempt;
       if (wait > MAX_RETRY_DELAY_MS) {
         const failure = error.failure;
-        const message = `${failure.message} Retry-After exceeds the 60-second wait limit.`;
+        const message = `${failure.message} Retry-After (${wait / 1000} s) exceeds the 60-second wait limit.`;
         if (failure instanceof AskSetupError) throw new AskSetupError(message, failure.hint);
         throw new ToolError(message, failure.hint);
       }
