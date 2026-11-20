@@ -26,6 +26,8 @@ export type DaemonRegistry = {
   version: string;
 };
 
+export type OpenBrowser = (url: string | undefined) => Promise<Record<string, unknown>>;
+
 type Session = {
   transport: StreamableHTTPServerTransport;
   lastSeen: number;
@@ -101,6 +103,20 @@ function readBody(request: IncomingMessage) {
   });
 }
 
+function parseOpenRequest(text: string): { url?: string } | undefined {
+  if (!text.trim()) return {};
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const url = (body as { url?: unknown }).url;
+  if (url !== undefined && (typeof url !== "string" || !url.trim())) return undefined;
+  return { url: url?.trim() };
+}
+
 function isInitialize(body: unknown): boolean {
   if (Array.isArray(body)) return body.some(isInitialize);
   return Boolean(body && typeof body === "object" && "method" in body && body.method === "initialize");
@@ -112,6 +128,7 @@ export async function startDaemon(
   onShutdown: () => Promise<void>,
   onSessionEnd: (sessionId: string) => number | void = () => undefined,
   log: Logger | undefined = activeLogger(),
+  openBrowser?: OpenBrowser,
 ) {
   const sessions = new Map<string, Session>();
   const endSession = (sessionId: string | undefined, reason: string) => {
@@ -148,6 +165,20 @@ export async function startDaemon(
     const pathname = (request.url ?? "/").split("?")[0];
     if (pathname === "/healthz") {
       writeJson(response, 200, { ok: true, endpoint: config.endpoint, version: config.serverVersion });
+      return;
+    }
+    if (pathname === "/open" && openBrowser) {
+      if (request.method !== "POST") {
+        response.setHeader("allow", "POST");
+        writeJson(response, 405, { error: "Use POST with a JSON body {\"url\"?: string}." });
+        return;
+      }
+      const open = parseOpenRequest(await readBody(request));
+      if (!open) {
+        writeJson(response, 400, { error: "The body must be empty or a JSON object whose optional url is a non-empty string." });
+        return;
+      }
+      writeJson(response, 200, await openBrowser(open.url));
       return;
     }
     if (pathname !== "/mcp") {

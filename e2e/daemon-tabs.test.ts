@@ -195,3 +195,53 @@ test("a navigation blocked by the client names the Chrome policy file and patter
   assert.doesNotMatch(other.text, /Chrome policy/);
   await stopDaemon(daemon);
 });
+
+async function postOpen(port: number, body: string, headers: Record<string, string> = {}) {
+  const response = await fetch(`http://127.0.0.1:${port}/open`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+  return { status: response.status, json: (await response.json().catch(() => undefined)) as Record<string, unknown> | undefined };
+}
+
+const tabLines = (list: string) => list.split("\n").filter((line) => /^t\d+ \[/.test(line));
+
+test("POST /open launches Chrome with exactly one user-owned page at the URL, then reports a running browser", async () => {
+  const daemon = await startDaemon(path.join(workDir, "open"));
+  const url = `${fixture.url}/article`;
+  const cold = await postOpen(daemon.port, JSON.stringify({ url }));
+  assert.equal(cold.status, 200, JSON.stringify(cold.json));
+  assert.equal(cold.json?.launched, true);
+  assert.equal(cold.json?.running, false);
+  assert.match(String(cold.json?.tab), /^t\d+$/);
+  assert.equal(cold.json?.url, url);
+
+  const client = await connect(daemon);
+  const listed = tabLines(await ok(client, "tabs_list"));
+  assert.deepEqual(listed, [`${cold.json?.tab} [unclaimed] ${url} "Fixture Article"`]);
+
+  const warm = await postOpen(daemon.port, JSON.stringify({ url: `${fixture.url}/doc` }));
+  assert.equal(warm.status, 200);
+  assert.deepEqual(warm.json, { launched: false, running: true });
+  assert.equal(tabLines(await ok(client, "tabs_list")).length, 1);
+
+  const own = openedId(await ok(client, "tab_open", { url: fixture.url }));
+  assert.notEqual(own, cold.json?.tab);
+  assert.equal(tabLines(await ok(client, "tabs_list")).length, 2);
+  await stopDaemon(daemon);
+});
+
+test("POST /open without a URL opens the new tab page, and the route keeps the loopback checks", async () => {
+  const daemon = await startDaemon(path.join(workDir, "open-blank"));
+  assert.equal((await postOpen(daemon.port, "{}", { origin: "https://evil.test" })).status, 403);
+  assert.equal((await postOpen(daemon.port, "not json")).status, 400);
+  assert.equal((await postOpen(daemon.port, JSON.stringify({ url: 42 }))).status, 400);
+  assert.equal((await fetch(`http://127.0.0.1:${daemon.port}/open`)).status, 405);
+
+  const cold = await postOpen(daemon.port, "");
+  assert.equal(cold.status, 200, JSON.stringify(cold.json));
+  assert.equal(cold.json?.launched, true);
+  assert.match(String(cold.json?.url), /^chrome:\/\/new/);
+  const client = await connect(daemon);
+  const listed = tabLines(await ok(client, "tabs_list"));
+  assert.equal(listed.length, 1, listed.join("\n"));
+  assert.match(listed[0] ?? "", new RegExp(`^${cold.json?.tab} \\[unclaimed\\] chrome://new`));
+  await stopDaemon(daemon);
+});

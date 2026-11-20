@@ -81,6 +81,7 @@ export type Tab = {
   lastSeenUrl?: string;
   title?: string;
   closingByTool?: boolean;
+  openingForUser?: boolean;
   actions: TabAction[];
   captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
@@ -593,7 +594,7 @@ export class BrowserManager {
     const context = await this.ensureContext();
     let blank: Tab | undefined;
     for (const candidate of this.listTabs()) {
-      if (candidate.owner !== UNCLAIMED_OWNER && candidate.owner !== ORPHANED_OWNER) continue;
+      if ((candidate.owner !== UNCLAIMED_OWNER && candidate.owner !== ORPHANED_OWNER) || candidate.openingForUser) continue;
       if (candidate.page.isClosed() || candidate.page.url() !== "about:blank") continue;
       const previousOwner = candidate.owner;
       candidate.owner = owner;
@@ -608,6 +609,28 @@ export class BrowserManager {
     tab.owner = owner;
     tab.lastSeenUrl = undefined;
     return tab;
+  }
+
+  async openForUser(url: string | undefined) {
+    if (this.contextPromise) {
+      await this.contextPromise;
+      return { launched: false, running: true };
+    }
+    const context = await this.ensureContext();
+    const blank = this.listTabs().find((tab) => tab.owner === UNCLAIMED_OWNER && !tab.openingForUser && !tab.page.isClosed() && tab.page.url() === "about:blank");
+    const tab = blank ?? this.adopt(await context.newPage());
+    const target = url ?? "chrome://newtab/";
+    tab.openingForUser = true;
+    let error: string | undefined;
+    try {
+      await tab.page.goto(target, { waitUntil: "commit" });
+    } catch (failure) {
+      error = (failure instanceof Error ? failure.message : String(failure)).split("\n")[0];
+    } finally {
+      tab.openingForUser = false;
+    }
+    logEvent("launcher_open", { tab: tab.id, url: target, error }, error ? "warn" : "info");
+    return { launched: true, running: false, tab: tab.id, url: tab.page.url(), ...(error ? { error } : {}) };
   }
 
   closeTab(id: string, options: { runBeforeUnload?: boolean } = {}) {

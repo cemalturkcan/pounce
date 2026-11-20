@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { AskAdapterSource, type AskAdapter } from "./ask.ts";
 import { anthropicAskAdapter } from "./ask-anthropic.ts";
 import { BrowserManager } from "./browser.ts";
+import { normalizeUrl } from "./collect.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { daemonStatus, startDaemon, stopDaemon } from "./daemon.ts";
 import { installProcessGuards } from "./errors.ts";
@@ -104,6 +105,7 @@ async function main() {
       },
       (sessionId) => deps.manager.orphanTabsOf(sessionId),
       deps.log,
+      (url) => deps.manager.openForUser(url === undefined ? undefined : normalizeUrl(url)),
     );
     return;
   }

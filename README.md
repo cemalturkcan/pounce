@@ -93,6 +93,10 @@ Errors are also printed to stderr, so the service journal keeps them:
 journalctl --user -u claude-code-pair-web-agent.service -n 100
 ```
 
+### Desktop launcher
+
+A launcher can start the agent's Chrome without leaving an extra blank window: `curl -fsS -X POST -H 'content-type: application/json' -d '{"url":"https://example.com"}' http://127.0.0.1:29741/open` launches Chrome if it is not running, loads the URL (or `chrome://newtab/` when `url` is omitted) in its first window, leaves that tab to the user (unclaimed) and answers `{"launched":true,"running":false,"tab":"t…","url":"…"}`. When Chrome is already running it opens nothing and answers `{"launched":false,"running":true}`, so the launcher hands the URL to the running Chrome itself. The route accepts only loopback requests, with the same Host and Origin checks as `/mcp`.
+
 ## Tests
 
 ```bash
