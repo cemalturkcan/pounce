@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   ASK_SYSTEM,
   askPages,
+  AskSetupError,
   buildPrompt,
   AskAdapterSource,
   exceedsContextWindow,
@@ -518,10 +519,38 @@ test("a batch over the request size limit is split like a context overflow", asy
   assert.deepEqual(report.batches.map((batch) => [batch.sources.join(","), batch.error]), [["a.md", undefined], ["b.md", undefined]]);
 });
 
+test("a 413 without an error body is still split", async () => {
+  const adapter: AskAdapter = {
+    name: "byte limit",
+    complete: async ({ prompt }) => {
+      const sources = promptSources(prompt);
+      if (sources.length > 1) throw new Error("Anthropic Messages returned HTTP 413.");
+      return { text: `- seen [${sources[0]}]` };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10)], { concurrency: 1 }));
+  assert.equal(report.batches.length, 2);
+});
+
 test("a batch stopped at the context window is marked truncated", async () => {
   const adapter: AskAdapter = { name: "full", complete: async () => ({ text: "- first fact [a.md]\n- second fa", stopReason: "model_context_window_exceeded" }) };
   const report = await askPages(adapter, askOptions([doc("a.md", 10)]));
   assert.equal(report.batches[0]?.truncated, true);
+});
+
+test("a setup error in the first half of a split batch stops the second half", async () => {
+  const seen: string[] = [];
+  const adapter: AskAdapter = {
+    name: "signed out mid-split",
+    complete: async ({ prompt }) => {
+      const sources = promptSources(prompt);
+      seen.push(sources.join(","));
+      if (sources.length > 2) throw new Error("Anthropic Messages returned HTTP 400: invalid_request_error: prompt is too long: 900 tokens > 250 maximum");
+      throw new AskSetupError("session expired");
+    },
+  };
+  await assert.rejects(askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10), doc("c.md", 10), doc("d.md", 10)], { concurrency: 1 })), AskSetupError);
+  assert.deepEqual(seen, ["a.md,b.md,c.md,d.md", "a.md,b.md"]);
 });
 
 test("failures other than a context overflow are not split", async () => {

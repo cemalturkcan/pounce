@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AskAdapterSource, type AskAdapter } from "./ask.ts";
-import { anthropicAskAdapter } from "./ask-anthropic.ts";
+import { anthropicAskAdapter, settleClaudeRefreshes } from "./ask-anthropic.ts";
 import { BrowserManager } from "./browser.ts";
 import { normalizeUrl } from "./collect.ts";
 import { loadConfig, type Config } from "./config.ts";
@@ -99,9 +99,9 @@ async function main() {
     await startDaemon(
       config,
       () => createServer(config, deps),
-      () => {
+      async () => {
         deps.jobs.cancelAll();
-        return deps.manager.shutdown();
+        await Promise.allSettled([deps.manager.shutdown(), settleClaudeRefreshes()]);
       },
       (sessionId) => deps.manager.orphanTabsOf(sessionId),
       deps.log,
@@ -110,7 +110,7 @@ async function main() {
     return;
   }
 
-  const shutdown = () => void deps.manager.shutdown().finally(() => process.exit(0));
+  const shutdown = () => void Promise.allSettled([deps.manager.shutdown(), settleClaudeRefreshes()]).finally(() => process.exit(0));
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, shutdown);
   await createServer(config, deps).connect(new StdioServerTransport());
   console.error("web-agent-mcp running on stdio");
