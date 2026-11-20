@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { allBatchesFailed, type AskDocument, askPages, modelId, renderAskResults, sourceNames } from "./ask.ts";
+import { allBatchesFailed, type AskDocument, askPages, DEFAULT_BATCH_CHARS, DEFAULT_MAX_OUTPUT_TOKENS, modelId, renderAskResults, sourceNames } from "./ask.ts";
 import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
@@ -38,6 +38,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
     description: [
       "Answer one question over many pages without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) through the model adapter module configured with WEB_AGENT_ASK_ADAPTER, in a few large calls; each call returns short answer lines that name the page every fact came from, and this tool returns only those lines merged, the pages where nothing relevant was found, and any failed calls. The full answers are also saved to a file.",
       "Use it after collect_pages for comparisons, price or spec tables, or finding which pages mention something; give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. The model sees only the page text, so it cannot click, follow links or check anything; for work that needs that, use run_script or a subagent. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
+      "There are no default limits: pages are not clipped, a call takes as many pages as fit about 3 million characters, and the output limit is the model maximum. Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); lower batch_chars, max_chars_per_page or max_output_tokens to trade completeness for speed and cost. A call cut off at the output limit is listed with its partial answers.",
       "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix. Without a configured adapter it fails at once; tabs_list names the active adapter.",
     ].join("\n"),
     input: {
@@ -46,9 +47,10 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       dir: z.string().optional().describe("A collect_pages output folder; its .md files are used, or .txt where a page has no .md."),
       urls: z.array(z.string().min(1)).max(200).optional().describe("URLs to collect as Markdown first (like collect_pages) and then ask about."),
       tabs: z.array(tabParam).max(50).optional().describe("Open tabs whose current main content is read as Markdown."),
-      batch_chars: z.number().int().min(5000).max(600_000).optional().describe("Total page characters per model call; pages are packed in order until this is reached. Default 150000."),
-      max_pages_per_batch: z.number().int().min(1).max(100).optional().describe("Most pages in one model call. Default 20."),
-      max_chars_per_page: z.number().int().min(1000).max(400_000).optional().describe("Longer pages keep their start and end and lose the middle. Default 30000."),
+      batch_chars: z.number().int().min(5000).max(DEFAULT_BATCH_CHARS).optional().describe("Total page characters per model call; pages are packed in order until this is reached. Default 3000000, about what fits the model context, so most runs are one call; lower it for faster, cheaper parallel calls."),
+      max_pages_per_batch: z.number().int().min(1).max(1000).optional().describe("Most pages in one model call. No limit by default."),
+      max_chars_per_page: z.number().int().min(1000).max(DEFAULT_BATCH_CHARS).optional().describe("Longer pages keep their start and end and lose the middle. No clipping by default."),
+      max_output_tokens: z.number().int().min(1000).max(DEFAULT_MAX_OUTPUT_TOKENS).optional().describe("Output token limit per model call, thinking included. Default 128000, the model's maximum; a call that hits it is reported as cut off."),
       concurrency: z.number().int().min(1).max(8).optional().describe("Model calls running at once. Default 4."),
       model: z.string().optional().describe("haiku (default), sonnet or opus, sent to the adapter as claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5; any other string is passed to the adapter unchanged."),
       timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. Default 180000."),
@@ -101,12 +103,12 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const report = await askPages(adapter, {
         question: input.question,
         documents,
-        batchChars: input.batch_chars ?? 150_000,
-        maxPagesPerBatch: input.max_pages_per_batch ?? 20,
-        maxCharsPerPage: input.max_chars_per_page ?? 30_000,
+        batchChars: input.batch_chars ?? DEFAULT_BATCH_CHARS,
+        maxPagesPerBatch: input.max_pages_per_batch,
+        maxCharsPerPage: input.max_chars_per_page,
         concurrency: input.concurrency ?? 4,
         model,
-        maxTokens: 4000,
+        maxTokens: input.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         timeoutMs: input.timeout_ms ?? 180_000,
       });
       const rendered = renderAskResults(input.question, report, adapter.name, model);

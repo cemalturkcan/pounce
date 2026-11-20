@@ -21,8 +21,14 @@ export type AskInput = {
 
 export type AskAdapter = {
   name: string;
-  complete(input: AskInput): Promise<{ text: string; usage?: Record<string, number> }>;
+  complete(input: AskInput): Promise<AskReply>;
 };
+
+export type AskReply = { text: string; usage?: Record<string, number>; stopReason?: string };
+
+export const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
+export const DEFAULT_BATCH_CHARS = 3_000_000;
+export const TRUNCATED_NOTE = "answer cut off at the output limit; raise max_output_tokens or lower batch_chars";
 
 const MODEL_IDS: Record<string, string> = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
 
@@ -46,6 +52,7 @@ export type BatchResult = {
   answers: string[];
   notFound: string[];
   error?: string;
+  truncated?: boolean;
   usage?: AskUsage;
   ms: number;
 };
@@ -62,8 +69,8 @@ export type AskOptions = {
   question: string;
   documents: AskDocument[];
   batchChars: number;
-  maxPagesPerBatch: number;
-  maxCharsPerPage: number;
+  maxPagesPerBatch?: number;
+  maxCharsPerPage?: number;
   concurrency: number;
   model: string;
   maxTokens: number;
@@ -100,7 +107,7 @@ export function clipDocument(document: AskDocument, maxChars: number): AskDocume
   return clipped.truncated ? { source: document.source, text: clipped.text } : document;
 }
 
-export function packBatches(documents: AskDocument[], batchChars: number, maxPages: number) {
+export function packBatches(documents: AskDocument[], batchChars: number, maxPages = Number.POSITIVE_INFINITY) {
   const batches: AskDocument[][] = [];
   let current: AskDocument[] = [];
   let size = 0;
@@ -239,7 +246,7 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
   const documents = named
     .filter((document) => document.text.trim())
     .map((document) => {
-      const kept = clipDocument(document, options.maxCharsPerPage);
+      const kept = options.maxCharsPerPage === undefined ? document : clipDocument(document, options.maxCharsPerPage);
       if (kept !== document) clipped.push({ source: document.source, chars: document.text.length });
       return kept;
     });
@@ -259,8 +266,10 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
         const signal = AbortSignal.timeout(options.timeoutMs);
         const reply = await adapter.complete({ system: ASK_SYSTEM, prompt: buildPrompt(options.question, batch), model: options.model, maxTokens: options.maxTokens, signal });
         if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
+        if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
         const parsed = parseReply(reply.text, sources);
-        results[index] = { index: index + 1, sources, ...parsed, usage: reply.usage, ms: Date.now() - started };
+        const truncated = reply.stopReason === "max_tokens" ? { truncated: true } : {};
+        results[index] = { index: index + 1, sources, ...parsed, ...truncated, usage: reply.usage, ms: Date.now() - started };
       } catch (error) {
         if (error instanceof AskSetupError) setupError = error;
         results[index] = { index: index + 1, sources, answers: [], notFound: [], error: failureReason(error, options.timeoutMs), ms: Date.now() - started };
@@ -288,6 +297,11 @@ export function renderAskResults(question: string, report: AskReport, adapter: s
   if (notFound.length) lines.push("", `Nothing relevant in: ${notFound.join(", ")}`);
   if (report.empty.length) lines.push("", `Empty pages (not sent): ${report.empty.join(", ")}`);
   if (report.clipped.length) lines.push("", `Clipped to their start and end: ${report.clipped.map((entry) => `${entry.source} (${entry.chars} chars)`).join(", ")}`);
+  const truncated = results.filter((result) => result.truncated && !result.error);
+  if (truncated.length) {
+    lines.push("", "Cut off calls (their answers above may be incomplete):");
+    for (const result of truncated) lines.push(`call ${result.index} [${result.sources.join(", ")}]: ${TRUNCATED_NOTE}`);
+  }
   const failed = results.filter((result) => result.error);
   if (failed.length) {
     lines.push("", "Failed calls (their pages were not read):");

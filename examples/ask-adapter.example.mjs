@@ -1,3 +1,5 @@
+// maxTokens defaults to 128000. Requests that large need the streaming Messages API ("stream": true) to avoid HTTP timeouts;
+// this non-streaming sketch only shows the shapes: images become base64 image blocks before the text, and stop_reason is passed through.
 export default {
   name: "example Messages API adapter",
   async complete({ system, prompt, model, maxTokens, signal, images = [] }) {
@@ -19,6 +21,7 @@ export default {
       .join("");
     return {
       text,
+      stopReason: body.stop_reason,
       usage: { input_tokens: Number(body.usage?.input_tokens ?? 0), output_tokens: Number(body.usage?.output_tokens ?? 0) },
     };
   },

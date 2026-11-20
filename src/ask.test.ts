@@ -343,3 +343,44 @@ test("the example adapter sends images as base64 image blocks before the text bl
     globalThis.fetch = saved;
   }
 });
+
+test("a batch cut off at the output limit keeps its partial lines and is marked truncated", async () => {
+  const adapter: AskAdapter = {
+    name: "limited",
+    complete: async ({ prompt }) => {
+      const [source] = promptSources(prompt);
+      return source === "long.md" ? { text: "- first fact [long.md]\n- second fa", stopReason: "max_tokens" } : { text: `- ok [${source}]`, stopReason: "end_turn" };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("long.md", 10), doc("short.md", 10)], { maxPagesPerBatch: 1 }));
+  const cut = report.batches.find((batch) => batch.sources.includes("long.md"));
+  assert.equal(cut?.truncated, true);
+  assert.equal(cut?.error, undefined);
+  assert.ok(cut?.answers.includes("- first fact [long.md]"));
+  assert.equal(report.batches.find((batch) => batch.sources.includes("short.md"))?.truncated, undefined);
+  const text = renderAskResults("q", report, "limited", "m");
+  assert.match(text, /^- first fact \[long\.md\]$/m);
+  assert.match(text, /call 1 \[long\.md\]: answer cut off at the output limit; raise max_output_tokens or lower batch_chars/);
+});
+
+test("a refused batch is failed with the refusal as its reason", async () => {
+  const adapter: AskAdapter = {
+    name: "refusing",
+    complete: async ({ prompt }) => {
+      const [source] = promptSources(prompt);
+      return source === "bad.md" ? { text: "- partial [bad.md]", stopReason: "refusal" } : { text: `- ok [${source}]` };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("bad.md", 10), doc("good.md", 10)], { maxPagesPerBatch: 1 }));
+  const refused = report.batches.find((batch) => batch.sources.includes("bad.md"));
+  assert.match(refused?.error ?? "", /refused/);
+  assert.deepEqual(refused?.answers, []);
+  assert.deepEqual(report.batches.find((batch) => batch.sources.includes("good.md"))?.answers, ["- ok [good.md]"]);
+});
+
+test("askPages passes maxTokens to the adapter", async () => {
+  const seen: number[] = [];
+  const adapter: AskAdapter = { name: "budget", complete: async ({ maxTokens }) => (seen.push(maxTokens), { text: "NOT FOUND" }) };
+  await askPages(adapter, askOptions([doc("a.md", 10)], { maxTokens: 16_000 }));
+  assert.deepEqual(seen, [16_000]);
+});

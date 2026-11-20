@@ -35,6 +35,10 @@ The daemon only accepts requests whose `Host` and `Origin` point at its loopback
 
 `ask_pages` needs a model adapter: an ES module that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists; the default file is picked up without a restart. Without either, `ask_pages` fails at once with a message saying how to add one, and `tabs_list` shows `ask_pages adapter: none configured`. `examples/ask-adapter.example.mjs` shows the shape, including how image blocks (used by `compare_design`) map to Messages API content blocks. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
 
+The adapter returns `{ text, usage?, stopReason? }`; pass the API's `stop_reason` through as `stopReason` so a call cut off at the output limit (`max_tokens`) is reported as cut off with its partial answers and a `refusal` is reported as a failed call. With `max_tokens` up to 128000, the adapter should use the streaming API to avoid HTTP timeouts.
+
+There are no default limits: pages are not clipped, one call takes as many pages as fit about 3 million characters (under the 1M-token context), and the output limit is the model maximum (128000 tokens). Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens` lower them.
+
 The `model` parameter is passed to the adapter: `haiku` (default), `sonnet` and `opus` become `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, and any other string is passed unchanged.
 
 Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question.

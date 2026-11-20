@@ -940,11 +940,11 @@ test("ask_pages edge cases through the tool", async (t) => {
 
     await t.test("passes the mapped model id, and other ids unchanged, to the adapter", async () => {
       const models: string[] = [];
-      deps.ask = new AskAdapterSource({ adapter: { name: "model probe", complete: async ({ model }) => (models.push(model), { text: "NOT FOUND" }) } });
+      deps.ask = new AskAdapterSource({ adapter: { name: "model probe", complete: async ({ model, maxTokens }) => (models.push(`${model} ${maxTokens}`), { text: "NOT FOUND" }) } });
       await ok("ask_pages", { question: "What is here?", files: [files[0]], model: "opus" });
-      await ok("ask_pages", { question: "What is here?", files: [files[0]], model: "local-llm-7b" });
+      await ok("ask_pages", { question: "What is here?", files: [files[0]], model: "local-llm-7b", max_output_tokens: 2000 });
       deps.ask = new AskAdapterSource({ adapter: scripted });
-      assert.deepEqual(models, ["claude-opus-5-5", "local-llm-7b"]);
+      assert.deepEqual(models, ["claude-opus-5-5 128000", "local-llm-7b 2000"]);
     });
 
     await t.test("urls are collected and sent through the injected adapter", async () => {
