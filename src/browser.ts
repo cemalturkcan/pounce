@@ -468,7 +468,12 @@ export class BrowserManager {
     for (const candidate of this.listTabs()) {
       if (candidate.owner !== UNCLAIMED_OWNER && candidate.owner !== ORPHANED_OWNER) continue;
       if (candidate.page.isClosed() || candidate.page.url() !== "about:blank") continue;
-      if (await candidate.page.opener().catch(() => null)) continue;
+      const previousOwner = candidate.owner;
+      candidate.owner = owner;
+      if (await candidate.page.opener().catch(() => null)) {
+        candidate.owner = previousOwner;
+        continue;
+      }
       blank = candidate;
       break;
     }
