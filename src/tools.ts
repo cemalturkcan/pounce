@@ -3,6 +3,7 @@ import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { allBatchesFailed, type AskDocument, askPages, DEFAULT_BATCH_CHARS, DEFAULT_MAX_OUTPUT_TOKENS, modelId, renderAskResults, sourceNames } from "./ask.ts";
+import { capturePageImages, describePageImages, type PageImages } from "./ask-images.ts";
 import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
@@ -40,6 +41,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
     description: [
       "Answer one question over many pages without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) through the model adapter named by tabs_list, in a few large calls; each call returns short answer lines that name the page every fact came from, and this tool returns only those lines merged, the pages where nothing relevant was found, and any failed calls. The full answers are also saved to a file.",
       "Use it after collect_pages for comparisons, price or spec tables, or finding which pages mention something; give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. The model sees only the page text, so it cannot click, follow links or check anything; for work that needs that, use run_script or a subagent. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
+      "Screenshots: with tabs or urls, images auto (default) also sends a viewport screenshot of pages that look visual (little text for their size, mostly images, canvas, video or SVG, or no text), viewport sends one for every page, full sends the whole page as overlapping 1600 px tall tiles, none sends text only; regions adds element screenshots by ref or selector. Images go into the same call as their page's text and facts read from them cite that page. The images are saved to files listed in the result, never returned inline; each image costs about as much as 6000 characters of text.",
       "There are no default limits: pages are not clipped, a call takes as many pages as fit about 3 million characters, and the output limit is the model maximum. Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); lower batch_chars, max_chars_per_page or max_output_tokens to trade completeness for speed and cost. A call cut off at the output limit is listed with its partial answers.",
       "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix.",
     ].join("\n"),
@@ -53,6 +55,8 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       max_pages_per_batch: z.number().int().min(1).max(1000).optional().describe("Most pages in one model call. No limit by default."),
       max_chars_per_page: z.number().int().min(1000).max(DEFAULT_BATCH_CHARS).optional().describe("Longer pages keep their start and end and lose the middle. No clipping by default."),
       max_output_tokens: z.number().int().min(1000).max(DEFAULT_MAX_OUTPUT_TOKENS).optional().describe("Output token limit per model call, thinking included. Default 128000, the model's maximum; a call that hits it is reported as cut off."),
+      images: z.enum(["none", "auto", "viewport", "full"]).optional().describe("Screenshots sent with the text of tabs and urls: auto (default) only for pages that look visual, viewport for every page, full as 1600 px tiles of the whole page, none for text only."),
+      regions: z.array(z.object({ target: z.string().min(1).describe("Ref or selector of an element to capture on every page, such as a chart or a price box.") })).max(50).optional().describe("Element screenshots to send with each tab or url, in addition to images."),
       concurrency: z.number().int().min(1).max(8).optional().describe("Model calls running at once. Default 4."),
       model: z.string().optional().describe("haiku (default), sonnet or opus, sent to the adapter as claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5; any other string is passed to the adapter unchanged."),
       timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. Default 180000."),
@@ -62,6 +66,12 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
       const adapter = await deps.ask.get();
       const documents: AskDocument[] = [];
+      const imageMode = input.images ?? "auto";
+      const regions = input.regions ?? [];
+      const wantsImages = imageMode !== "none" || regions.length > 0;
+      const shots = new Map<string, PageImages>();
+      const imageLines: string[] = [];
+      let imageDir: string | undefined;
       if (input.files) {
         const names = sourceNames(input.files);
         for (const [index, file] of input.files.entries()) {
@@ -85,6 +95,14 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
                 fullPage: false,
                 previewChars: 0,
                 label: "ask",
+                capture: wantsImages
+                  ? async (tab, base, dir) => {
+                      imageDir = dir;
+                      const captured = await capturePageImages(manager, tab, { mode: imageMode, regions, source: `${base}.md`, dir, base });
+                      shots.set(`${base}.md`, captured);
+                      return captured.files.map((file) => path.basename(file));
+                    }
+                  : undefined,
               })
             ).dir;
         const names = await readdir(dir).catch(() => undefined);
@@ -92,14 +110,24 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         const markdown = new Set(names.filter((name) => name.endsWith(".md")).map((name) => name.slice(0, -3)));
         const picked = names.filter((name) => name.endsWith(".md") || (name.endsWith(".txt") && !markdown.has(name.slice(0, -4)))).sort();
         if (picked.length === 0) throw new ToolError(`No .md or .txt files in ${dir}.`, "Collect pages with include [\"markdown\"] or [\"text\"] first.");
-        for (const name of picked) documents.push({ source: name, text: await readFile(path.join(dir, name), "utf8") });
+        for (const name of picked) documents.push({ source: name, text: await readFile(path.join(dir, name), "utf8"), images: shots.get(name)?.images });
       } else {
         for (const id of input.tabs ?? []) {
           const tab = manager.getTab(id);
-          documents.push({ source: `${tab.id} ${tab.page.url()}`, text: await pageMarkdown(tab.page, "main") });
+          const source = `${tab.id} ${tab.page.url()}`;
+          const text = await pageMarkdown(tab.page, "main");
+          let images: PageImages | undefined;
+          if (wantsImages) {
+            imageDir ??= await store.dir("ask", store.uniqueName("screenshots", "dir").replace(/\.dir$/, ""));
+            images = await capturePageImages(manager, tab, { mode: imageMode, regions, source, dir: imageDir, base: tab.id });
+            shots.set(source, images);
+          }
+          documents.push({ source, text, images: images?.images });
         }
       }
-      if (documents.every((document) => !document.text.trim())) throw new ToolError(`All pages are empty: ${documents.map((document) => document.source).join(", ")}.`);
+      if ((input.files || input.dir) && (input.images === "viewport" || input.images === "full" || regions.length)) imageLines.push("images and regions apply to tabs and urls only, so no screenshots were sent.");
+      for (const [source, captured] of shots) imageLines.push(...describePageImages(source, captured));
+      if (documents.every((document) => !document.text.trim() && !document.images?.length)) throw new ToolError(`All pages are empty: ${documents.map((document) => document.source).join(", ")}.`);
 
       const model = modelId(input.model ?? "haiku");
       const report = await askPages(adapter, {
@@ -113,7 +141,9 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         maxTokens: input.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         timeoutMs: input.timeout_ms ?? 180_000,
       });
-      const rendered = renderAskResults(input.question, report, adapter.name, model);
+      const sentImages = [...shots.values()].reduce((total, captured) => total + captured.images.length, 0);
+      const imageFooter = imageLines.length || sentImages ? `\n\nScreenshots (${sentImages} sent${imageDir && sentImages ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}` : "";
+      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${imageFooter}`;
       const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
       if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
       const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;

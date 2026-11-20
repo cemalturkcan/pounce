@@ -11,11 +11,13 @@ import {
   clipDocument,
   loadAdapterModule,
   packBatches,
+  IMAGE_CHARS,
   modelId,
   parseReply,
   renderAskResults,
   sourceNames,
   type AskAdapter,
+  type AskDocument,
 } from "./ask.ts";
 import { describeError, ToolError } from "./errors.ts";
 
@@ -159,7 +161,7 @@ test("loadAdapterModule accepts an adapter or a factory and rejects other shapes
   }
 });
 
-const askOptions = (documents: { source: string; text: string }[], overrides: Partial<Parameters<typeof askPages>[1]> = {}) => ({
+const askOptions = (documents: AskDocument[], overrides: Partial<Parameters<typeof askPages>[1]> = {}) => ({
   question: "What is listed?",
   documents,
   batchChars: 100_000,
@@ -364,4 +366,53 @@ test("askPages passes maxTokens to the adapter", async () => {
   const adapter: AskAdapter = { name: "budget", complete: async ({ maxTokens }) => (seen.push(maxTokens), { text: "NOT FOUND" }) };
   await askPages(adapter, askOptions([doc("a.md", 10)], { maxTokens: 16_000 }));
   assert.deepEqual(seen, [16_000]);
+});
+
+const image = (label: string) => ({ mediaType: "image/jpeg" as const, data: Buffer.from(label).toString("base64"), label });
+
+test("buildPrompt announces each page's screenshots right after its document, numbered in send order", () => {
+  const prompt = buildPrompt("What is shown?", [
+    { source: "a.md", text: "Alpha", images: [image("a.md tile 1/2"), image("a.md tile 2/2")] },
+    { source: "b.md", text: "Beta" },
+    { source: "c.md", text: "Gamma", images: [image("c.md region #chart")] },
+  ]);
+  assert.match(prompt, /<\/document>\n<screenshots source="a\.md">Images 1-2 of this message: a\.md tile 1\/2, a\.md tile 2\/2<\/screenshots>\n\n<document source="b\.md">/);
+  assert.match(prompt, /<document source="c\.md">\nGamma\n<\/document>\n<screenshots source="c\.md">Image 3 of this message: c\.md region #chart<\/screenshots>/);
+  assert.match(ASK_SYSTEM, /screenshots/i);
+  assert.match(ASK_SYSTEM, /cite that page's source/);
+});
+
+test("askPages sends each batch's images in page order with the batch's prompt", async () => {
+  const seen: { sources: string[]; labels: string[] }[] = [];
+  const adapter: AskAdapter = {
+    name: "images",
+    complete: async ({ prompt, images }) => {
+      seen.push({ sources: promptSources(prompt).filter((source, index, all) => all.indexOf(source) === index), labels: (images ?? []).map((entry) => entry.label ?? "") });
+      return { text: "NOT FOUND" };
+    },
+  };
+  await askPages(adapter, askOptions([
+    { source: "a.md", text: "Alpha", images: [image("a1"), image("a2")] },
+    { source: "b.md", text: "Beta" },
+    { source: "c.md", text: "Gamma", images: [image("c1")] },
+  ]));
+  assert.deepEqual(seen, [{ sources: ["a.md", "b.md", "c.md"], labels: ["a1", "a2", "c1"] }]);
+});
+
+test("packBatches weighs images and never puts more than 100 images in one call", () => {
+  const many = (source: string, count: number) => ({ source, text: "x", images: Array.from({ length: count }, (_value, index) => image(`${source}${index}`)) });
+  const batches = packBatches([many("a", 60), many("b", 60), many("c", 10)], 10_000_000);
+  assert.deepEqual(batches.map((batch) => batch.map((entry) => entry.source)), [["a"], ["b", "c"]]);
+  assert.deepEqual(packBatches([many("a", 3), { source: "b", text: "y".repeat(10) }], 3 * IMAGE_CHARS).map((batch) => batch.length), [1, 1]);
+});
+
+test("an empty reply cut off at the output limit or refused is reported, not read as no answers", async () => {
+  const adapter: AskAdapter = {
+    name: "empty",
+    complete: async ({ prompt }) => ({ text: "", stopReason: promptSources(prompt)[0] === "cut.md" ? "max_tokens" : "refusal" }),
+  };
+  const report = await askPages(adapter, askOptions([doc("cut.md", 10), doc("refused.md", 10)], { maxPagesPerBatch: 1 }));
+  const text = renderAskResults("q", report, "empty", "m");
+  assert.match(text, /call 1 \[cut\.md\]: answer cut off at the output limit/);
+  assert.match(text, /call 2 \[refused\.md\]: the model refused to answer/);
 });
