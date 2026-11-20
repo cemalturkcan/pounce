@@ -2,6 +2,7 @@ import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readTabBody, tabBodyType } from "../body.ts";
+import { capture } from "../capture.ts";
 import { extractPage, summarizeStructured, toCsv } from "../extract.ts";
 import { framesText } from "../frames.ts";
 import { elementMarkdown, pageMarkdown } from "../markdown.ts";
@@ -128,10 +129,8 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
-      const options = { type: "jpeg" as const, quality: input.quality ?? 70, scale: "css" as const, timeout: 20_000 };
-      const image = input.target
-        ? await (await manager.resolve(tab, input.target)).screenshot(options)
-        : await tab.page.screenshot({ ...options, fullPage: input.full_page ?? false });
+      const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
+      const image = await capture(tab.page, { format: "jpeg", quality: input.quality ?? 70, timeoutMs: 20_000, locator, fullPage: !locator && (input.full_page ?? false) });
       const file = await store.write("screenshots", store.uniqueName(`${tab.id}-${tab.page.url()}`, "jpg"), image);
       const pageHeight = input.full_page ? await tab.page.evaluate(() => document.documentElement.scrollHeight).catch(() => 0) : 0;
       if (input.save_only) return `Screenshot saved to ${file}`;

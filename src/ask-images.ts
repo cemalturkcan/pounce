@@ -3,6 +3,7 @@ import path from "node:path";
 import type { AskImage } from "./ask-adapter.ts";
 import { withTimeout } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
+import { capture } from "./capture.ts";
 import { ToolError } from "./errors.ts";
 import { browserTranscoder, imageSize, JPEG_QUALITY, type PreparedImage, prepareModelImage } from "./model-images.ts";
 
@@ -84,13 +85,13 @@ export async function capturePageImages(
   let mode = options.mode;
   if (mode === "auto") mode = looksVisual(await measurePage(tab)) ? "viewport" : "none";
   if (mode === "viewport") {
-    await keep(await page.screenshot({ type: "jpeg", quality: JPEG_QUALITY, scale: "css", timeout: STEP_MS }), "viewport", `${options.source} viewport`);
+    await keep(await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS }), "viewport", `${options.source} viewport`);
     result.kind = "viewport";
   } else if (mode === "full") {
     const size = await bounded(page.evaluate(() => ({ width: window.innerWidth, height: (document.scrollingElement ?? document.documentElement).scrollHeight })), "measuring the page");
     const tiles = planTiles(Math.max(1, size.height));
     for (const [index, tile] of tiles.entries()) {
-      const shot = await page.screenshot({ type: "jpeg", quality: JPEG_QUALITY, scale: "css", fullPage: true, clip: { x: 0, y: tile.y, width: size.width, height: tile.height }, timeout: STEP_MS });
+      const shot = await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS, clip: { x: 0, y: tile.y, width: size.width, height: tile.height } });
       await keep(shot, `tile-${index + 1}`, `${options.source} tile ${index + 1}/${tiles.length}`);
     }
     result.kind = "tiles";
@@ -99,7 +100,7 @@ export async function capturePageImages(
   for (const [index, region] of options.regions.entries()) {
     try {
       const locator = await manager.resolve(tab, region.target);
-      await keep(await locator.screenshot({ type: "jpeg", quality: JPEG_QUALITY, scale: "css", timeout: STEP_MS }), `region-${index + 1}`, `${options.source} region ${region.target}`);
+      await keep(await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS, locator }), `region-${index + 1}`, `${options.source} region ${region.target}`);
       result.regions += 1;
     } catch (error) {
       result.notes.push(`region ${region.target} was not captured: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);

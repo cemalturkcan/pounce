@@ -4,6 +4,7 @@ import type { CDPSession, Locator, Page } from "playwright-core";
 import { type AskAdapterSource, DEFAULT_MAX_OUTPUT_TOKENS, describeUsage, modelId } from "./ask.ts";
 import { withDeadline, withTimeout, TIMED_OUT } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
+import { capture, pageZoom } from "./capture.ts";
 import { reapplyEmulatedViewport } from "./emulate.ts";
 import { ToolError } from "./errors.ts";
 import type { OutputStore } from "./output.ts";
@@ -138,26 +139,21 @@ async function restoreViewport(page: Page, session: CDPSession, before: Metrics)
 }
 
 async function screenshotWith(page: Page, session: CDPSession, metrics: Metrics, mode: { locator?: Locator; fullPage: boolean }) {
-  await bounded(session.send("Emulation.setDeviceMetricsOverride", { width: metrics.width, height: metrics.height, deviceScaleFactor: metrics.deviceScaleFactor, mobile: false }), "setting the viewport");
+  const zoom = await bounded(pageZoom(session), "reading the zoom");
+  await bounded(
+    session.send("Emulation.setDeviceMetricsOverride", { width: Math.round(metrics.width * zoom), height: Math.round(metrics.height * zoom), deviceScaleFactor: metrics.deviceScaleFactor / zoom, mobile: false }),
+    "setting the viewport",
+  );
   await settle(page);
-  let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
-  if (mode.locator) {
-    await bounded(mode.locator.scrollIntoViewIfNeeded({ timeout: STEP_TIMEOUT_MS }), "scrolling to the target");
-    const box = await bounded(mode.locator.boundingBox({ timeout: STEP_TIMEOUT_MS }), "measuring the target");
-    if (!box || box.width < 1 || box.height < 1) throw new ToolError("The target element has no visible box to capture.", "Check the ref or selector with snapshot, or compare the viewport instead.");
-    const scroll = await bounded(page.evaluate(() => [window.scrollX, window.scrollY]), "reading the scroll position");
-    clip = { x: box.x + (scroll[0] ?? 0), y: box.y + (scroll[1] ?? 0), width: box.width, height: box.height, scale: 1 };
-  } else if (mode.fullPage) {
+  const options = { format: "png" as const, timeoutMs: CAPTURE_TIMEOUT_MS, pixelsPerCss: metrics.deviceScaleFactor, session };
+  if (mode.locator) return capture(page, { ...options, locator: mode.locator });
+  if (mode.fullPage) {
     const layout = (await bounded(session.send("Page.getLayoutMetrics"), "measuring the page")) as { cssContentSize?: { height: number } };
     const height = Math.min(Math.ceil(layout.cssContentSize?.height ?? metrics.height), Math.floor(MAX_CAPTURE_PIXELS_HIGH / metrics.deviceScaleFactor));
-    clip = { x: 0, y: 0, width: metrics.width, height: Math.max(height, 1), scale: 1 };
+    return capture(page, { ...options, clip: { x: 0, y: 0, width: metrics.width, height: Math.max(height, 1) } });
   }
-  const shot = (await bounded(
-    session.send("Page.captureScreenshot", clip ? { format: "png", clip, captureBeyondViewport: true } : { format: "png" }),
-    "taking the screenshot",
-    CAPTURE_TIMEOUT_MS,
-  )) as { data: string };
-  return Buffer.from(shot.data, "base64");
+  const [x = 0, y = 0] = await bounded(page.evaluate(() => [window.scrollX, window.scrollY]), "reading the scroll position");
+  return capture(page, { ...options, clip: { x, y, width: metrics.width, height: metrics.height } });
 }
 
 async function captureAt(page: Page, metrics: Metrics, mode: { locator?: Locator; fullPage: boolean }) {

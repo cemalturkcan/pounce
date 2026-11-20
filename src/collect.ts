@@ -3,6 +3,7 @@ import path from "node:path";
 import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
 import { type BodyType, classifyBody, extractPdfText, fetchBody, isDownloadError, isTextKind } from "./body.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
+import { capture } from "./capture.ts";
 import { acceptConsentOnce } from "./consent.ts";
 import { describeError } from "./errors.ts";
 import { extractPage, summarizeStructured } from "./extract.ts";
@@ -175,7 +176,7 @@ async function saveOne(
     result.files.push(`${base}.snapshot.yml`);
   }
   if (input.include.includes("screenshot")) {
-    const image = await page.screenshot({ type: "jpeg", quality: 70, fullPage: input.fullPage, scale: "css", timeout: input.timeoutMs });
+    const image = await capture(page, { format: "jpeg", quality: 70, fullPage: input.fullPage, timeoutMs: input.timeoutMs });
     await writeFile(path.join(dir, `${base}.jpg`), image);
     result.files.push(`${base}.jpg`);
   }
