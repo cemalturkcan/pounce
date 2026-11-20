@@ -1,5 +1,6 @@
 import vm from "node:vm";
 import type { Locator, Page } from "playwright-core";
+import type { AskAdapterSource } from "./ask.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { ToolError } from "./errors.ts";
 import { extractPage } from "./extract.ts";
@@ -7,12 +8,14 @@ import type { OutputStore, Redactor } from "./output.ts";
 import { pageLinks, pageText, rawSnapshot } from "./page.ts";
 import type { SecretField, SecretStore } from "./secrets.ts";
 import { interactiveOnly } from "./snapshot.ts";
+import { type CompareOptions, compareDesign } from "./visual.ts";
 
 export type ScriptDeps = {
   manager: BrowserManager;
   store: OutputStore;
   secrets: SecretStore;
   redactor: Redactor;
+  ask?: AskAdapterSource;
 };
 
 export const OTP_MASK_MS = 2 * 60 * 1000;
@@ -206,6 +209,16 @@ export async function runScript(
     text: guard.guard((page?: Page | string, scope: "main" | "page" = "main") => pageText(pageOf(page).page, scope)),
     links: guard.guard((page?: Page | string, limit: number = 300) => pageLinks(pageOf(page).page, limit)),
     extract: guard.guard((page?: Page | string) => extractPage(pageOf(page).page)),
+    compareDesign: guard.guard(async (page: Page | string | undefined, referencePath: string, compareOptions: Omit<CompareOptions, "signal"> = {}) => {
+      const { ask } = deps;
+      if (!ask) throw new ToolError("compareDesign is not available in this script context.");
+      const { text, ...report } = await compareDesign({ manager, store, ask }, pageOf(page), referencePath, {
+        ...compareOptions,
+        target: compareOptions.target && typeof compareOptions.target !== "string" ? guard.unwrap(compareOptions.target) : compareOptions.target,
+        signal,
+      });
+      return { ...report, summary: text };
+    }),
     save: guard.guard((name: string, content: string | Buffer) =>
       store.write("scripts", store.uniqueName(name, /\.[a-z0-9]{1,8}$/i.test(name) ? (name.split(".").pop() ?? "txt") : "txt"), content),
     ),

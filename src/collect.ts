@@ -30,6 +30,7 @@ export type CollectInput = {
   scroll?: ScrollInput;
   label?: string;
   signal?: AbortSignal;
+  capture?: (tab: Tab, base: string, dir: string) => Promise<string[]>;
 };
 
 export type CollectedPage = {
@@ -149,6 +150,7 @@ async function saveOne(
     await writeFile(path.join(dir, `${base}.md`), header + markdown);
     result.files.push(`${base}.md`);
   }
+  if (input.capture) result.files.push(...(await input.capture(tab, base, dir)));
   if (input.include.includes("links")) {
     const links = await pageLinks(page, LINK_LIMIT);
     result.links = links.length;

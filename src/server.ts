@@ -32,7 +32,7 @@ export function createDeps(config: Config, secrets?: SecretStore, askAdapter?: A
     secrets: secrets ?? (config.secretsBackend === "gopass" ? new GopassStore() : new NoSecretStore()),
     redactor,
     jobs: new JobRunner(),
-    ask: new AskAdapterSource(askAdapter ? { adapter: askAdapter } : { modulePath: config.askAdapter, adapter: anthropicAskAdapter() }),
+    ask: new AskAdapterSource(askAdapter ? { adapter: askAdapter } : { modulePath: config.askAdapter, defaultPath: config.askAdapterPath, adapter: anthropicAskAdapter() }),
   };
 }
 

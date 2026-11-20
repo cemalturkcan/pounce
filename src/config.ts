@@ -25,12 +25,21 @@ export type Config = {
   extraArgs: string[];
   secretsBackend: "gopass" | "none";
   askAdapter?: string;
+  askAdapterPath: string;
 };
 
 const DEFAULT_PORT = 29741;
 
+function homeDir(source: NodeJS.ProcessEnv) {
+  return source.HOME?.trim() || homedir();
+}
+
+export function defaultAskAdapterPath(source: NodeJS.ProcessEnv) {
+  return path.join(homeDir(source), ".config", "web-agent-mcp", "ask-adapter.mjs");
+}
+
 function dataHome(source: NodeJS.ProcessEnv) {
-  return source.XDG_DATA_HOME?.trim() || path.join(homedir(), ".local", "share");
+  return source.XDG_DATA_HOME?.trim() || path.join(homeDir(source), ".local", "share");
 }
 
 function parsePort(value: string | undefined) {
@@ -85,5 +94,6 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     extraArgs: parseLaunchArgs(source.WEB_AGENT_DEFAULT_LAUNCH_ARGS),
     secretsBackend: source.WEB_AGENT_SECRETS === "none" ? "none" : "gopass",
     askAdapter: source.WEB_AGENT_ASK_ADAPTER?.trim() || undefined,
+    askAdapterPath: defaultAskAdapterPath(source),
   };
 }
