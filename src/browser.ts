@@ -258,7 +258,7 @@ export class BrowserManager {
       acceptDownloads: true,
       ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
       chromiumSandbox: config.chromeSandbox,
-      args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", ...config.extraArgs],
+      args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", "--test-type", ...config.extraArgs],
     }).catch((error: unknown) => {
       throw sandboxLaunchError(error, config.chromeSandbox) ?? error;
     });

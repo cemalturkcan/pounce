@@ -63,3 +63,11 @@ test("Chrome is launched with its sandbox enabled", { skip: !isLinux && "reads /
   assert.equal(browsers.length, 1, `expected one browser process for ${deps.manager.config.profileDir}`);
   assert.ok(!browsers[0]!.includes("--no-sandbox"), `browser launched with --no-sandbox: ${browsers[0]!.join(" ")}`);
 });
+
+test("Chrome is launched with --test-type to hide the unsupported flag infobar", { skip: !isLinux && "reads /proc" }, async () => {
+  const result = await client.callTool({ name: "tab_open", arguments: { url: "about:blank" } });
+  assert.notEqual(result.isError, true, JSON.stringify(result.content));
+  const browsers = await browserCommandLines(deps.manager.config.profileDir);
+  assert.equal(browsers.length, 1, `expected one browser process for ${deps.manager.config.profileDir}`);
+  assert.ok(browsers[0]!.includes("--test-type"), `browser launched without --test-type: ${browsers[0]!.join(" ")}`);
+});
