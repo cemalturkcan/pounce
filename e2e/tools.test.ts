@@ -97,7 +97,7 @@ after(async () => {
 });
 test("every tool and parameter is described", async () => {
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 37);
+  assert.equal(tools.length, 38);
   for (const tool of tools) {
     assert.ok((tool.description ?? "").length >= 60, `${tool.name} description too short`);
     const properties = (tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>;

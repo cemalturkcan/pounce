@@ -16,6 +16,7 @@ import { registerNetworkTools } from "./tools/network.ts";
 import { registerScriptTools } from "./tools/script.ts";
 import { registerDataTools } from "./tools/data.ts";
 import { registerSessionTools } from "./tools/session.ts";
+import { registerVisualTools } from "./tools/visual.ts";
 
 export type { ToolDeps } from "./tools/common.ts";
 export { cookieDomainMatches } from "./tools/data.ts";
@@ -31,6 +32,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
   registerScriptTools(server, deps);
   registerDataTools(server, deps);
   registerSessionTools(server, deps);
+  registerVisualTools(server, deps);
 
   defineTool(server, deps, {
     name: "ask_pages",
