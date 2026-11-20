@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -7,13 +7,11 @@ import {
   ASK_SYSTEM,
   askPages,
   buildPrompt,
-  claudeCliAdapter,
-  cliArgs,
-  cliEnv,
+  AskAdapterSource,
   clipDocument,
   loadAdapterModule,
   packBatches,
-  parseCliOutput,
+  modelId,
   parseReply,
   renderAskResults,
   sourceNames,
@@ -139,88 +137,6 @@ test("askPages reports a timed out call", async () => {
   assert.equal(result?.error, "no answer within 50 ms");
 });
 
-test("claude CLI arguments disable tools, MCP, settings and persistence", () => {
-  const args = cliArgs("haiku", "SYSTEM");
-  assert.deepEqual(args.slice(0, 7), ["-p", "--model", "haiku", "--output-format", "json", "--system-prompt", "SYSTEM"]);
-  assert.equal(args[args.indexOf("--tools") + 1], "");
-  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
-  assert.ok(args.includes("--strict-mcp-config"));
-  assert.ok(args.includes("--no-session-persistence"));
-  const parsed = parseCliOutput(JSON.stringify({ type: "result", is_error: false, result: "- a [x]", total_cost_usd: 0.002, usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0, server_tool_use: {} } }));
-  assert.deepEqual(parsed, { text: "- a [x]", usage: { input_tokens: 5, cache_read_input_tokens: 0, output_tokens: 3, cost_usd: 0.002 } });
-  assert.throws(() => parseCliOutput(JSON.stringify({ is_error: true, subtype: "error_during_execution", result: "boom" })), /claude -p failed/);
-  assert.throws(() => parseCliOutput("not json"), /not JSON/);
-});
-
-const accountOverrides = {
-  ANTHROPIC_API_KEY: "sk-test",
-  ANTHROPIC_AUTH_TOKEN: "token",
-  ANTHROPIC_BASE_URL: "https://proxy.example",
-  ANTHROPIC_MODEL: "opus",
-  CLAUDE_CODE_USE_BEDROCK: "1",
-  CLAUDE_CODE_USE_VERTEX: "1",
-  CLAUDE_CODE_OAUTH_TOKEN: "oauth",
-  CLAUDE_CODE_API_KEY_FILE: "/tmp/key",
-};
-
-const keptVariables = {
-  CLAUDE_CONFIG_DIR: "/home/user/.claude",
-  PATH: "/usr/bin",
-  HOME: "/home/user",
-  HTTPS_PROXY: "http://proxy:3128",
-  CLAUDE_CODE_SOMETHING_ELSE: "kept",
-  CLAUDE_CODE_USE: "kept",
-  MY_ANTHROPIC_KEY: "kept",
-  XANTHROPIC_API_KEY: "kept",
-  anthropic_api_key: "kept",
-};
-
-test("cliEnv drops variables that would override the signed-in CLI account and keeps the rest", () => {
-  const source = { ...accountOverrides, ...keptVariables };
-  const snapshot = { ...source };
-  assert.deepEqual(cliEnv(source), keptVariables);
-  assert.deepEqual(source, snapshot);
-  assert.deepEqual(cliEnv({}), {});
-});
-
-test("claudeCliAdapter spawns the CLI with the filtered environment", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
-  const saved = Object.fromEntries(Object.keys({ ...accountOverrides, ...keptVariables }).map((name) => [name, process.env[name]]));
-  try {
-    const fake = path.join(dir, "fake-claude");
-    await writeFile(
-      fake,
-      [
-        `#!${process.execPath}`,
-        "let input = '';",
-        "process.stdin.on('data', (chunk) => { input += chunk; });",
-        "process.stdin.on('end', () => {",
-        "  const result = JSON.stringify({ env: process.env, args: process.argv.slice(2), input });",
-        "  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } }));",
-        "});",
-      ].join("\n"),
-    );
-    await chmod(fake, 0o755);
-    Object.assign(process.env, accountOverrides, { CLAUDE_CONFIG_DIR: keptVariables.CLAUDE_CONFIG_DIR, CLAUDE_CODE_SOMETHING_ELSE: "kept", MY_ANTHROPIC_KEY: "kept" });
-    const reply = await claudeCliAdapter(fake).complete({ system: "SYSTEM", prompt: "PROMPT", model: "haiku", maxTokens: 100, signal: new AbortController().signal });
-    const seen = JSON.parse(reply.text) as { env: Record<string, string>; args: string[]; input: string };
-    for (const name of Object.keys(accountOverrides)) assert.equal(seen.env[name], undefined, name);
-    assert.equal(seen.env.CLAUDE_CONFIG_DIR, keptVariables.CLAUDE_CONFIG_DIR);
-    assert.equal(seen.env.CLAUDE_CODE_SOMETHING_ELSE, "kept");
-    assert.equal(seen.env.MY_ANTHROPIC_KEY, "kept");
-    assert.equal(seen.env.PATH, process.env.PATH);
-    assert.deepEqual(seen.args, cliArgs("haiku", "SYSTEM"));
-    assert.equal(seen.input, "PROMPT");
-    assert.equal(process.env.ANTHROPIC_API_KEY, "sk-test");
-  } finally {
-    for (const [name, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("loadAdapterModule accepts an adapter or a factory and rejects other shapes", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ask-adapter-"));
   try {
@@ -331,80 +247,99 @@ test("sourceNames uses paths relative to the common folder when base names colli
   assert.deepEqual(sourceNames([path.join("/out/collect", left, name), path.join("/out/collect", right, name)]), [path.join(left, name), path.join(right, name)]);
 });
 
-async function fakeCli(dir: string, body: string[]) {
-  const file = path.join(dir, "fake-claude");
-  await writeFile(file, [`#!${process.execPath}`, ...body].join("\n"));
-  await chmod(file, 0o755);
-  return file;
-}
-
-test("a missing claude CLI is a ToolError naming WEB_AGENT_ASK_CLAUDE_COMMAND", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
-    assert.ok(error instanceof ToolError);
-    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
-    return true;
-  });
-});
-
-test("a missing claude CLI error says how to check the sign-in", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
-    assert.match(describeError(error), /claude auth status/);
-    return true;
-  });
-});
-
-test("askPages stops with the setup error when the claude CLI is missing", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(askPages(claudeCliAdapter(missing), askOptions([doc("a.md", 10), doc("b.md", 10)], { maxPagesPerBatch: 1 })), (error: Error) => {
-    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
-    return true;
-  });
-});
-
-const brokenCli = [
-  "let input = '';",
-  "process.stdin.on('data', (chunk) => { input += chunk; });",
-  "process.stdin.on('end', () => {",
-  "  if (input.includes('BROKEN')) { process.stdout.write('<html>gateway error</html>'); return; }",
-  "  const source = /source=\"([^\"]+)\"/.exec(input)[1];",
-  "  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '- ok [' + source + ']' }));",
-  "});",
-];
-
-test("a batch with malformed CLI output is listed as failed with a short reason", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+test("without an adapter module the source fails fast and names the env var, the default path and the example", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-default-"));
   try {
-    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
-    const failed = report.batches.find((batch) => batch.sources.includes("bad.md"));
-    assert.match(failed?.error ?? "", /not JSON/);
+    const missing = path.join(dir, "ask-adapter.mjs");
+    const source = new AskAdapterSource({ modulePath: missing, explicit: false });
+    assert.equal(source.configured, false);
+    assert.equal(source.label, "none configured");
+    await assert.rejects(source.get(), (error: Error) => {
+      assert.ok(error instanceof ToolError);
+      const text = describeError(error);
+      assert.match(text, /No model adapter is configured/);
+      assert.match(text, /WEB_AGENT_ASK_ADAPTER/);
+      assert.ok(text.includes(missing), text);
+      assert.match(text, /examples\/ask-adapter\.example\.mjs/);
+      return true;
+    });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("other batches still answer when one batch gets malformed CLI output", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+test("the default adapter path is used once the file exists, without a restart", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-default-"));
   try {
-    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
-    assert.deepEqual(report.batches.find((batch) => batch.sources.includes("good.md"))?.answers, ["- ok [good.md]"]);
+    const file = path.join(dir, "ask-adapter.mjs");
+    const source = new AskAdapterSource({ modulePath: file, explicit: false });
+    await assert.rejects(source.get(), /No model adapter is configured/);
+    await writeFile(file, 'export default { name: "owner default", complete: async () => ({ text: "ok" }) };');
+    assert.equal(source.configured, true);
+    assert.equal((await source.get()).name, "owner default");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("a CLI call that runs past the timeout is failed and its process is killed", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
-  const pidFile = path.join(dir, "pid");
+test("an explicit adapter path that does not exist is a load error, not a silent fallback", async () => {
+  const missing = path.join(tmpdir(), `no-adapter-${token()}.mjs`);
+  const source = new AskAdapterSource({ modulePath: missing, explicit: true });
+  assert.equal(source.configured, true);
+  await assert.rejects(source.get(), /Could not load the ask adapter/);
+});
+
+test("the adapter source label names the injected adapter, or the module until it loads", async () => {
+  const adapter: AskAdapter = { name: "injected", complete: async () => ({ text: "" }) };
+  const injected = new AskAdapterSource({ adapter });
+  assert.equal(injected.configured, true);
+  assert.equal(injected.label, "injected");
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-adapter-"));
   try {
-    const cli = await fakeCli(dir, [`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`, "setTimeout(() => undefined, 60000);"]);
-    const report = await askPages(claudeCliAdapter(cli), askOptions([doc("a.md", 10)], { timeoutMs: 1500 }));
-    assert.equal(report.batches[0]?.error, "no answer within 1500 ms");
-    const pid = Number(await readFile(pidFile, "utf8"));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    const file = path.join(dir, "named.mjs");
+    await writeFile(file, 'export default { name: "named module", complete: async () => ({ text: "" }) };');
+    const fromModule = new AskAdapterSource({ modulePath: file });
+    assert.equal(fromModule.label, `module ${file}`);
+    await fromModule.get();
+    assert.equal(fromModule.label, `named module (${file})`);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("modelId maps the short names and passes any other id through", () => {
+  assert.equal(modelId("haiku"), "claude-haiku-5-5");
+  assert.equal(modelId("sonnet"), "claude-sonnet-5-5");
+  assert.equal(modelId("opus"), "claude-opus-5-5");
+  assert.equal(modelId("Opus"), "claude-opus-5-5");
+  assert.equal(modelId("my-local-model"), "my-local-model");
+});
+
+test("the example adapter sends images as base64 image blocks before the text block", async () => {
+  const example = await loadAdapterModule(path.resolve(import.meta.dirname, "..", "examples", "ask-adapter.example.mjs"));
+  const saved = globalThis.fetch;
+  let body: { model: string; system: string; messages: { role: string; content: Record<string, unknown>[] }[] } | undefined;
+  globalThis.fetch = (async (_url: string, init: { body: string }) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "- ok" }], usage: { input_tokens: 7, output_tokens: 2 } }));
+  }) as unknown as typeof fetch;
+  try {
+    const reply = await example.complete({
+      system: "SYS",
+      prompt: "PROMPT",
+      model: modelId("haiku"),
+      maxTokens: 10,
+      signal: new AbortController().signal,
+      images: [{ mediaType: "image/png", data: "AAAA" }, { mediaType: "image/jpeg", data: "BBBB" }],
+    });
+    assert.equal(reply.text, "- ok");
+    assert.equal(body?.model, "claude-haiku-5-5");
+    assert.deepEqual(body?.messages[0]?.content, [
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BBBB" } },
+      { type: "text", text: "PROMPT" },
+    ]);
+  } finally {
+    globalThis.fetch = saved;
   }
 });

@@ -627,11 +627,11 @@ test("browser flow", async (t) => {
   });
 
   await t.test("ask_pages answers over collected pages, tabs and folders through the adapter", async () => {
-    assert.match(await ok("tabs_list"), /ask_pages adapter: claude CLI/);
+    assert.match(await ok("tabs_list"), /ask_pages adapter: fixture adapter/);
     const text = await ok("ask_pages", { question: "Which page mentions paragraph 7?", urls: [fixture.url, `${fixture.url}/article`, `${fixture.url}/doc`], batch_chars: 30_000, max_pages_per_batch: 2 });
     assert.match(text, /^- Paragraph 7 is in the article \[02-127-0-0-1-\d+-article\.md\]$/m);
     assert.match(text, /Nothing relevant in: .*01-127-0-0-1-\d+\.md/);
-    assert.match(text, /Adapter: fixture adapter, model haiku, 2 call\(s\)/);
+    assert.match(text, /Adapter: fixture adapter, model claude-haiku-5-5, 2 call\(s\)/);
     assert.match(text, /input tokens 2000, output tokens 40/);
     assert.ok(!text.includes("Paragraph 8 of"), "page content leaked into the result");
     const prompt = askPrompts.at(-2) ?? askPrompts.at(-1) ?? "";
@@ -888,7 +888,7 @@ test("ask_pages edge cases through the tool", async (t) => {
       return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
     },
   };
-  deps.ask = new AskAdapterSource({ command: "unused", adapter: scripted });
+  deps.ask = new AskAdapterSource({ adapter: scripted });
   const root = await mkdtemp(path.join(workDir, "ask-files-"));
   const [left, right] = [`run-${randomBytes(3).toString("hex")}`, `run-${randomBytes(3).toString("hex")}`];
   const name = `01-${randomBytes(3).toString("hex")}.md`;
@@ -925,6 +925,26 @@ test("ask_pages edge cases through the tool", async (t) => {
       const result = await call("ask_pages", { question: "What is here?", files });
       failAll = false;
       assert.deepEqual([result.isError, /upstream refused 2 pages/.test(result.text)], [true, true]);
+    });
+
+    await t.test("without a configured adapter it fails at once and names WEB_AGENT_ASK_ADAPTER", async () => {
+      deps.ask = new AskAdapterSource({});
+      const before = seen.length;
+      const result = await call("ask_pages", { question: "What is here?", files });
+      deps.ask = new AskAdapterSource({ adapter: scripted });
+      assert.equal(result.isError, true);
+      assert.match(result.text, /No model adapter is configured[\s\S]*WEB_AGENT_ASK_ADAPTER[\s\S]*ask-adapter\.example\.mjs/);
+      assert.equal(seen.length, before);
+      assert.match(await ok("tabs_list"), /ask_pages adapter: scripted adapter/);
+    });
+
+    await t.test("passes the mapped model id, and other ids unchanged, to the adapter", async () => {
+      const models: string[] = [];
+      deps.ask = new AskAdapterSource({ adapter: { name: "model probe", complete: async ({ model }) => (models.push(model), { text: "NOT FOUND" }) } });
+      await ok("ask_pages", { question: "What is here?", files: [files[0]], model: "opus" });
+      await ok("ask_pages", { question: "What is here?", files: [files[0]], model: "local-llm-7b" });
+      deps.ask = new AskAdapterSource({ adapter: scripted });
+      assert.deepEqual(models, ["claude-opus-5-5", "local-llm-7b"]);
     });
 
     await t.test("urls are collected and sent through the injected adapter", async () => {
@@ -1138,7 +1158,7 @@ test("collect_pages waits for client-rendered content", async (t) => {
     const { AskAdapterSource } = await import("../src/ask.ts");
     const saved = deps.ask;
     const sent: string[] = [];
-    deps.ask = new AskAdapterSource({ command: "unused", adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
+    deps.ask = new AskAdapterSource({ adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
     try {
       await ok("ask_pages", { question: "Which items?", urls: [`${fixture.url}/spa`] });
       assert.ok(sent.join("\n").includes(SPA_TEXT.item));

@@ -11,7 +11,7 @@ The agent-facing guide is [`skills/web-agent-browser/SKILL.md`](skills/web-agent
 
 ## Requirements
 
-Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, the Claude Code CLI for `ask_pages`.
+Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, and a model adapter module for `ask_pages` and the model layer of `compare_design`.
 
 ## Run
 
@@ -33,9 +33,11 @@ The daemon only accepts requests whose `Host` and `Origin` point at its loopback
 
 ## Ask Pages
 
-The built-in `ask_pages` adapter sends selected page text to Claude Haiku by default. It runs the local Claude Code CLI with the Claude account signed in via `claude auth login`. Run the MCP server as the same OS user and check the active login with `claude auth status`.
+`ask_pages` needs a model adapter: an ES module that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists; the default file is picked up without a restart. Without either, `ask_pages` fails at once with a message saying how to add one, and `tabs_list` shows `ask_pages adapter: none configured`. `examples/ask-adapter.example.mjs` shows the shape, including how image blocks (used by `compare_design`) map to Messages API content blocks. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
 
-Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question. The built-in adapter drops inherited Anthropic environment overrides before launching the CLI.
+The `model` parameter is passed to the adapter: `haiku` (default), `sonnet` and `opus` become `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, and any other string is passed unchanged.
+
+Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question.
 
 ## Profile import
 
@@ -58,8 +60,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_DEFAULT_LAUNCH_ARGS` | | Extra Chrome flags, space-separated |
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
-| `WEB_AGENT_ASK_ADAPTER` | | Path to an ES module that replaces the `claude -p` backend of `ask_pages`; see `examples/ask-adapter.example.mjs` |
-| `WEB_AGENT_ASK_CLAUDE_COMMAND` | `claude` | Claude Code executable used by the built-in adapter |
+| `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` (used when it exists) | Absolute path of the model adapter module for `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
 
 ## Tests
 

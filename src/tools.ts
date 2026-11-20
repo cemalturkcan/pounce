@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { allBatchesFailed, type AskDocument, askPages, renderAskResults, sourceNames } from "./ask.ts";
+import { allBatchesFailed, type AskDocument, askPages, modelId, renderAskResults, sourceNames } from "./ask.ts";
 import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
@@ -36,9 +36,9 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
     name: "ask_pages",
     title: "Ask a question over many pages",
     description: [
-      "Answer one question over many pages without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) in a few large calls; each call returns short answer lines that name the page every fact came from, and this tool returns only those lines merged, the pages where nothing relevant was found, and any failed calls. The full answers are also saved to a file.",
+      "Answer one question over many pages without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) through the model adapter module configured with WEB_AGENT_ASK_ADAPTER, in a few large calls; each call returns short answer lines that name the page every fact came from, and this tool returns only those lines merged, the pages where nothing relevant was found, and any failed calls. The full answers are also saved to a file.",
       "Use it after collect_pages for comparisons, price or spec tables, or finding which pages mention something; give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. The model sees only the page text, so it cannot click, follow links or check anything; for work that needs that, use run_script or a subagent. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
-      "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix.",
+      "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix. Without a configured adapter it fails at once; tabs_list names the active adapter.",
     ].join("\n"),
     input: {
       question: z.string().min(3).max(4000).describe("The question, phrased so it can be answered from each page on its own, for example: What is the price and battery life of the laptop on this page?"),
@@ -50,12 +50,13 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       max_pages_per_batch: z.number().int().min(1).max(100).optional().describe("Most pages in one model call. Default 20."),
       max_chars_per_page: z.number().int().min(1000).max(400_000).optional().describe("Longer pages keep their start and end and lose the middle. Default 30000."),
       concurrency: z.number().int().min(1).max(8).optional().describe("Model calls running at once. Default 4."),
-      model: z.string().optional().describe("haiku (default), sonnet, or a full model id understood by the adapter."),
+      model: z.string().optional().describe("haiku (default), sonnet or opus, sent to the adapter as claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5; any other string is passed to the adapter unchanged."),
       timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. Default 180000."),
     },
     handler: async (input, owner) => {
       const given = [input.files, input.dir, input.urls, input.tabs].filter((value) => value !== undefined).length;
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
+      const adapter = await deps.ask.get();
       const documents: AskDocument[] = [];
       if (input.files) {
         const names = sourceNames(input.files);
@@ -96,8 +97,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       }
       if (documents.every((document) => !document.text.trim())) throw new ToolError(`All pages are empty: ${documents.map((document) => document.source).join(", ")}.`);
 
-      const adapter = await deps.ask.get();
-      const model = input.model ?? "haiku";
+      const model = modelId(input.model ?? "haiku");
       const report = await askPages(adapter, {
         question: input.question,
         documents,

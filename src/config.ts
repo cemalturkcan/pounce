@@ -24,14 +24,22 @@ export type Config = {
   timezoneId?: string;
   extraArgs: string[];
   secretsBackend: "gopass" | "none";
-  askAdapter?: string;
-  askCommand: string;
+  askAdapterPath: string;
+  askAdapterExplicit: boolean;
 };
 
 const DEFAULT_PORT = 29741;
 
+function homeDir(source: NodeJS.ProcessEnv) {
+  return source.HOME?.trim() || homedir();
+}
+
+export function defaultAskAdapterPath(source: NodeJS.ProcessEnv) {
+  return path.join(homeDir(source), ".config", "web-agent-mcp", "ask-adapter.mjs");
+}
+
 function dataHome(source: NodeJS.ProcessEnv) {
-  return source.XDG_DATA_HOME?.trim() || path.join(homedir(), ".local", "share");
+  return source.XDG_DATA_HOME?.trim() || path.join(homeDir(source), ".local", "share");
 }
 
 function parsePort(value: string | undefined) {
@@ -85,7 +93,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     timezoneId: source.WEB_AGENT_DEFAULT_TIMEZONE_ID?.trim() || undefined,
     extraArgs: parseLaunchArgs(source.WEB_AGENT_DEFAULT_LAUNCH_ARGS),
     secretsBackend: source.WEB_AGENT_SECRETS === "none" ? "none" : "gopass",
-    askAdapter: source.WEB_AGENT_ASK_ADAPTER?.trim() || undefined,
-    askCommand: source.WEB_AGENT_ASK_CLAUDE_COMMAND?.trim() || "claude",
+    askAdapterPath: source.WEB_AGENT_ASK_ADAPTER?.trim() || defaultAskAdapterPath(source),
+    askAdapterExplicit: Boolean(source.WEB_AGENT_ASK_ADAPTER?.trim()),
   };
 }

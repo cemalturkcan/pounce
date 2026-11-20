@@ -1,6 +1,4 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ToolError } from "./errors.ts";
@@ -10,10 +8,37 @@ export type AskDocument = { source: string; text: string };
 
 export type AskUsage = Record<string, number>;
 
+export type AskImage = { mediaType: "image/png" | "image/jpeg" | "image/webp"; data: string };
+
+export type AskInput = {
+  system: string;
+  prompt: string;
+  model: string;
+  maxTokens: number;
+  signal: AbortSignal;
+  images?: AskImage[];
+};
+
 export type AskAdapter = {
   name: string;
-  complete(input: { system: string; prompt: string; model: string; maxTokens: number; signal: AbortSignal }): Promise<{ text: string; usage?: Record<string, number> }>;
+  complete(input: AskInput): Promise<{ text: string; usage?: Record<string, number> }>;
 };
+
+const MODEL_IDS: Record<string, string> = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
+
+export function modelId(model: string) {
+  return MODEL_IDS[model.trim().toLowerCase()] ?? model;
+}
+
+export const ADAPTER_EXAMPLE = "examples/ask-adapter.example.mjs";
+
+export function noAdapterError(defaultPath?: string) {
+  const fallback = defaultPath ? `, or put that module at ${defaultPath} (picked up without a restart)` : "";
+  return new AskSetupError(
+    "No model adapter is configured, so no model can be asked.",
+    `Set WEB_AGENT_ASK_ADAPTER in the server's environment to the absolute path of an ES module that default-exports an AskAdapter ({ name, complete(input) })${fallback}; see ${ADAPTER_EXAMPLE} in the server directory.`,
+  );
+}
 
 export type BatchResult = {
   index: number;
@@ -277,99 +302,6 @@ export function renderAskResults(question: string, report: AskReport, adapter: s
   return lines.join("\n");
 }
 
-type CliResult = {
-  is_error?: boolean;
-  subtype?: string;
-  result?: string;
-  total_cost_usd?: number;
-  usage?: Record<string, unknown>;
-};
-
-export function cliArgs(model: string, system: string) {
-  return [
-    "-p",
-    "--model", model,
-    "--output-format", "json",
-    "--system-prompt", system,
-    "--tools", "",
-    "--strict-mcp-config",
-    "--mcp-config", '{"mcpServers":{}}',
-    "--setting-sources", "",
-    "--disable-slash-commands",
-    "--no-session-persistence",
-  ];
-}
-
-function overridesCliAccount(name: string) {
-  return name.startsWith("ANTHROPIC_") || name.startsWith("CLAUDE_CODE_USE_") || name === "CLAUDE_CODE_OAUTH_TOKEN" || name === "CLAUDE_CODE_API_KEY_FILE";
-}
-
-export function cliEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(source).filter(([name]) => !overridesCliAccount(name)));
-}
-
-const CLI_USAGE_KEYS =["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
-
-export function parseCliOutput(stdout: string) {
-  let parsed: CliResult;
-  try {
-    parsed = JSON.parse(stdout) as CliResult;
-  } catch {
-    throw new ToolError(`claude -p returned output that is not JSON: ${stdout.slice(0, 200)}`);
-  }
-  if (parsed.is_error || typeof parsed.result !== "string") {
-    throw new ToolError(`claude -p failed (${parsed.subtype ?? "error"}): ${String(parsed.result ?? "").slice(0, 300)}`);
-  }
-  const usage: Record<string, number> = {};
-  for (const key of CLI_USAGE_KEYS) {
-    const value = parsed.usage?.[key];
-    if (typeof value === "number") usage[key] = value;
-  }
-  if (typeof parsed.total_cost_usd === "number") usage.cost_usd = parsed.total_cost_usd;
-  return { text: parsed.result, usage: Object.keys(usage).length ? usage : undefined };
-}
-
-function missingCli(command: string) {
-  return new AskSetupError(
-    `The claude CLI was not found: ${command} is not on PATH or does not exist.`,
-    "Install Claude Code, or set WEB_AGENT_ASK_CLAUDE_COMMAND to the full path of the claude executable, then run `claude auth status` in a terminal to check it is signed in. WEB_AGENT_ASK_ADAPTER can point at an adapter module instead.",
-  );
-}
-
-export function claudeCliAdapter(command: string): AskAdapter {
-  return {
-    name: "claude CLI",
-    complete: async ({ system, prompt, model, signal }) => {
-      const cwd = await mkdtemp(path.join(tmpdir(), "web-agent-ask-"));
-      try {
-        const stdout = await new Promise<string>((resolve, reject) => {
-          const child = spawn(command, cliArgs(model, system), { cwd, env: cliEnv(process.env), stdio: ["pipe", "pipe", "pipe"], signal });
-          const out: Buffer[] = [];
-          const err: Buffer[] = [];
-          child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-          child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
-          child.on("error", (error) => {
-            if (error.name === "AbortError") reject(signal.reason instanceof Error ? signal.reason : error);
-            else if ((error as NodeJS.ErrnoException).code === "ENOENT") reject(missingCli(command));
-            else reject(new ToolError(`Could not run ${command}: ${error.message}`, "Install Claude Code, or point WEB_AGENT_ASK_ADAPTER at an adapter module."));
-          });
-          child.on("close", (code) => {
-            const text = Buffer.concat(out).toString("utf8");
-            if (code !== 0 && !text.trim().startsWith("{")) {
-              reject(new ToolError(`claude -p exited with ${code}: ${Buffer.concat(err).toString("utf8").trim().slice(0, 300)}`));
-            } else resolve(text);
-          });
-          child.stdin.on("error", () => undefined);
-          child.stdin.end(prompt);
-        });
-        return parseCliOutput(stdout);
-      } finally {
-        await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
-      }
-    },
-  };
-}
-
 function isAdapter(value: unknown): value is AskAdapter {
   const candidate = value as Partial<AskAdapter> | null;
   return Boolean(candidate) && typeof candidate?.name === "string" && candidate.name.length > 0 && typeof candidate.complete === "function";
@@ -392,24 +324,46 @@ export async function loadAdapterModule(modulePath: string): Promise<AskAdapter>
 
 export class AskAdapterSource {
   private readonly modulePath?: string;
-  private readonly command: string;
+  private readonly explicit: boolean;
   private loaded?: Promise<AskAdapter>;
+  private name?: string;
+  private readonly injected: boolean;
 
-  constructor(options: { modulePath?: string; command: string; adapter?: AskAdapter }) {
+  constructor(options: { modulePath?: string; explicit?: boolean; adapter?: AskAdapter }) {
     this.modulePath = options.modulePath;
-    this.command = options.command;
-    if (options.adapter) this.loaded = Promise.resolve(options.adapter);
+    this.explicit = options.explicit ?? true;
+    this.injected = Boolean(options.adapter);
+    if (options.adapter) {
+      this.name = options.adapter.name;
+      this.loaded = Promise.resolve(options.adapter);
+    }
+  }
+
+  get configured() {
+    if (this.loaded) return true;
+    if (!this.modulePath) return false;
+    return this.explicit || existsSync(this.modulePath);
   }
 
   get label() {
-    return this.modulePath ? `custom adapter ${this.modulePath}` : `claude CLI (${this.command} -p)`;
+    if (!this.configured) return "none configured";
+    if (this.injected || !this.modulePath) return this.name ?? "injected adapter";
+    return this.name ? `${this.name} (${this.modulePath})` : `module ${this.modulePath}`;
   }
 
   get() {
-    this.loaded ??= (this.modulePath ? loadAdapterModule(this.modulePath) : Promise.resolve(claudeCliAdapter(this.command))).catch((error: unknown) => {
-      this.loaded = undefined;
-      throw error;
-    });
+    if (!this.configured) return Promise.reject(noAdapterError(this.explicit ? undefined : this.modulePath));
+    const modulePath = this.modulePath ?? "";
+    this.loaded ??= loadAdapterModule(modulePath).then(
+      (adapter) => {
+        this.name = adapter.name;
+        return adapter;
+      },
+      (error: unknown) => {
+        this.loaded = undefined;
+        throw error;
+      },
+    );
     return this.loaded;
   }
 }
