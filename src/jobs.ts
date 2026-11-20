@@ -27,6 +27,13 @@ export type Job = {
   finished: Promise<void>;
 };
 
+const withoutLogs = (text: string) => text.split(/\nLogs (?:so far|before the error):\n/)[0] ?? text;
+
+function stopReason(error: unknown) {
+  const text = error instanceof ToolError ? [withoutLogs(error.message), error.hint].filter(Boolean).join("\n") : withoutLogs(describeError(error));
+  return text.split("\n").slice(0, 3).join("\n");
+}
+
 export class JobRunner {
   private readonly jobs = new Map<string, Job>();
   private counter = 0;
@@ -79,7 +86,7 @@ export class JobRunner {
         },
         async (error: unknown) => {
           job.state = controller.signal.aborted ? "cancelled" : "failed";
-          job.failure = describeError(error).split("\n").slice(0, 3).join("\n");
+          job.failure = stopReason(error);
           await writeResult(describeError(error));
         },
       )

@@ -530,6 +530,16 @@ test("browser flow", async (t) => {
     assert.equal((await call("snapshot", { tab: opened })).isError, true);
   });
 
+  await t.test("cancelling a job shows its log lines once, all of them", async () => {
+    const started = await ok("run_script", { background: true, code: "for (let tick = 0; ; tick += 1) { if (tick < 5) log('tick ' + tick); await sleep(50); }" });
+    const id = /job (j\d+)/.exec(started)?.[1] ?? "";
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const text = await ok("jobs", { action: "cancel", id });
+    assert.match(text, / cancelled /);
+    assert.equal(text.match(/^tick 0$/gm)?.length, 1, text);
+    assert.match(text, /^tick 0\ntick 1\ntick 2\ntick 3\ntick 4$/m);
+  });
+
   await t.test("collect_pages structured part adds product data to the index", async () => {
     const text = await ok("collect_pages", { urls: [fixture.url], include: ["structured"], settle_ms: 0 });
     assert.match(text, /product "Fixture Lamp" · price 49\.90 EUR/);
