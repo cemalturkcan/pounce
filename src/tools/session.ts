@@ -18,7 +18,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     name: "secrets_list",
     title: "List stored secrets",
     description:
-      "List the names of entries in the user's password store, without their values. Pass a name to fill(secret=...) to enter a credential into a page; the value is read and typed by the server, and passwords and other secret fields are masked in tool results and written files (one-time codes for 2 minutes, usernames not at all, raw exports excepted).",
+      "List the names of entries in the user's password store, without their values. Use it before signing in to a site: a matching name goes to fill or fill_form as secret (with secret_field username, password or otp), and the server types the value, which you never see. Passwords and other secret fields are then masked in tool results and written files (one-time codes for 2 minutes, usernames not at all, raw exports excepted). For a site that answers with the browser's own login dialog, pass the name to http_auth instead.",
     input: {
       query: z.string().optional().describe("Keep only names containing this, case-insensitive, for example a site name."),
     },
@@ -34,8 +34,8 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     name: "http_auth",
     title: "HTTP authentication for an origin",
     description: [
-      "Answer HTTP Basic and Digest authentication challenges (the browser's own username and password dialog, which is not part of the page and cannot be filled with fill) for one origin, with the username and password fields of a password-store entry. The credentials are read by the server and never appear in results.",
-      "set applies to every tab of the shared profile on that origin, including tabs of other sessions, until clear or until the server restarts; list shows which origins have credentials and from which secret. clear stops answering new challenges, but Chrome keeps credentials it has already accepted for that origin until the browser restarts. Use it when a page or an intranet site answers HTTP 401 with a login dialog; for login forms inside the page use fill with secret.",
+      "Answer HTTP Basic and Digest authentication challenges (the browser's own username and password dialog, which is not part of the page and cannot be filled with fill) for one origin, with the username and password fields of a password-store entry. The credentials are read by the server and never appear in results. Use it when a page or an intranet site answers HTTP 401 with a login dialog, which tab_open and navigate report; for login forms inside the page use fill with secret.",
+      "set applies to every tab of the shared profile on that origin, including tabs of other sessions, until clear or until the server restarts; list shows which origins have credentials and from which secret. clear stops answering new challenges, but Chrome keeps credentials it has already accepted for that origin until the browser restarts.",
     ].join("\n"),
     input: {
       action: z.enum(["set", "clear", "list"]).describe("set stores credentials for the origin; clear removes them (all origins when neither origin nor tab is given); list shows the origins that have credentials."),
@@ -70,7 +70,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     name: "permissions",
     title: "Grant or clear site permissions",
     description: [
-      "Grant browser permissions (geolocation, notifications, camera, microphone, clipboard-read, clipboard-write and others) to an origin, or clear the grants this tool made. Native permission prompts, the bubble under the address bar asking to allow location, notifications or the camera, are browser UI and not part of the page: snapshot, click and dismiss_overlays cannot see or answer them. Grant the permission here instead, then reload or repeat the page action that asked.",
+      "Grant browser permissions (geolocation, notifications, camera, microphone, clipboard-read, clipboard-write and others) to an origin, or clear the grants this tool made. Use it when a site asks for location, notifications, camera, microphone or clipboard access: the native permission prompt, the bubble under the address bar, is browser UI and not part of the page, so snapshot, click and dismiss_overlays cannot see or answer it. Grant the permission here, then reload or repeat the page action that asked.",
       "Grants apply to that origin in every tab of the shared profile, add up across calls, and last until cleared or until the browser restarts. Clearing also drops a geolocation grant made by emulate.",
     ].join("\n"),
     input: {

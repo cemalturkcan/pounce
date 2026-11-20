@@ -17,7 +17,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "snapshot",
     title: "Page snapshot",
     description:
-      "Return the accessibility tree of the page as indented text. Each element carries a ref like [ref=e12] that click, fill and the other action tools accept as `target`; iframe content is included with refs like f1e3. This is the main way to see a page and to address elements. Refs stay valid until the page changes. With target, the whole page is still snapshotted and only that element's subtree is returned, so refs from earlier snapshots of the page keep working. Output above max_chars is cut in the middle and the full tree is saved to a file whose path is returned.",
+      "Return the page's accessibility tree as indented text, with a ref such as [ref=e12] on each element that click, fill and the other action tools take as target; iframe content is included with refs like f1e3. Use it to see what a page offers and which elements you can act on. Refs stay valid until the page changes; after that, take a new snapshot. interactive: true returns only a flat list of buttons, links and inputs, which is much smaller. With target, the whole page is still snapshotted and only that element's subtree is returned, so refs from earlier snapshots keep working. When you know the label or role you are after, find is cheaper; to read an article, documentation or results, read_text returns clean text without refs. Output above max_chars is cut in the middle and the full tree is saved to a file whose path is in the result.",
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Return only this element's subtree (ref or selector); refs elsewhere on the page stay valid."),
@@ -44,7 +44,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "find",
     title: "Find in page",
     description:
-      "Search the page's accessibility tree and return only the matching lines, each with its ref and its ancestor lines for context. Cheaper than a full snapshot when you know what you are looking for. Matching is case-insensitive substring by default.",
+      "Search the page's accessibility tree for a text, role or value and return only the matching lines, each with its ref and its ancestor lines for context. Use it instead of a full snapshot when you know what you are looking for, such as a button label, a link text or a field name, then act on the ref it returns. Matching is a case-insensitive substring unless regex is set. To read content rather than locate elements, read_text is the better fit.",
     input: {
       tab: tabParam,
       query: z.string().min(1).describe("Text to look for in element roles, names and values, for example \"Add to cart\" or \"textbox\"."),
@@ -65,8 +65,10 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
   defineTool(server, deps, {
     name: "read_text",
     title: "Read page text",
-    description:
-      "Return the visible text of the page or of one element, as plain text or as Markdown, without refs. Use it to read articles, documentation, tables or results; use snapshot when you need to act on elements. Markdown keeps headings, lists, links with their URLs, code blocks and tables, and leaves out navigation, footers, sidebars, scripts and hidden elements. Long text is paged: the result says how many characters exist and the offset to pass for the next page. On a tab showing a PDF, JSON, plain text or CSV file it returns the file's text (PDF text via pdftotext when installed); for images and other files it saves the file and says where.",
+    description: [
+      "Return the visible text of the page or of one element, as plain text or as Markdown, without refs. Use it to read or quote content: an article, documentation, search results, a table, an order history, a message thread. Markdown keeps headings, lists, links with their URLs, code blocks and tables, and leaves out navigation, footers, sidebars, scripts and hidden elements. Long text is paged: the result says how many characters exist and the offset to pass for the next page. On a tab showing a PDF, JSON, plain text or CSV file it returns the file's text (PDF text via pdftotext when installed); for images and other files it saves the file and says where.",
+      "For a product's price, availability or specs, extract returns what the page declares as data and is more exact; snapshot is for finding elements to act on; collect_pages and ask_pages handle many pages without reading each one here; screenshot shows how the page looks.",
+    ].join("\n"),
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Read only this element's text (ref or selector)."),
@@ -107,7 +109,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "screenshot",
     title: "Screenshot",
     description:
-      "Capture the viewport, the full page, or one element as a JPEG. The image is returned inline and also saved to a file whose path is in the result. Very tall full-page captures are saved only, because they are too large to return inline. Prefer snapshot or read_text for content; use this for layout, visual state, images and charts.",
+      "Capture the viewport, the whole page or one element as a JPEG. The image is returned inline and saved to a file whose path is in the result; full-page captures taller than 6000 px are saved only. Use it when you need to see something yourself: the visual state of a page, an image or chart, or whether one element looks right. The image enters this conversation, so for text use read_text or snapshot; to check a page against a design, mockup or earlier screenshot use compare_design; for visual QA across many pages use ask_pages with mode review. Those two send images to a model without bringing them into this conversation.",
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Capture only this element (ref or selector)."),
@@ -136,7 +138,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "console_logs",
     title: "Console logs",
     description:
-      "Return recent console messages and uncaught errors of a tab, newest last. With the default stealth engine, capture works on local development hosts (localhost, 127.0.0.1, *.localhost, *.test); other sites return nothing unless the server runs with WEB_AGENT_CONSOLE_HOOK=all or WEB_AGENT_ENGINE=playwright.",
+      "Return the console messages and uncaught errors captured for a tab, newest last. Use it when a page misbehaves or shows a blank area, to look for JavaScript errors, or to check a local app for warnings. With the default stealth engine, capture works on local development hosts (localhost, 127.0.0.1, *.localhost, *.test); other sites return nothing unless the server runs with WEB_AGENT_CONSOLE_HOOK=all or WEB_AGENT_ENGINE=playwright. Failed requests are in network_requests, and failures of this server's own tools in server_log.",
     input: {
       tab: tabParam,
       level: z.enum(["all", "errors"]).optional().describe("errors keeps only error and warning entries. Default all."),
@@ -160,7 +162,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "extract",
     title: "Extract structured data",
     description:
-      "Return the machine-readable data a page declares: JSON-LD objects (products with price and availability, articles, events, breadcrumbs), Open Graph and other meta tags, and every HTML table as rows. Tables are also saved as CSV files, which are kept until you delete them. Faster and more reliable than reading prices or specs out of the page text when the site provides them; a price here is what the page declares, which can differ from a signed-in or checkout price.",
+      "Return the machine-readable data a page declares: JSON-LD objects (products with price and availability, articles, events, breadcrumbs), Open Graph and other meta tags, and every HTML table as rows. Tables are also saved as CSV files, which are kept until you delete them. Use it first when the task asks for a product's name, price, availability or specs, or for a table's contents: it is faster and more exact than reading them out of the page text. A price here is what the page declares, which can differ from a signed-in or checkout price. When a page declares nothing useful, read_text with format markdown keeps its tables and lists; for the same data across many pages, collect_pages with include structured.",
     input: {
       tab: tabParam,
       max_chars: z.number().int().min(200).max(200_000).optional().describe("Character budget for the JSON in the result; the full data is saved to a file when larger. Default 10000."),
@@ -184,7 +186,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "save_page",
     title: "Save page to file",
     description:
-      "Save the current page to a file and return its path: pdf (printed page, as from the print dialog), mhtml (single-file archive with images and styles, opens in Chrome), or html (the current DOM as markup). Use it to keep receipts, invoices, confirmations and reference pages; saved pages are kept until you delete them.",
+      "Save the current page to a file and return its path: pdf (the printed page, as from the print dialog), mhtml (a single-file archive with images and styles that opens in Chrome), or html (the current DOM as markup). Use it to keep a receipt, invoice, order or booking confirmation, or a reference page; saved pages are kept until you delete them. A file the site offers for download is saved by clicking its link or navigating to it, and screenshot captures an image of the page.",
     input: {
       tab: tabParam,
       format: z.enum(["pdf", "mhtml", "html"]).describe("File format."),

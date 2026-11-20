@@ -98,8 +98,10 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
   defineTool(server, deps, {
     name: "network_requests",
     title: "Network requests",
-    description:
-      "List recent network responses and failures of a tab (id, method, status, type, URL), newest last, or return one request by id: its request headers and body, response headers, and response body. Useful for finding the API call behind a page and reading its JSON directly. Credential headers are masked. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for.",
+    description: [
+      "List a tab's recent network responses and failures (id, method, status, resource type, URL), newest last, or with id return one request in full: request headers and body, response headers and response body. Use it to find the API call behind a page, a table, a search or an infinite list and read its JSON directly, to see which requests failed (failed_only), or to debug a local app. Credential headers are masked. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for.",
+      "Once you know the endpoint, request calls it again with other parameters or pages and from_request replays a captured one; network_export writes the whole capture to a HAR file; intercept changes requests and responses.",
+    ].join("\n"),
     input: {
       tab: tabParam,
       id: z.number().int().optional().describe("Return request headers and body, response headers and response body of this request id instead of the list."),
@@ -147,7 +149,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "network_export",
     title: "Export network as HAR",
     description:
-      "Write the captured network traffic of a tab to a HAR 1.2 file (request and response headers, post data, timings, and response bodies up to 2 MB each) and return its path. The file opens in browser DevTools and other HAR tools, and can be searched with file tools. It is a raw export: cookies, tokens and typed passwords appear as sent, unmasked, and the file is kept until you delete it. Streaming responses and bodies that do not finish within a few seconds are left out with a comment. Capture covers the most recent 1000 requests since the tab was opened.",
+      "Write the captured network traffic of a tab to a HAR 1.2 file (request and response headers, post data, timings, and response bodies up to 2 MB each) and return its path. Use it to keep a full record of a session's traffic, to search all of it with file tools, or to open it in DevTools or another HAR tool; to look at a few requests, network_requests is enough. It is a raw export: cookies, tokens and typed passwords appear as sent, unmasked, and the file is kept until you delete it. Streaming responses and bodies that do not finish within a few seconds are left out with a comment. Capture covers the most recent 1000 requests since the tab was opened.",
     input: {
       tab: tabParam,
       pattern: z.string().optional().describe("Export only requests whose URL contains this, case-insensitive."),
@@ -173,9 +175,8 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "intercept",
     title: "Intercept requests",
     description: [
-      "Add, list or remove rules that intercept the network requests of a tab. A rule matches request URLs by substring (or regex) and applies one mode:",
-      "block aborts the request; modify changes the outgoing request (headers, method, body, or target URL) and lets it continue; mock answers without contacting the server; patch_response fetches the real response and replaces text in its body.",
-      "patch_response only rewrites textual bodies (HTML, JSON, JavaScript, XML, SVG, plain text); images and other binary responses pass through unchanged. Rules stay active until removed or the tab closes; list shows each rule's hits and failures. If a rule fails on a request (for example a rewrite_url with another protocol, or an unreachable upstream), the request continues unmodified or is aborted, and the failure is shown in list. When several rules match one request, only the most recently added one applies. Rule numbers are never reused within a tab. The Cookie header cannot be changed by a rule; use cookies to add or change cookies instead. For logic beyond these modes, call page.route() from run_script.",
+      "Add, list or remove rules that intercept the network requests of a tab. A rule matches request URLs by substring (or regex) and applies one mode: block aborts the request; modify changes the outgoing request (headers, method, body, or target URL) and lets it continue; mock answers without contacting the server; patch_response fetches the real response and replaces text in its body. Use it to see how a page handles a failing or different API response, to block trackers or heavy resources, to send requests to a local server, or to add a header.",
+      "patch_response only rewrites textual bodies (HTML, JSON, JavaScript, XML, SVG, plain text); images and other binary responses pass through unchanged. Rules stay active until removed or the tab closes; list shows each rule's hits and failures. If a rule fails on a request (for example a rewrite_url with another protocol, or an unreachable upstream), the request continues unmodified or is aborted, and the failure is shown in list. When several rules match one request, only the most recently added one applies. Rule numbers are never reused within a tab. The Cookie header cannot be changed by a rule; use cookies to add or change cookies instead. To send a request yourself use request; for logic beyond these modes, call page.route() from run_script.",
     ].join("\n"),
     input: {
       tab: tabParam,
@@ -231,7 +232,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "request",
     title: "Send HTTP request with the browser session",
     description: [
-      "Send an HTTP request that carries the browser's cookies, and return the status, content type and size, the location, set-cookie (masked), content-disposition, retry-after and x-ratelimit-remaining response headers when present, and the body. Two uses: call a site's API directly instead of scraping the rendered page, and replay a captured request with changes (from_request takes an id from network_requests and copies its method, URL, headers and body; any field given here overrides the copy).",
+      "Send an HTTP request that carries the browser's cookies, and return the status, content type and size, the location, set-cookie (masked), content-disposition, retry-after and x-ratelimit-remaining response headers when present, and the body. Use it to call a site's API directly instead of scraping the rendered page: fetch JSON with the user's session, page through results by changing query parameters, download a file, or replay a captured request with changes (from_request takes an id from network_requests and copies its method, URL, headers and body; any field given here overrides the copy). The endpoint usually comes from network_requests or site notes. For many dependent calls with logic between them, context.request in run_script does the same in one script.",
       "via browser (default) sends from the browser's network stack outside any page: no CORS limits, good for downloads and cross-site calls. via page runs fetch() inside the tab, so the request has the page's origin, referrer and same-site context, which some APIs require.",
       "Replaying a request that changes data (POST, PUT, DELETE) repeats its effect. Bodies above max_chars and binary responses are saved to a file.",
     ].join("\n"),

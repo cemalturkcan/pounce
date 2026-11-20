@@ -13,8 +13,8 @@ export function registerLogTool(server: McpServer, deps: ToolDeps) {
     name: "server_log",
     title: "Read the server log",
     description: [
-      "Read recent entries from this daemon's own log: every tool call with its request id, duration and outcome, browser launches, crashes and relaunches, MCP sessions, background jobs, and internal faults with their stacks. Use it when a tool failed unexpectedly or behaves oddly, before retrying or asking the user; a failed call ends with [req <id>], which request_id finds.",
-      "It shows only this daemon's own events, not the page's console or network (use console_logs and network_requests for those). Inputs are summarized: secret, text, value, code and similar fields appear only as their length, and stored secrets are masked.",
+      "Read this server's own log: every tool call with its request id, duration and outcome, browser launches, crashes and relaunches, MCP sessions, background jobs, and internal faults with their stacks. Use it when a tool call failed or behaved oddly, before retrying or asking the user: a failed result ends with [req <id>], request_id finds that call, and level, tool, since_minutes and contains show what happened around it, such as a browser crash or a relaunch.",
+      "It holds only the server's own events; the page's console and network are in console_logs and network_requests. Inputs are summarized: secret, text, value, code and similar fields appear only as their length, and stored secrets are masked.",
     ].join("\n"),
     input: {
       level: z.enum(LOG_LEVELS).optional().describe("Lowest level to include: debug, info, warn or error. Default info. Failed tool calls are warn; faults and crashes are error."),

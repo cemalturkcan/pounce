@@ -130,7 +130,7 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     name: "collect_pages",
     title: "Collect many pages",
     description:
-      "Open a list of URLs in parallel tabs, save each page's content to files, close the tabs, and return a compact index (status, final URL, title, text length, file names, short preview). Use it to gather many pages without loading them into the conversation; then read or grep the files you need. Per page it can save the visible text, the list of links, the accessibility snapshot, and a screenshot. A page that does not load or answer within its time limit is reported as failed and its tab is closed anyway. Collected files are transient: they are deleted when the server starts after 7 days.",
+      "Open a list of URLs in parallel tabs, save each page's content to files, close the tabs, and return a compact index (status, final URL, title, text length, file names, short preview). Use it when a task covers many pages, such as every product in a list, a set of articles or docs, or all routes of a site, so their content stays out of this conversation. Per page it can save the visible text, Markdown, the list of links, the accessibility snapshot, a screenshot and structured data. Afterwards ask_pages answers a question over the folder (pass it as dir), or read and grep the files yourself; for one or two pages, read_text is simpler. A page that does not load or answer within its time limit is reported as failed and its tab is closed anyway. Collected files are transient: they are deleted when the server starts after 7 days.",
     input: {
       urls: z.array(z.string().min(1)).min(1).max(200).describe("URLs to load. https:// is assumed when no scheme is given."),
       include: z
@@ -185,7 +185,7 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     name: "cookies",
     title: "Cookies",
     description:
-      "Read, set, delete or export the browser's cookies. The cookie jar is shared by all tabs of the profile. list shows matching cookies with their attributes; set adds or replaces one cookie, which is then sent with matching requests; delete removes matching cookies; export writes all matching cookies with full, unmasked values to a JSON file that is kept until you delete it. Deleting or replacing a session cookie signs the user out of that site.",
+      "Read, set, delete or export the browser's cookies. The cookie jar is shared by all tabs of the profile. list shows matching cookies with their attributes; set adds or replaces one cookie, which is then sent with matching requests; delete removes matching cookies; export writes all matching cookies with full, unmasked values to a JSON file that is kept until you delete it. Use it to check whether a site's session cookie is there or has expired, to set a cookie a test or feature flag needs, or to sign out of one site. Deleting or replacing a session cookie signs the user out of that site. A site's localStorage and IndexedDB are read with storage.",
     input: cookiesInput,
     handler: (input) => manageCookies(deps, input),
   });
@@ -194,7 +194,7 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     name: "storage",
     title: "Site storage",
     description:
-      "Read the localStorage, sessionStorage or IndexedDB of the origin a tab is on. list shows keys with value sizes (for IndexedDB: database/store names with record counts); get returns one value (for IndexedDB: every record of one store) clipped to max_chars with the full value saved to a file; export writes the whole area to a JSON file with raw, unmasked values and returns its path. Values often hold tokens and app state, which makes this the quickest way to see what a single-page app knows. It only reads; to change storage use evaluate.",
+      "Read the localStorage, sessionStorage or IndexedDB of the origin a tab is on. list shows keys with value sizes (for IndexedDB: database/store names with record counts); get returns one value (for IndexedDB: every record of one store) clipped to max_chars with the full value saved to a file; export writes the whole area to a JSON file with raw, unmasked values and returns its path. Use it to see what a site or single-page app keeps in the browser: tokens, user settings, cached data and app state. It only reads; to change storage use evaluate. Cookies are read with cookies.",
     input: storageInput,
     readOnly: true,
     handler: (input) => readStorage(deps, input),
@@ -204,12 +204,12 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     name: "site_notes",
     title: "Site notes",
     description:
-      "Read or add to the notes kept for one website, a Markdown file per host name that survives between sessions. Record what took effort to find out: working selectors, API endpoints and their parameters, pagination schemes, login steps, rate limits and quirks; the next visit then starts from them. tab_open and navigate mention when a host has notes. Notes are written by agents, not by the site, and are not shared with any other machine.",
+      "Read or add to the notes kept for one website, a Markdown file per host name that survives between sessions. Record what took effort to find out: working selectors, API endpoints and their parameters, pagination schemes, login steps, rate limits and quirks; the next visit then starts from them. tab_open and navigate mention when a host has notes, and reading them first saves working the site out again. Notes are written by agents, not by the site, and are not shared with any other machine; an old note is a lead to check, not a fact.",
     input: {
       action: z.enum(["read", "append"]).describe("read returns the notes; append adds one dated line."),
       tab: tabParam.optional().describe("Use the host of this tab's current URL."),
       site: z.string().optional().describe("Host name or URL, for example shop.example.com, when no tab is given. A leading www. is ignored."),
-      note: z.string().max(2000).optional().describe("For append: the note, one line, for example: search API is GET /api/search?q=&page= returning JSON; 24 items per page."),
+      note: z.string().max(2000).optional().describe("For append: one line with what took effort to learn, such as an endpoint with its parameters, a pagination scheme, a working selector or a quirk."),
     },
     handler: async (input) => {
       const source = input.site ?? (input.tab ? manager.getTab(input.tab).page.url() : undefined);

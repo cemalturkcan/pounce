@@ -57,7 +57,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tabs_list",
     title: "List tabs",
     description:
-      "List the open tabs of the shared browser with their ids, owners and URLs, plus browser status (engine, Chrome version, profile, output and log directories), recent background errors, and how many errors the server logged in the last hour (read them with server_log). Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. Does not start the browser if it is not running.",
+      "Show the open tabs of the shared browser and the state of the server. Returns every tab with its id, whose it is, its URL and title, then the browser status (engine, Chrome version, profile), the output directory where results and files are saved, the secret store, the model adapter that ask_pages and compare_design use, the log directory with the number of errors logged in the last hour (read them with server_log), and recent background errors. Use it to find a tab id again, to see what another session or the user has open, or to learn where output files go. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. It does not start the browser.",
     input: {},
     readOnly: true,
     handler: async (_input, owner) => {
@@ -86,7 +86,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_open",
     title: "Open tab",
     description:
-      "Open a new tab owned by this session and optionally navigate it. Returns the tab id to pass as `tab` to every other tool. Starts the browser on first use; the profile is persistent, so cookies and logins from earlier sessions are available.",
+      "Open a new tab for this session, optionally load a URL in it, and return the tab id that every page tool takes as tab. This is where work on any web page starts, local development servers included: the browser renders JavaScript and carries the user's cookies and sign-ins from earlier sessions, which a plain HTTP fetch does not. With a URL, the result gives the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path instead. Starts the browser on first use. To load another URL in a tab you already have, use navigate; to load many URLs at once, collect_pages.",
     input: {
       url: z.string().optional().describe("URL to load. https:// is assumed when no scheme is given. Omit for a blank tab."),
       wait_until: waitUntilParam,
@@ -122,7 +122,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_close",
     title: "Close tab",
     description:
-      "Close a tab and free its memory. Cookies, logins and other profile data stay. If the page asks to confirm leaving because of unsaved changes, the tab stays open and the call fails; pass force: true to close it anyway and lose them. Close tabs you opened once the task no longer needs them, and leave tabs that belong to other sessions or the user open.",
+      "Close a tab and free its memory; cookies, sign-ins and other profile data stay. Close the tabs you opened once the task no longer needs them, and leave tabs of other sessions or the user open unless the task is about them. If the page asks to confirm leaving because of unsaved changes, the tab stays open and the call fails; force: true closes it anyway and the changes are lost.",
     input: {
       tab: tabParam,
       force: z.boolean().optional().describe("Close even if the page asks to confirm leaving (unsaved changes are lost). Default false."),
@@ -138,7 +138,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_resize",
     title: "Resize viewport",
     description:
-      "Set the viewport size of a tab in CSS pixels, for responsive checks or to change what a viewport screenshot covers. The size stays until the tab is resized again or closed; other tabs are not affected.",
+      "Set a tab's viewport to a width and height in CSS pixels, for a quick check of a page at a given size or to change what a viewport screenshot covers. The size stays until the tab is resized again or closed; other tabs keep theirs. To look like a phone or tablet (touch, device pixel ratio, mobile mode) or to change dark mode, locale, location or network conditions, use emulate.",
     input: {
       tab: tabParam,
       width: z.number().int().min(200).max(7680).describe("Viewport width in CSS pixels."),
@@ -154,7 +154,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "navigate",
     title: "Navigate",
     description:
-      "Load a URL in an existing tab, or move through its history. Returns the final URL, title and HTTP status (or, for a URL that downloads a file, the saved file path while the tab stays where it was), and flags a CAPTCHA or bot wall and a sign-in page that suggests an expired session. Refs from earlier snapshots of this tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; call again with force: true to leave anyway.",
+      "Load a URL in a tab you already have, or go back, forward or reload. Returns the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path while the tab stays where it was. Refs from earlier snapshots of the tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; force: true leaves anyway. tab_open opens a page in a new tab, and collect_pages loads many URLs at once without opening them one by one.",
     input: {
       tab: tabParam,
       url: z.string().describe("URL to load, or one of back, forward, reload. https:// is assumed when no scheme is given."),
@@ -207,9 +207,8 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "emulate",
     title: "Emulate device and conditions",
     description: [
-      "Change how one tab presents itself and what conditions it runs under: viewport and mobile mode, color scheme, reduced motion, geolocation, time zone, locale, user agent, offline mode and network throttling. Settings combine across calls and stay until reset: true or until the tab closes; the result lists everything active.",
-      "All settings apply to this tab only, except one: geolocation also grants the geolocation permission to the tab's current origin for the whole browser profile, and reset clears permission grants made by the agent. Locale changes Intl formatting and the Accept-Language header but not navigator.language in every Chrome version. A user agent or locale override keeps the browser's real client hints (navigator.userAgentData brands and the sec-ch-ua headers); an empty user_agent or reset removes the override. Reload the page after changing locale, time zone or user agent so the site sees the new values from the start.",
-      "For a plain viewport size without mobile emulation, tab_resize is simpler.",
+      "Change how one tab presents itself and the conditions it runs under: viewport and mobile mode, color scheme, reduced motion, geolocation, time zone, locale, user agent, offline mode and network throttling. Use it to see a page as a phone or tablet shows it, in dark mode, in another language, time zone or location, or offline or on a slow connection. Settings combine across calls and stay until reset: true or until the tab closes; the result lists everything active.",
+      "All settings apply to this tab only, except one: geolocation also grants the geolocation permission to the tab's current origin for the whole browser profile, and reset clears permission grants made by the agent. Locale changes Intl formatting and the Accept-Language header but not navigator.language in every Chrome version. A user agent or locale override keeps the browser's real client hints (navigator.userAgentData brands and the sec-ch-ua headers); an empty user_agent or reset removes the override. Reload the page after changing locale, time zone or user agent so the site sees the new values from the start. For a plain viewport size without mobile emulation, tab_resize is enough.",
     ].join("\n"),
     input: {
       tab: tabParam,

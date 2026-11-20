@@ -118,7 +118,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "click",
     title: "Click",
     description:
-      "Click an element. Waits for it to be visible, enabled and not covered, scrolls it into view, then clicks. The result says whether the page navigated, changed (in any frame), did not react, or could not be checked, and reports dialogs, downloads and new tabs triggered by the click.",
+      "Click an element. Waits for it to be visible, enabled and not covered, scrolls it into view, then clicks. The result says whether the page navigated, changed (in any frame), did not react, or could not be checked, and reports dialogs, downloads and new tabs triggered by the click, as well as a CAPTCHA or a sign-in page it led to. Use it for buttons, links, tabs, menu items and options; include_diff returns only the snapshot lines the click changed. When the click fails because another element intercepts it, a banner or modal is usually in the way, which dismiss_overlays clears. For many clicks in a row, such as pressing a button repeatedly or paging through results, run_script does them in one call.",
     input: {
       tab: tabParam,
       target: targetParam,
@@ -153,8 +153,11 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
   defineTool(server, deps, {
     name: "fill",
     title: "Fill field",
-    description:
-      "Set the value of a form control: types into text inputs and textareas, picks an option in a <select> by label or value, and checks or unchecks checkboxes and radios (text \"true\" or \"false\"). Replaces the existing value. Rich-text editors (contenteditable, or an iframe whose body is editable) are filled with line breaks kept. A custom control that is not a text field (a role=combobox or listbox button, a read-only date or option picker) is clicked open and the visible option whose name matches text is picked; if none matches, the error lists the options or says to click, snapshot and click the option yourself. To enter a stored credential, pass `secret` instead of `text`: the server reads it from the password store and types it without returning it. Passwords and other secret fields are then masked in later results and written files (also in JSON- and URL-encoded form), one-time codes for 2 minutes; usernames are not masked; raw exports (cookies export, network_export, storage export) are not masked. For file inputs use upload.",
+    description: [
+      "Set the value of one form control: types into text inputs and textareas, picks an option in a <select> by label or value, and checks or unchecks checkboxes and radios (text \"true\" or \"false\"). Replaces the existing value, and says when the page reformatted or rejected it. Rich-text editors (contenteditable, or an iframe whose body is editable) are filled with line breaks kept. A custom control that is not a text field (a role=combobox or listbox button, a read-only date or option picker) is clicked open and the visible option whose name matches text is picked; if none matches, the error lists the options or says to click, snapshot and click the option yourself.",
+      "To enter a stored credential, pass secret, a name from secrets_list, instead of text: the server reads the value from the password store and types it without returning it. Passwords and other secret fields are then masked in later results and written files (also in JSON- and URL-encoded form), one-time codes for 2 minutes; usernames are not masked, and raw exports (cookies export, network_export, storage export) are not either.",
+      "For several fields of one form, fill_form fills them in one call and reports invalid fields; for file inputs use upload.",
+    ].join("\n"),
     input: {
       tab: tabParam,
       target: targetParam,
@@ -187,7 +190,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "fill_form",
     title: "Fill several fields",
     description:
-      "Fill many form controls in one call, in order, with the same rules as fill (text inputs, selects by label or value, checkboxes and radios with true or false, stored secrets by name). Stops at the first field that cannot be filled and reports which fields were done. Afterwards it reports any field the browser marks invalid, with the browser's validation message, and can click a submit button.",
+      "Fill several form controls in one call, in order, with the same rules as fill (text inputs, selects by label or value, checkboxes and radios with true or false, custom pickers, stored secrets by name), then optionally click a submit element. Use it for sign-up, sign-in, checkout, address, payment and search forms. It stops at the first field that cannot be filled and reports which fields were done. Afterwards it reports any field the browser marks invalid, with the browser's validation message. fill suits a single field, or a field that has to react before the next one appears.",
     input: {
       tab: tabParam,
       fields: z
@@ -251,7 +254,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "press",
     title: "Press key",
     description:
-      "Press a key or key combination, on a specific element or on whatever has focus. Uses Playwright key names: Enter, Escape, Tab, ArrowDown, Backspace, a, Control+a, Shift+Tab.",
+      "Press a key or key combination, on a specific element or on whatever has focus. Uses Playwright key names: Enter, Escape, Tab, ArrowDown, Backspace, a, Control+a, Shift+Tab. Use it to submit with Enter, close a menu or dialog with Escape, move through a list, menu or date picker with the arrow keys, or trigger a keyboard shortcut. The result says whether the page navigated or changed, as for click. To enter text into a field, fill is faster.",
     input: {
       tab: tabParam,
       key: z.string().min(1).describe("Key or combination, for example Enter or Control+a."),
@@ -280,7 +283,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "hover",
     title: "Hover",
     description:
-      "Move the mouse over an element and leave it there, to reveal menus, tooltips or controls that only appear on hover. Take a snapshot afterwards (or pass include_snapshot) to get refs for what appeared.",
+      "Move the mouse over an element and leave it there, to reveal menus, tooltips or controls that only appear on hover. The result says whether the page changed; take a snapshot afterwards (or pass include_snapshot) to get refs for what appeared.",
     input: { tab: tabParam, target: targetParam, include_snapshot: includeSnapshotParam, include_diff: includeDiffParam },
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
@@ -302,7 +305,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "drag",
     title: "Drag and drop",
     description:
-      "Drag one element onto another with real mouse events: press on the source, move to the target, release. Works for sortable lists, sliders with a drop target, and HTML5 drag and drop. For dragging by pixel offsets use run_script with page.mouse.",
+      "Drag one element onto another with real mouse events: press on the source, move to the target, release. Works for sortable lists, kanban boards, sliders with a drop target, and HTML5 drag and drop. For dragging by pixel offsets, such as a slider without a drop target or drawing on a canvas, use run_script with page.mouse.",
     input: {
       tab: tabParam,
       from: targetParam.describe("Element to drag (ref or selector)."),
@@ -331,7 +334,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "scroll",
     title: "Scroll",
     description:
-      "Scroll an element into view, or scroll the page. Needed for pages that load more content as you scroll; action tools already scroll their target into view on their own.",
+      "Scroll an element into view, or scroll the page by a number of pixels or to the top or bottom. Use it on pages that load more content as you scroll, such as feeds and lazy-loaded lists, or to bring something into view before a screenshot; action tools already scroll their own target into view. To gather everything from a long infinite-scroll list, collect_pages with scroll or a loop in run_script does it in one call.",
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Scroll this element into view (ref or selector). When set, direction and amount are ignored."),
@@ -372,7 +375,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "upload",
     title: "Upload files",
     description:
-      "Attach local files to a file input, or to a button that opens a file chooser. Paths are on the machine running this server and must exist.",
+      "Attach local files to a file input, or to a button that opens a file chooser. Use it for avatars, documents, attachments and imports; fill refuses file inputs. Paths are on the machine running this server and must exist. The result says whether the page changed, as for click.",
     input: {
       tab: tabParam,
       target: targetParam.describe("The file input, or the button that opens the file chooser (ref or selector)."),
@@ -402,7 +405,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "wait_for",
     title: "Wait for condition",
     description:
-      "Wait until one condition holds: text becomes visible, an element reaches a state, the URL matches, or a network response arrives. Give exactly one of text, target, url, request. Response waits only see responses that arrive after this call starts, so for a request triggered by a click, check network_requests afterwards instead.",
+      "Wait until one condition holds: text becomes visible, an element reaches a state, the URL matches, or a network response arrives. Give exactly one of text, target, url, request. Use it when a page finishes its work after the action returns, such as search results loading, a payment redirecting back, or an export showing Done. Response waits only see responses that arrive after this call starts, so for a request triggered by a click, check network_requests afterwards instead. To wait for the user to do something, use handoff.",
     input: {
       tab: tabParam,
       text: z.string().optional().describe("Wait until this text is visible on the page."),
@@ -443,8 +446,10 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
   defineTool(server, deps, {
     name: "dismiss_overlays",
     title: "Dismiss cookie banners and modals",
-    description:
-      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that closes each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it prefers reject all, then only necessary, then close or cancel, and clicks accept only with allow_accept and when nothing else is offered. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never a confirm, continue, order or pay button. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found. Use it when a banner covers the page or a click reports that another element intercepts pointer events; it does not install anything that runs later, so call it again after a navigation if a new banner appears.",
+    description: [
+      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that closes each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it prefers reject all, then only necessary, then close or cancel, and clicks accept only with allow_accept and when nothing else is offered. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never a confirm, continue, order or pay button. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found.",
+      "Use it when a banner or pop-up covers the page, or a click reports that another element intercepts pointer events. It does not install anything that runs later, so call it again after a navigation if a new banner appears. A dialog that asks to confirm an order or payment the task wants is answered with click.",
+    ].join("\n"),
     input: {
       tab: tabParam,
       allow_accept: z.boolean().optional().describe("In a consent banner that offers no reject, close or cancel control, click its accept or OK button. Default false."),
@@ -462,11 +467,13 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
   defineTool(server, deps, {
     name: "handoff",
     title: "Hand a step to the user",
-    description:
-      "Ask the user to do something in the browser that only they can do (a CAPTCHA, a code sent to their phone or email, a passkey or bank approval), then wait until it is done. Brings the tab to the front, shows a desktop notification with your message (the result says if the notification could not be shown), and returns when the given condition holds. Give one of until_text, until_gone or until_url; with none it waits for the tab to navigate. If the time runs out the user has not finished: ask them in the conversation rather than retrying.",
+    description: [
+      "Hand a step that only the user can do to them, and wait until it is done: a CAPTCHA or bot check, a code sent to their phone or email, a passkey or security-key prompt, or a bank's approval screen. Brings the tab to the front, shows a desktop notification with your message (the result says if the notification could not be shown), and returns when the condition holds: until_text becomes visible, until_gone disappears, the URL contains until_url, or, with none of them, the tab navigates. A Challenge: line in a tab_open, navigate or action result, or an event saying the page requested a passkey, means such a step is showing.",
+      "Everything else the user asked for, including signing in with stored credentials, signing up, placing an order and paying, is done with the other tools without a handoff. If the time runs out the user has not finished; ask them in the conversation rather than calling it again.",
+    ].join("\n"),
     input: {
       tab: tabParam,
-      message: z.string().min(1).max(300).describe("What the user needs to do, in one sentence, for example: Enter the SMS code on the bank page."),
+      message: z.string().min(1).max(300).describe("What the user needs to do, in one sentence, shown in the notification."),
       until_text: z.string().optional().describe("Done when this text is visible on the page."),
       until_gone: z.string().optional().describe("Done when this text is no longer visible, for example the challenge prompt."),
       until_url: z.string().optional().describe("Done when the tab's URL contains this."),
