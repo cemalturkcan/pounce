@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { homedir, hostname, userInfo } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -46,6 +46,7 @@ const REFRESH_WINDOW_MS = 5 * 60_000;
 const REFRESH_TIMEOUT_MS = 30_000;
 const REFRESH_RACE_WAIT_MS = 2_000;
 const REFRESH_RACE_POLL_MS = 100;
+const REFRESH_LOCK_STALE_MS = 60_000;
 
 type ApiError = { type?: unknown; message?: unknown };
 type ClaudeCredentials = {
@@ -92,14 +93,17 @@ function networkErrorDetail(error: unknown, token: string | string[]) {
   return errorDetail({ message: detail }, token);
 }
 
-async function readCredentials(credentialsPath: string, signal: AbortSignal) {
-  let credentials: ClaudeCredentials;
+async function readCredentialsDocument(credentialsPath: string, signal?: AbortSignal) {
   try {
-    credentials = JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal })) as ClaudeCredentials;
+    return JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal })) as ClaudeCredentials;
   } catch {
-    signal.throwIfAborted();
+    signal?.throwIfAborted();
     throw new AskSetupError(`Could not read Claude Code credentials at ${credentialsPath}.`, SIGN_IN);
   }
+}
+
+async function readCredentials(credentialsPath: string, signal: AbortSignal) {
+  const credentials = await readCredentialsDocument(credentialsPath, signal);
   const oauth = credentials.claudeAiOauth;
   if (typeof oauth?.accessToken !== "string" || !oauth.accessToken.trim()) {
     throw new AskSetupError(`Claude Code credentials at ${credentialsPath} lack a Claude account access token.`, SIGN_IN);
@@ -108,6 +112,7 @@ async function readCredentials(credentialsPath: string, signal: AbortSignal) {
     document: credentials,
     accessToken: oauth.accessToken,
     refreshToken: typeof oauth.refreshToken === "string" ? oauth.refreshToken : undefined,
+    clientId: typeof oauth.clientId === "string" && oauth.clientId ? oauth.clientId : OAUTH_CLIENT_ID,
     expiresAt: typeof oauth.expiresAt === "number" ? oauth.expiresAt : undefined,
     accountUuid: typeof credentials.accountUuid === "string" ? credentials.accountUuid : undefined,
   };
@@ -142,7 +147,7 @@ async function withRetries<T>(signal: AbortSignal, run: (attempt: number) => Pro
   }
 }
 
-async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: string }, scope: string | undefined, signal: AbortSignal) {
+async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: string; clientId: string }, scope: string | undefined, signal: AbortSignal) {
   const secrets = [tokens.accessToken, tokens.refreshToken];
   const refreshToken = tokens.refreshToken;
   const response = await fetch(TOKEN_URL, {
@@ -151,7 +156,7 @@ async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: 
     body: JSON.stringify({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: OAUTH_CLIENT_ID,
+      client_id: tokens.clientId,
       ...(scope ? { scope } : {}),
     }),
     signal,
@@ -203,39 +208,78 @@ async function waitForNewerCredentials(credentialsPath: string, staleToken: stri
   }
 }
 
-async function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, rejectedToken?: string) {
-  const credentials = await readCredentials(credentialsPath, signal);
-  if (rejectedToken === undefined ? !isExpiring(credentials) : credentials.accessToken !== rejectedToken) return;
-  if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
-
-  const tokens = { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken };
-  const refresh = (scope: string | undefined) => withRetries(signal, () => requestTokenRefresh(tokens, scope, signal));
-  let answer = await refresh(OAUTH_SCOPES);
-  if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(undefined);
-  if (!answer.response.ok) {
-    if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
-    throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`, SIGN_IN);
+async function acquireLock(lockPath: string, signal: AbortSignal) {
+  while (true) {
+    try {
+      await mkdir(lockPath);
+      return () => rmdir(lockPath).catch(() => undefined);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const lock = await lstat(lockPath).catch(() => undefined);
+    if (lock && Date.now() - lock.mtimeMs > REFRESH_LOCK_STALE_MS) {
+      await rmdir(lockPath).catch(() => undefined);
+      continue;
+    }
+    await delay(REFRESH_RACE_POLL_MS, undefined, { signal });
   }
+}
 
-  const expiresIn = typeof answer.payload?.expires_in === "number" ? answer.payload.expires_in : 3_600;
-  const latest = await readCredentials(credentialsPath, signal);
-  if (latest.accessToken !== credentials.accessToken || latest.refreshToken !== credentials.refreshToken) return;
-  const oauth = latest.document.claudeAiOauth ?? {};
-  latest.document.claudeAiOauth = {
-    ...oauth,
-    accessToken: answer.payload?.access_token,
-    refreshToken: typeof answer.payload?.refresh_token === "string" && answer.payload.refresh_token
-      ? answer.payload.refresh_token
-      : credentials.refreshToken,
-    expiresAt: Date.now() + Math.min(Math.max(expiresIn, 60), 86_400) * 1_000,
-  };
-  const temporaryPath = `${credentialsPath}.${process.pid}.${randomUUID()}.tmp`;
+async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal, run: () => Promise<T>) {
+  const configDir = path.dirname(credentialsPath);
+  const releaseLock = await acquireLock(path.join(configDir, ".oauth_refresh.lock"), signal);
   try {
-    await writeFile(temporaryPath, JSON.stringify(latest.document, null, 2), { mode: 0o600, signal });
-    await rename(temporaryPath, credentialsPath);
+    const releaseLegacyLock = await acquireLock(`${await realpath(configDir).catch(() => configDir)}.lock`, signal);
+    try {
+      return await run();
+    } finally {
+      await releaseLegacyLock();
+    }
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number }) {
+  const document = await readCredentialsDocument(credentialsPath);
+  const oauth = document.claudeAiOauth ?? {};
+  const blank = typeof oauth.accessToken !== "string" || !oauth.accessToken.trim();
+  if (!blank && (oauth.accessToken !== stale.accessToken || oauth.refreshToken !== stale.refreshToken)) return;
+  document.claudeAiOauth = { ...oauth, ...tokens };
+  const target = await realpath(credentialsPath).catch(() => credentialsPath);
+  const temporaryPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify(document, null, 2), { mode: 0o600 });
+    await rename(temporaryPath, target);
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
+}
+
+function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, rejectedToken?: string) {
+  return withRefreshLocks(credentialsPath, signal, async () => {
+    const credentials = await readCredentials(credentialsPath, signal);
+    if (rejectedToken === undefined ? !isExpiring(credentials) : credentials.accessToken !== rejectedToken) return;
+    if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
+
+    const tokens = { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken, clientId: credentials.clientId };
+    const refresh = (scope: string | undefined) => withRetries(signal, () => requestTokenRefresh(tokens, scope, signal));
+    let answer = await refresh(OAUTH_SCOPES);
+    if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(undefined);
+    if (!answer.response.ok) {
+      if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
+      throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`, SIGN_IN);
+    }
+
+    const expiresIn = typeof answer.payload?.expires_in === "number" ? answer.payload.expires_in : 3_600;
+    await saveRefreshedTokens(credentialsPath, tokens, {
+      accessToken: String(answer.payload?.access_token),
+      refreshToken: typeof answer.payload?.refresh_token === "string" && answer.payload.refresh_token
+        ? answer.payload.refresh_token
+        : tokens.refreshToken,
+      expiresAt: Date.now() + Math.min(Math.max(expiresIn, 60), 86_400) * 1_000,
+    });
+  });
 }
 
 function billingHeader(messageText: string) {
@@ -350,6 +394,16 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
   const usage: AskUsage = {};
   let stopReason: string | undefined;
   let pending = "";
+  const finish = (): AskReply => {
+    const text = parts.join("");
+    if (!text.trim() && stopReason === "max_tokens") {
+      throw new ToolError("Anthropic Messages reached max_tokens before producing text. Raise max_output_tokens.");
+    }
+    if (!text.trim() && stopReason !== "refusal") {
+      throw new ToolError("Anthropic Messages returned no text.");
+    }
+    return { text, usage, stopReason };
+  };
   const separator = /(?:\r\n|\r(?!\n)|(?<!\r)\n){2}/;
 
   try {
@@ -359,7 +413,10 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
         throw new RetryableAnthropicError(`Network error while reading the Anthropic Messages stream${networkErrorDetail(error, token)}`);
       });
       signal.throwIfAborted();
-      if (done) throw new RetryableAnthropicError("Anthropic Messages stream ended before message_stop.");
+      if (done) {
+        if (stopReason !== undefined) return finish();
+        throw new RetryableAnthropicError("Anthropic Messages stream ended before message_stop.");
+      }
       pending += value;
 
       let boundary: RegExpExecArray | null;
@@ -391,16 +448,8 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
             }
             throw new ToolError(message);
           }
-          case "message_stop": {
-            const text = parts.join("");
-            if (!text.trim() && stopReason === "max_tokens") {
-              throw new ToolError("Anthropic Messages reached max_tokens before producing text. Raise max_output_tokens.");
-            }
-            if (!text.trim() && stopReason !== "refusal") {
-              throw new ToolError("Anthropic Messages returned no text.");
-            }
-            return { text, usage, stopReason };
-          }
+          case "message_stop":
+            return finish();
         }
       }
     }
@@ -473,7 +522,11 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
   let refreshPromise: Promise<void> | undefined;
   const accountUuidFor = (token: string, signal: AbortSignal) => {
     if (profile?.token !== token) {
-      const uuid = withRetries(AbortSignal.timeout(REFRESH_TIMEOUT_MS), () => readAccountUuid(token, AbortSignal.timeout(REFRESH_TIMEOUT_MS)));
+      const timeout = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
+      const uuid = withRetries(timeout, () => readAccountUuid(token, timeout)).catch((error: unknown) => {
+        if (timeout.aborted) throw new ToolError(`The Claude account profile did not answer within ${REFRESH_TIMEOUT_MS / 1000} s.`);
+        throw error;
+      });
       const entry = { token, uuid };
       profile = entry;
       uuid.catch(() => {
