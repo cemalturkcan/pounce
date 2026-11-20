@@ -596,6 +596,10 @@ test("the review prompt describes screen-sized tiles and keeps tile artefacts ou
   assert.match(REVIEW_SYSTEM, /Keep high for unmistakable breakage: overlapping or cut text, broken images, error messages, or blank areas that should hold content/);
 });
 
+test("the review prompt treats empty or dark areas as possible hover states", () => {
+  assert.match(REVIEW_SYSTEM, /An area that looks empty or dark may be a hover or interaction state, such as a card that stays blank until hovered, and is not a defect unless the surrounding layout shows content is missing/);
+});
+
 test("parseReview matches sources exactly, normalises severities and keeps lines it cannot read", () => {
   const sources = ["t1 https://shop.test/a,b", "t10 https://shop.test/c", "02-x.md"];
   const parsed = parseReview(
