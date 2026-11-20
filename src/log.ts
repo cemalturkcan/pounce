@@ -21,7 +21,8 @@ const SANITIZE_DEPTH = 6;
 const STACK_LINES = 12;
 const LINE_LIMIT = 800;
 const FILE_PATTERN = /^daemon-(\d{4}-\d{2}-\d{2})\.jsonl$/;
-const SENSITIVE_KEY = /secret|password|passwd|value|text|code|script|expression|body|token|otp|cookie|header|authorization/i;
+const SENSITIVE_KEY = /secret|password|passwd|value|text|code|script|expression|body|token|otp|cookie|header|authorization|post/i;
+const URL_KEY = /url$/i;
 const RESERVED = new Set(["time", "level", "event"]);
 const HEAD_FIELDS = ["requestId", "session", "tab"] as const;
 
@@ -88,15 +89,30 @@ function clipStack(stack: string | undefined) {
 
 const ANSI = /\u001B\[[0-9;]*m/g;
 
-function sanitize(value: unknown, redact: (text: string) => string, depth = 0): unknown {
-  if (typeof value === "string") return redact(value.replace(ANSI, ""));
+function maskQueryPart(part: string) {
+  if (!part) return part;
+  const equals = part.indexOf("=");
+  if (equals === -1) return `[${part.length} chars]`;
+  return `${part.slice(0, equals)}=[${part.length - equals - 1} chars]`;
+}
+
+export function maskUrl(value: string) {
+  const start = value.indexOf("?");
+  if (start === -1) return value;
+  const hash = value.indexOf("#", start);
+  const end = hash === -1 ? value.length : hash;
+  return `${value.slice(0, start + 1)}${value.slice(start + 1, end).split("&").map(maskQueryPart).join("&")}${value.slice(end)}`;
+}
+
+function sanitize(value: unknown, redact: (text: string) => string, depth = 0, key = ""): unknown {
+  if (typeof value === "string") return URL_KEY.test(key) ? maskUrl(redact(value.replace(ANSI, ""))) : redact(value.replace(ANSI, ""));
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Error) return { message: redact(value.message), stack: redact(clipStack(value.stack) ?? "") };
   if (typeof value !== "object") return undefined;
   if (depth >= SANITIZE_DEPTH) return "[deep]";
   if (Array.isArray(value)) return value.map((item) => sanitize(item, redact, depth + 1));
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitize(item, redact, depth + 1)]));
+  return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, sanitize(item, redact, depth + 1, name)]));
 }
 
 function measure(value: unknown) {
@@ -110,6 +126,13 @@ function measure(value: unknown) {
 
 function summarizeValue(key: string, value: unknown, depth: number): unknown {
   if (SENSITIVE_KEY.test(key)) return `[${measure(value)} chars]`;
+  if (key === "query" && value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, item]) => [name, `[${measure(item)} chars]`]));
+  }
+  if (typeof value === "string" && URL_KEY.test(key)) {
+    const masked = maskUrl(value);
+    return masked.length > STRING_LIMIT ? `${masked.slice(0, STRING_LIMIT)}… [${value.length} chars]` : masked;
+  }
   if (typeof value === "string") return value.length > STRING_LIMIT ? `${value.slice(0, STRING_LIMIT)}… [${value.length} chars]` : value;
   if (Array.isArray(value)) return `[${value.length} items]`;
   if (value && typeof value === "object") return depth >= SUMMARY_DEPTH ? "[object]" : summarizeObject(value as Record<string, unknown>, depth + 1);

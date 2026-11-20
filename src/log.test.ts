@@ -80,6 +80,28 @@ describe("summarizeInput", () => {
     assert.deepEqual(summary, { urls: "[3 items]", viewport: { width: 300, height: 200 }, fields: "[1 items]" });
   });
 
+  test("masks query values and post bodies but keeps keys and lengths", () => {
+    const summary = summarizeInput({
+      url: "https://api.example.com/v1/login?token=abc123secret&user=me&empty=",
+      query: { api_key: "k-998877", page: "2" },
+      post_data: "username=me&password=hunter2",
+    });
+    assert.deepEqual(summary, {
+      url: "https://api.example.com/v1/login?token=[12 chars]&user=[2 chars]&empty=[0 chars]",
+      query: { api_key: "[8 chars]", page: "[1 chars]" },
+      post_data: "[28 chars]",
+    });
+  });
+
+  test("masks the query string of a url field in logged events", async () => {
+    const dir = await freshDir();
+    const logger = new Logger({ dir, now: clock().now, stderr: () => undefined });
+    logger.log("info", "tab_closed_outside", { tab: "t1", url: "https://example.com/cb?code=oauth-code-1234#frag" });
+    await logger.flush();
+    const [entry] = await lines(dir, "daemon-2026-11-20.jsonl");
+    assert.equal(entry?.url, "https://example.com/cb?code=[15 chars]#frag");
+  });
+
   test("handles non-object input", () => {
     assert.deepEqual(summarizeInput(undefined), {});
     assert.deepEqual(summarizeInput("x"), {});
