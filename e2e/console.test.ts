@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig } from "../src/config.ts";
@@ -61,3 +61,49 @@ test("console_logs on a site outside the console hook", async (t) => {
     assert.match(description, /Messages Chrome itself logs about the page, such as a Permissions-Policy header error, are captured on every site/);
   });
 });
+
+for (const hook of [undefined, "local", "all", "off"]) {
+  describe(`console_logs with the console hook ${hook ?? "at its default"}`, () => {
+    let hookDir: string;
+    let hookDeps: ToolDeps;
+    let hookClient: Client;
+    const capturesPageCalls = !stealth || hook !== "off";
+
+    async function hookText(name: string, args: Record<string, unknown>) {
+      const result = await hookClient.callTool({ name, arguments: args });
+      return (result.content as { text?: string }[]).map((part) => part.text ?? "").join("\n");
+    }
+
+    before(async () => {
+      if (hook === undefined) delete process.env.WEB_AGENT_CONSOLE_HOOK;
+      else process.env.WEB_AGENT_CONSOLE_HOOK = hook;
+      hookDir = await mkdtemp(path.join(tmpdir(), "web-agent-console-hook-"));
+      const config = loadConfig({ WEB_AGENT_DATA_DIR: hookDir, WEB_AGENT_HEADLESS: "true", WEB_AGENT_PASSWORD_STORE: "basic", WEB_AGENT_ENGINE: process.env.WEB_AGENT_ENGINE });
+      hookDeps = createDeps(config, new NoSecretStore());
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await createServer(config, hookDeps).connect(serverTransport);
+      hookClient = new Client({ name: "console-hook", version: "0" });
+      await hookClient.connect(clientTransport);
+    });
+
+    after(async () => {
+      await hookClient?.close();
+      await hookDeps?.manager.shutdown();
+      await rm(hookDir, { recursive: true, force: true });
+    });
+
+    test("records each console call and uncaught error once", { skip: !capturesPageCalls }, async (t) => {
+      const tab = /Opened (t\d+)/.exec(await hookText("tab_open", { url: `${fixture.url}/console` }))?.[1] ?? "";
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const logs = await hookText("console_logs", { tab });
+
+      await t.test("the console call appears once", () => {
+        assert.equal(logs.match(/page log line/g)?.length, 1, logs);
+      });
+
+      await t.test("the uncaught error appears once", () => {
+        assert.equal(logs.match(/uncaught page error/g)?.length, 1, logs);
+      });
+    });
+  });
+}

@@ -285,9 +285,9 @@ export class BrowserManager {
   }
 
   private get consoleHookMode(): ConsoleHookMode {
+    if (this.config.engine === "playwright") return "off";
     const value = process.env.WEB_AGENT_CONSOLE_HOOK;
-    if (value === "all" || value === "off" || value === "local") return value;
-    return this.config.engine === "playwright" ? "off" : "local";
+    return value === "all" || value === "off" ? value : "local";
   }
 
   private async launch() {
