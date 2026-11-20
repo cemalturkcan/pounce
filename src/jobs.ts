@@ -129,6 +129,7 @@ export function describeJob(job: Job, detailed: boolean) {
   const head = `${job.id} ${job.state} ${seconds}s ${job.logLines} log lines${job.label ? ` — ${job.label}` : ""}`;
   if (!detailed) return head;
   const lines = [head, `Log: ${job.logFile}`];
+  if (job.failure) lines.push(`Stopped: ${job.failure}`);
   if (job.resultError) lines.push(`The result could not be written to ${job.resultFile}: ${job.resultError}`);
   else if (job.state !== "running") lines.push(`Result: ${job.resultFile}`);
   if (job.recentLogs.length) lines.push("Recent log lines:", ...job.recentLogs);

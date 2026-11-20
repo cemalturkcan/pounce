@@ -696,6 +696,55 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab });
   });
 
+  await t.test("routes, listeners, bindings and init scripts of a script end with it", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const registered = await ok("run_script", {
+      tab,
+      code: [
+        `await context.route("**/*", (route) => route.abort());`,
+        `await page.route("**/*", (route) => route.abort());`,
+        `await context.addInitScript(() => { window.__scriptLeak = "init script"; });`,
+        `await context.exposeBinding("scriptLeakBinding", () => "binding");`,
+        `page.on("request", () => log("listener still attached"));`,
+        `return "registered";`,
+      ].join("\n"),
+    });
+    assert.match(registered, /Returned: registered/);
+    const other = openedTab(await ok("tab_open", { url: `${fixture.url}/article` }));
+    assert.match(await ok("read_text", { tab: other }), /Paragraph 7 of/);
+    assert.equal(await ok("evaluate", { tab: other, expression: "typeof window.__scriptLeak + ' ' + typeof window.scriptLeakBinding" }).then((text) => text.split("\n").pop()), "undefined undefined");
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/article` }), /HTTP 200/);
+    const timedOut = await call("run_script", { tab, timeout_ms: 1000, code: `await page.route("**/*", (route) => route.abort()); await sleep(5000);` });
+    assert.match(timedOut.text, /timed out/);
+    assert.match(await ok("navigate", { tab, url: fixture.url }), /HTTP 200/);
+    await ok("tab_close", { tab: other });
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("synchronous script code is stopped by timeout_ms and by the slice limit", async () => {
+    const startedAt = Date.now();
+    const busy = await call("run_script", { timeout_ms: 1000, code: "await sleep(10); const end = Date.now() + 6000; while (Date.now() < end) {} return 'finished';" });
+    const elapsed = Date.now() - startedAt;
+    assert.equal(busy.isError, true, busy.text);
+    assert.match(busy.text, /timed out after 1000 ms/);
+    assert.ok(elapsed < 2500, `stopped after ${elapsed} ms`);
+
+    const started = await ok("run_script", { background: true, code: "await sleep(10); while (true) {}" });
+    const id = /job (j\d+)/.exec(started)?.[1] ?? "";
+    const loopStarted = Date.now();
+    await pause(200);
+    assert.match(await ok("tabs_list"), /Output files/);
+    const answeredAfter = Date.now() - loopStarted;
+    assert.ok(answeredAfter < 15_000, `tabs_list answered after ${answeredAfter} ms`);
+    let status = "";
+    for (let attempt = 0; attempt < 50 && !/ failed /.test(status); attempt += 1) {
+      status = await ok("jobs", { action: "status", id });
+      await pause(100);
+    }
+    assert.match(status, / failed /);
+    assert.match(status, /without awaiting anything/);
+  });
+
   await t.test("run_script save() defaults to .txt", async () => {
     const text = await ok("run_script", { code: "return await save('report', 'plain text');" });
     assert.match(text, /-report\.txt$/m);

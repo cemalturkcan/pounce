@@ -14,6 +14,9 @@ import { Logger, useLogger } from "./log.ts";
 import { OutputStore, Redactor } from "./output.ts";
 import { GopassStore, NoSecretStore, type SecretStore } from "./secrets.ts";
 import { registerTools, type ToolDeps } from "./tools.ts";
+import { startLoopWatchdog } from "./watchdog.ts";
+
+const LOOP_STALL_MS = 5000;
 
 export const SERVER_INSTRUCTIONS = [
   "This server drives the user's own Chrome: one persistent profile with their sign-ins, cookies and saved passwords, shared by every agent session on this machine. When a task names a URL or a website, local development servers included, open it here rather than fetching it with curl or a web fetch tool: this browser renders JavaScript, records the page's network traffic and carries the user's sessions.",
@@ -71,6 +74,7 @@ async function main() {
 
   const deps = createDeps(config);
   installProcessGuards("web-agent-mcp");
+  await startLoopWatchdog({ thresholdMs: LOOP_STALL_MS }).catch((error: unknown) => console.error("web-agent-mcp loop watchdog failed to start:", error));
   void deps.store.prune().catch((error: unknown) => console.error("web-agent-mcp prune failed:", error));
   void deps.log
     .prune()
