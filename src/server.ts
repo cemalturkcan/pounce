@@ -14,6 +14,26 @@ import { Logger, useLogger } from "./log.ts";
 import { OutputStore, Redactor } from "./output.ts";
 import { GopassStore, NoSecretStore, type SecretStore } from "./secrets.ts";
 import { registerTools, type ToolDeps } from "./tools.ts";
+import { startLoopWatchdog } from "./watchdog.ts";
+
+const LOOP_STALL_MS = 5000;
+const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+type Prunable = { store: { prune(): Promise<void> }; log: { prune(): Promise<number>; log(level: "info", event: string, fields: Record<string, unknown>): void } };
+
+export function startPruning({ store, log }: Prunable, everyMs = PRUNE_INTERVAL_MS) {
+  const run = () => {
+    void store.prune().catch((error: unknown) => console.error("web-agent-mcp prune failed:", error));
+    void log
+      .prune()
+      .then((removed) => removed && log.log("info", "log_pruned", { removed }))
+      .catch((error: unknown) => console.error("web-agent-mcp log prune failed:", error));
+  };
+  run();
+  const timer = setInterval(run, everyMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
 
 export const SERVER_INSTRUCTIONS = [
   "This server drives the user's own Chrome: one persistent profile with their sign-ins, cookies and saved passwords, shared by every agent session on this machine. When a task names a URL or a website, local development servers included, open it here rather than fetching it with curl or a web fetch tool: this browser renders JavaScript, records the page's network traffic and carries the user's sessions.",
@@ -71,11 +91,8 @@ async function main() {
 
   const deps = createDeps(config);
   installProcessGuards("web-agent-mcp");
-  void deps.store.prune().catch((error: unknown) => console.error("web-agent-mcp prune failed:", error));
-  void deps.log
-    .prune()
-    .then((removed) => removed && deps.log.log("info", "log_pruned", { removed }))
-    .catch((error: unknown) => console.error("web-agent-mcp log prune failed:", error));
+  await startLoopWatchdog({ thresholdMs: LOOP_STALL_MS }).catch((error: unknown) => console.error("web-agent-mcp loop watchdog failed to start:", error));
+  startPruning(deps);
 
   if (args.includes("--daemon")) {
     await startDaemon(

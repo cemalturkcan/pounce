@@ -40,6 +40,14 @@ export function installProcessGuards(label: string) {
       "error",
     );
   });
+  process.on("uncaughtException", (error) => {
+    pushFault("uncaught exception", error);
+    logEvent(
+      "uncaught_exception",
+      { message: `${label}: uncaught exception kept the server running`, error: error instanceof Error ? error.message : String(error), stack: stackOf(error) },
+      "error",
+    );
+  });
 }
 
 export class ToolError extends Error {

@@ -7,9 +7,10 @@ import type { BrowserManager, Tab } from "./browser.ts";
 import { reapplyEmulatedViewport } from "./emulate.ts";
 import { ToolError } from "./errors.ts";
 import type { OutputStore } from "./output.ts";
-import { type Box, clusterRegions, crop, diffImages, type Region, renderDiffImage, resize, type RgbaImage } from "./pixels.ts";
-import { decodePng, encodePng, isPng, UnsupportedPngError } from "./png.ts";
-import { browserTranscoder, describeSent } from "./model-images.ts";
+import { REPORTED_REGION_LIMIT, runAnalysis } from "./diff-analysis.ts";
+import type { Region, RgbaImage } from "./pixels.ts";
+import { isDecodablePng, isPng } from "./png.ts";
+import { browserTranscoder, describeSent, imageSize } from "./model-images.ts";
 import { describeDifferences, type Finding, type ModelLayerResult } from "./visual-model.ts";
 
 export type CompareOptions = {
@@ -86,21 +87,17 @@ async function transcodeInPage(page: Page, bytes: Buffer) {
     if (error instanceof ToolError) throw error;
     throw new ToolError(`The reference is not an image the browser can decode (PNG, JPEG, WebP or GIF): ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
   });
-  return decodePng(Buffer.from(base64, "base64"));
+  return Buffer.from(base64, "base64");
 }
 
 export async function loadReference(page: Page, referencePath: string) {
   if (!path.isAbsolute(referencePath)) throw new ToolError(`reference must be an absolute path, got ${referencePath}.`);
   const bytes = await readFile(referencePath).catch(() => undefined);
   if (!bytes) throw new ToolError(`Cannot read the reference image ${referencePath}.`, "Pass the absolute path of a PNG or JPEG export, or of an earlier screenshot.");
-  if (isPng(bytes)) {
-    try {
-      return { image: await decodePng(bytes), decodedBy: "node" as const };
-    } catch (error) {
-      if (!(error instanceof UnsupportedPngError)) throw error;
-    }
-  }
-  return { image: await transcodeInPage(page, bytes), decodedBy: "browser" as const };
+  const png = isPng(bytes) && isDecodablePng(bytes) ? bytes : await transcodeInPage(page, bytes);
+  const size = imageSize(png);
+  if (!size) throw new ToolError(`The reference ${referencePath} could not be read as an image.`);
+  return { png, width: size.width, height: size.height, decodedBy: png === bytes ? ("node" as const) : ("browser" as const) };
 }
 
 type Metrics = { width: number; height: number; deviceScaleFactor: number };
@@ -176,31 +173,6 @@ async function captureAt(page: Page, metrics: Metrics, mode: { locator?: Locator
   return { png, restoreNote };
 }
 
-function aspectMatches(a: { width: number; height: number }, b: { width: number; height: number }) {
-  return Math.abs(a.width / a.height - b.width / b.height) <= 0.01 * (a.width / a.height);
-}
-
-function align(reference: RgbaImage, page: RgbaImage, notes: string[]) {
-  if (reference.width === page.width && reference.height === page.height) return { reference, page, scaledPage: false };
-  if (aspectMatches(reference, page)) {
-    notes.push(`The page capture (${page.width}x${page.height}) has the reference's proportions but not its size, so it was scaled to ${reference.width}x${reference.height} before comparing; pass device_scale_factor to capture at the reference's scale instead.`);
-    return { reference, page: resize(page, reference.width, reference.height), scaledPage: true };
-  }
-  const width = Math.min(reference.width, page.width);
-  const height = Math.min(reference.height, page.height);
-  notes.push(
-    `Sizes differ: reference ${reference.width}x${reference.height}, page ${page.width}x${page.height}. Only the top-left ${width}x${height} was compared${reference.height > page.height ? `; the reference continues ${reference.height - page.height}px below the end of the page capture` : ""}${page.height > reference.height ? `; the page continues ${page.height - reference.height}px below the end of the reference` : ""}${reference.width !== page.width ? "; widths differ, so check width and device_scale_factor" : ""}.`,
-  );
-  const box = { x: 0, y: 0, width, height };
-  return { reference: crop(reference, box), page: crop(page, box), scaledPage: false };
-}
-
-function padBox(region: Box, pad: number, width: number, height: number): Box {
-  const x = Math.max(0, region.x - pad);
-  const y = Math.max(0, region.y - pad);
-  return { x, y, width: Math.min(width, region.x + region.width + pad) - x, height: Math.min(height, region.y + region.height + pad) - y };
-}
-
 function percent(value: number) {
   return `${(value * 100).toFixed(value < 0.001 && value > 0 ? 3 : 2)}%`;
 }
@@ -272,7 +244,7 @@ async function runModel(deps: CompareDeps, page: Page, options: CompareOptions, 
 
 export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: string, options: CompareOptions = {}): Promise<CompareReport> {
   const page = tab.page;
-  const { image: referenceImage } = await loadReference(page, referencePath);
+  const referenceImage = await loadReference(page, referencePath);
   const deviceScaleFactor = options.deviceScaleFactor ?? 1;
   const tolerance = options.tolerance ?? DEFAULTS.tolerance;
   const minRegionArea = options.minRegionArea ?? DEFAULTS.minRegionArea;
@@ -289,26 +261,26 @@ export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: 
       };
   const { png, restoreNote } = await captureAt(page, viewport, { locator, fullPage: options.fullPage ?? false });
   if (restoreNote) notes.push(restoreNote);
-  const pageImage = await decodePng(png);
-  const aligned = align(referenceImage, pageImage, notes);
-  const diff = diffImages(aligned.reference, aligned.page, { tolerance });
-  const regions: ComparedRegion[] = clusterRegions(diff, { minArea: minRegionArea, mergeGap: options.mergeGap ?? Math.round(DEFAULTS.mergeGap * deviceScaleFactor) });
+  const mergeGap = options.mergeGap ?? Math.round(DEFAULTS.mergeGap * deviceScaleFactor);
+  const analysis = await runAnalysis(
+    { reference: referenceImage.png, page: png, tolerance, minArea: minRegionArea, mergeGap, regionLimit: REPORTED_REGION_LIMIT, crops: maxRegions, cropPadding: Math.round(CROP_PADDING * deviceScaleFactor) },
+    options.signal,
+  );
+  notes.push(...analysis.notes);
+  if (analysis.regionsFound > analysis.regions.length) notes.push(`${analysis.regionsFound} regions differ; only the ${analysis.regions.length} largest are reported and outlined.`);
+  const aligned = { reference: analysis.reference, page: analysis.page };
+  const regions: ComparedRegion[] = analysis.regions;
 
   const name = deps.store.uniqueName(`${tab.id}-${path.basename(referencePath)}`, "run").replace(/\.run$/, "");
   const dir = await deps.store.dir("visual", name);
   const save = (file: string, content: string | Buffer) => deps.store.write("visual", path.join(name, file), content);
-  const files = { dir, screenshot: await save("screenshot.png", png), diff: await save("diff.png", await encodePng(renderDiffImage(aligned.page, diff, regions))), report: path.join(dir, "report.json") };
+  const files = { dir, screenshot: await save("screenshot.png", png), diff: await save("diff.png", analysis.diffPng), report: path.join(dir, "report.json") };
 
-  const pad = Math.round(CROP_PADDING * deviceScaleFactor);
-  const chosen = regions.slice(0, maxRegions);
-  const crops = chosen.map((region) => {
-    const box = padBox(region, pad, aligned.reference.width, aligned.reference.height);
-    return { region, box, reference: crop(aligned.reference, box), page: crop(aligned.page, box) };
-  });
+  const crops = analysis.crops;
   if (crops.length) await deps.store.dir("visual", path.join(name, "crops"));
   for (const item of crops) {
-    const design = await save(path.join("crops", `${item.region.id}-design.png`), await encodePng(item.reference));
-    const pageCrop = await save(path.join("crops", `${item.region.id}-page.png`), await encodePng(item.page));
+    const design = await save(path.join("crops", `${item.region.id}-design.png`), item.referencePng);
+    const pageCrop = await save(path.join("crops", `${item.region.id}-page.png`), item.pagePng);
     const target = regions.find((region) => region.id === item.region.id);
     if (target) target.crops = { design, page: pageCrop };
   }
@@ -338,15 +310,15 @@ export async function compareDesign(deps: CompareDeps, tab: Tab, referencePath: 
     url: page.url(),
     reference: referencePath,
     referenceSize: { width: referenceImage.width, height: referenceImage.height },
-    pageSize: { width: pageImage.width, height: pageImage.height },
+    pageSize: analysis.pageSize,
     compared: { width: aligned.reference.width, height: aligned.reference.height },
     viewport,
-    scaledPage: aligned.scaledPage,
+    scaledPage: analysis.scaledPage,
     notes,
     tolerance,
     minRegionArea,
-    diffPixels: diff.count,
-    diffRatio: diff.count / Math.max(1, diff.width * diff.height),
+    diffPixels: analysis.diffPixels,
+    diffRatio: analysis.diffRatio,
     regions,
     ...(missing ? { missing } : {}),
     ...(model ? { model } : {}),

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { zstdCompressSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 
 const HOME = `<!doctype html>
@@ -91,7 +92,7 @@ Bültenimize abone olun
 <button aria-label="Kapat" onclick="document.getElementById('modal-state').textContent = 'modal closed'; this.parentElement.remove()">×</button>
 </div>
 <p id="modal-state">modal open</p>
-<iframe title="Consent frame" srcdoc="<div id=&quot;consent&quot; style=&quot;position:fixed;top:0&quot;>Cookies? <button onclick=&quot;parent.document.getElementById('frame-state').textContent='frame accepted'&quot;>Alle akzeptieren</button> <button onclick=&quot;parent.document.getElementById('frame-state').textContent='frame rejected'; this.parentElement.remove()&quot;>Alle ablehnen</button></div>"></iframe>
+<iframe title="Consent frame" srcdoc="<div id=&quot;consent&quot; style=&quot;position:fixed;top:0&quot;>Cookies? <button onclick=&quot;parent.document.getElementById('frame-state').textContent='frame accepted'; this.parentElement.remove()&quot;>Alle akzeptieren</button> <button onclick=&quot;parent.document.getElementById('frame-state').textContent='frame rejected'; this.parentElement.remove()&quot;>Alle ablehnen</button></div>"></iframe>
 <p id="frame-state">frame open</p>
 </body></html>`;
 
@@ -334,6 +335,11 @@ const EDGE_PAGES: Record<string, { status?: number; html: string }> = {
 <iframe title="Rich editor" srcdoc="<body contenteditable=&quot;true&quot; style=&quot;min-height:40px&quot;></body>"></iframe>`,
     ),
   },
+  "/consent/en": { html: EDGE_HTML("Consent EN", `<p id="consent-state">pending</p><div id="cookie-notice" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:16px">We use cookies to improve the site. <button onclick="document.getElementById('consent-state').textContent = 'rejected'; this.parentElement.remove()">Reject all</button> <button onclick="document.getElementById('consent-state').textContent = 'accepted'; this.parentElement.remove()">Accept all</button></div>`) },
+  "/consent/tr": { html: EDGE_HTML("Consent TR", `<p id="consent-state">pending</p><div class="cerez-bar" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:16px">Sitemizde çerezler kullanılmaktadır. <button onclick="document.getElementById('consent-state').textContent = 'rejected'; this.parentElement.remove()">Reddet</button> <button onclick="document.getElementById('consent-state').textContent = 'accepted'; this.parentElement.remove()">Tümünü kabul et</button></div>`) },
+  "/consent/frame": { html: EDGE_HTML("Consent Frame", `<p id="consent-state">pending</p><iframe title="Privacy" src="/consent/cmp-frame" style="position:fixed;bottom:0;width:100%;height:120px;border:0"></iframe>`) },
+  "/consent/cmp-frame": { html: EDGE_HTML("CMP", `<div id="cmp-box">We and our partners use cookies. <button onclick="parent.document.getElementById('consent-state').textContent = 'rejected'">Manage options</button> <button onclick="parent.document.getElementById('consent-state').textContent = 'accepted'; this.parentElement.remove()">Agree</button></div>`) },
+  "/consent/delayed": { html: EDGE_HTML("Consent Delayed", `<p id="consent-state">pending</p><script>setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="consent-banner" style="position:fixed;bottom:0;left:0;right:0;background:#eee;padding:16px">This site uses cookies. <button onclick="document.getElementById(\\'consent-state\\').textContent = \\'accepted\\'; this.parentElement.remove()">OK</button></div>'), 800);</script>`) },
   "/text": { html: EDGE_HTML("Text", `<p id="sample">Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا</p><label>Note <input id="note"></label><label>Body <textarea id="body"></textarea></label><button aria-label="Gönder 👍">Gönder 👍</button>`) },
 };
 
@@ -352,8 +358,24 @@ function edgeAuthPage(request: http.IncomingMessage, response: http.ServerRespon
     .end(EDGE_HTML("Auth OK", `<p id="auth-state">authorized ${realm}</p><p id="api-state">pending</p><script>fetch("api").then((r) => r.json()).then((d) => { document.getElementById("api-state").textContent = "api " + d.realm; }, () => { document.getElementById("api-state").textContent = "api failed"; });</script>`));
 }
 
+let stalled = 0;
+
+export const stallRequests = () => stalled;
+
 function handleEdgeCase(request: http.IncomingMessage, response: http.ServerResponse) {
   const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+  if (pathname === "/zstd") {
+    const body = Buffer.from(JSON.stringify({ ok: true, items: Array.from({ length: 20 }, (_value, index) => `item-${index}`) }));
+    if (/zstd/.test(String(request.headers["accept-encoding"] ?? ""))) response.writeHead(200, { "content-type": "application/json", "content-encoding": "zstd" }).end(zstdCompressSync(body));
+    else response.writeHead(200, { "content-type": "application/json" }).end(body);
+    return true;
+  }
+  if (pathname === "/stall") {
+    stalled += 1;
+    response.writeHead(200, { "content-type": "text/html" });
+    response.write("<!doctype html><title>Stall</title>");
+    return true;
+  }
   const realm = /^\/(auth-[a-z])\//.exec(pathname)?.[1];
   if (realm) {
     edgeAuthPage(request, response, realm, pathname);

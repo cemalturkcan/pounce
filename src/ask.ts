@@ -30,6 +30,7 @@ export type BatchResult = {
   truncated?: boolean;
   interrupted?: boolean;
   usage?: AskUsage;
+  reply?: string;
   ms: number;
 };
 
@@ -183,6 +184,29 @@ export function sourceMatcher(sources: string[]) {
 
 const CITATION = /\[([^[\]]+)\]\s*$/;
 
+const NOT_FOUND_LINE = /^(?:[-*•]\s*|\d+[.)]\s*)?[*_\s]*NOT FOUND[*_\s]*:?[*_\s]*(.*)$/i;
+const TOKEN_SEPARATOR = /[\s,;()[\]*`_"']+/;
+
+function listedSources(listed: string, match: (entry: string) => string | undefined) {
+  const found: string[] = [];
+  for (const entry of listed.split(",")) {
+    const whole = match(entry.replace(/[[\]*`_]/g, "").trim());
+    if (whole) {
+      found.push(whole);
+      continue;
+    }
+    for (const token of entry.split(TOKEN_SEPARATOR)) {
+      const source = token ? match(token) : undefined;
+      if (source) found.push(source);
+    }
+  }
+  return found;
+}
+
+export function citedSources(answers: string[]) {
+  return new Set(answers.map((answer) => CITATION.exec(answer)?.[1]).filter((source): source is string => source !== undefined));
+}
+
 export function parseReply(text: string, sources: string[]) {
   const match = sourceMatcher(sources);
   const answers: string[] = [];
@@ -192,13 +216,9 @@ export function parseReply(text: string, sources: string[]) {
   for (const raw of trimmed.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
-    const missing = /^[*_\s]*NOT FOUND[*_\s]*:?[*_\s]*(.*)$/i.exec(line);
+    const missing = NOT_FOUND_LINE.exec(line);
     if (missing) {
-      const listed = (missing[1] ?? "").split(",").map((entry) => entry.replace(/[[\]*`_]/g, "").trim());
-      for (const entry of listed) {
-        const source = entry ? match(entry) : undefined;
-        if (source) notFound.add(source);
-      }
+      for (const source of listedSources(missing[1] ?? "", match)) notFound.add(source);
       continue;
     }
     const answer = line.startsWith("- ") ? line : `- ${line.replace(/^[*•]\s*/, "")}`;
@@ -206,7 +226,8 @@ export function parseReply(text: string, sources: string[]) {
     const source = cited ? match((cited[1] ?? "").replace(/[*`_]/g, "").trim()) : undefined;
     answers.push(cited && source ? `${answer.slice(0, cited.index)}[${source}]` : answer);
   }
-  return { answers, notFound: [...notFound] };
+  const answered = citedSources(answers);
+  return { answers, notFound: [...notFound].filter((source) => !answered.has(source)) };
 }
 
 const SEVERITIES = ["high", "medium", "low"] as const;
@@ -369,7 +390,7 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
       const parsed = review ? parseReview(reply.text, sources) : parseReply(reply.text, sources);
       const truncated = isCutOff(reply.stopReason) ? { truncated: true } : {};
       const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
-      return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, ms: Date.now() - started }];
+      return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, reply: reply.text, ms: Date.now() - started }];
     } catch (error) {
       if (error instanceof AskSetupError) setupError = error;
       const splittable = !setupError && !options.signal?.aborted;
@@ -411,7 +432,8 @@ export function renderAskResults(question: string, report: AskReport, adapter: s
   const answers = results.flatMap((result) => (result.error ? [] : result.answers));
   lines.push(...(review ? sortIssues(answers) : answers));
   if (answers.length === 0) lines.push(review ? "No page had issues." : "No page had anything relevant.");
-  const notFound = results.flatMap((result) => result.notFound);
+  const answered = review ? new Set<string>() : citedSources(answers);
+  const notFound = [...new Set(results.flatMap((result) => result.notFound))].filter((source) => !answered.has(source));
   if (notFound.length) lines.push("", `${review ? "No issues in" : "Nothing relevant in"}: ${notFound.join(", ")}`);
   if (report.empty.length) lines.push("", `Empty pages (not sent): ${report.empty.join(", ")}`);
   if (report.clipped.length) lines.push("", `Clipped to their start and end: ${report.clipped.map((entry) => `${entry.source} (${entry.chars} chars)`).join(", ")}`);

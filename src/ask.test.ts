@@ -593,3 +593,56 @@ test("a review with no issues says so", async () => {
   const report = await askPages(adapter, askOptions([doc("a.md", 10)], { mode: "review" }));
   assert.match(renderAskResults("Check", report, adapter.name, "m"), /^Review: Check\n\nNo page had issues\.\n\nNo issues in: a\.md/);
 });
+
+test("a bulleted, numbered or bold NOT FOUND line is read as NOT FOUND", () => {
+  const sources = ["01-a.md", "02-b.md", "03-c.md"];
+  for (const line of ["- NOT FOUND: 02-b.md, 03-c.md", "* NOT FOUND: 02-b.md, 03-c.md", "1. NOT FOUND: 02-b.md, 03-c.md", "- **NOT FOUND:** 02-b.md, 03-c.md"]) {
+    const parsed = parseReply(`- fact [01-a.md]\n${line}`, sources);
+    assert.deepEqual(parsed.answers, ["- fact [01-a.md]"], line);
+    assert.deepEqual(parsed.notFound, ["02-b.md", "03-c.md"], line);
+  }
+});
+
+test("a NOT FOUND line with commentary keeps its sources and drops the commentary", () => {
+  const sources = ["05-other.md", "06-superpowerdaily-com.md", "07-third.md"];
+  const parsed = parseReply("- NOT FOUND: 05-other.md, 07-third (no, this is incorrect; see below)", sources);
+  assert.deepEqual(parsed.answers, []);
+  assert.deepEqual(parsed.notFound, ["05-other.md", "07-third.md"]);
+  assert.deepEqual(parseReply("NOT FOUND: t1 (only a footer), t10", ["t1 http://a.test/", "t10 http://b.test/"]).notFound, ["t1 http://a.test/", "t10 http://b.test/"]);
+});
+
+test("the observed Haiku slip: a page with answers is not listed as NOT FOUND", () => {
+  const sources = ["05-other.md", "06-superpowerdaily-com.md"];
+  const reply = [
+    "- Plan A costs 9 USD [06-superpowerdaily-com.md]",
+    "- Plan B costs 19 USD [06-superpowerdaily-com.md]",
+    "- Plan C costs 29 USD [06-superpowerdaily-com.md]",
+    "- NOT FOUND: 06-superpowerdaily-com.md (no, this is incorrect; see below)",
+  ].join("\n");
+  const parsed = parseReply(reply, sources);
+  assert.equal(parsed.answers.length, 3);
+  assert.ok(parsed.answers.every((line) => !/incorrect/.test(line)));
+  assert.deepEqual(parsed.notFound, []);
+  const observed = parseReply(`${reply.split("\n").slice(0, 3).join("\n")}\n- NOT FOUND: 06-superpowerdaily… (no, this is incorrect; see below)`, sources);
+  assert.equal(observed.answers.length, 3);
+  assert.ok(observed.answers.every((line) => !/NOT FOUND|incorrect/.test(line)));
+  assert.deepEqual(observed.notFound, []);
+});
+
+test("a page answered in one call is dropped from another call's NOT FOUND list", () => {
+  const report = {
+    batches: [
+      { index: 1, sources: ["a.md", "b.md"], answers: ["- fact [a.md]"], notFound: ["b.md"], ms: 1 },
+      { index: 2, sources: ["a.md", "b.md"], answers: ["- other [b.md]"], notFound: ["a.md"], ms: 1 },
+    ],
+    empty: [],
+    clipped: [],
+  };
+  assert.doesNotMatch(renderAskResults("q", report, "fake", "haiku"), /Nothing relevant in/);
+});
+
+test("askPages keeps the raw reply of every call", async () => {
+  const adapter: AskAdapter = { name: "raw", complete: async () => ({ text: "- fact [a.md]\nNOT FOUND: b.md (see below)" }) };
+  const report = await askPages(adapter, { question: "q", documents: [doc("a.md", 10), doc("b.md", 10)], batchChars: 1000, concurrency: 1, model: "m", maxTokens: 1000 });
+  assert.equal(report.batches[0]?.reply, "- fact [a.md]\nNOT FOUND: b.md (see below)");
+});

@@ -14,6 +14,7 @@ const IDLE_SESSION_MS = 12 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 30 * 60 * 1000;
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
 const LOG_FLUSH_MS = 2000;
+const KEEP_ALIVE_MS = 120_000;
 
 export type DaemonRegistry = {
   pid: number;
@@ -190,6 +191,7 @@ export async function startDaemon(
     });
   });
 
+  httpServer.keepAliveTimeout = KEEP_ALIVE_MS;
   await new Promise<void>((resolve, reject) => {
     httpServer.once("error", reject);
     httpServer.listen(config.port, config.host, () => {

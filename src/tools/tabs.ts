@@ -3,10 +3,11 @@ import type { Response } from "playwright-core";
 import { z } from "zod";
 import { type BrowserManager, LEAVE_CANCELLED, pushEvent, type Tab } from "../browser.ts";
 import { normalizeUrl } from "../collect.ts";
-import { recentFaults } from "../errors.ts";
+import { describeError, recentFaults, ToolError } from "../errors.ts";
 import { describeEmulation, emulate, resetEmulation, VIEWPORT_PRESETS } from "../emulate.ts";
 import { RETENTION_NOTE } from "../output.ts";
 import { describePage, landingLines, pageTitle, renderSnapshot } from "../page.ts";
+import { watchConsent } from "../consent.ts";
 import { siteNotesHint } from "../sites.ts";
 import { registerLogTool } from "./log.ts";
 import { defineTool, includeSnapshotParam, tabLine, tabParam, timeoutParam, type ToolDeps, waitUntilParam } from "./common.ts";
@@ -57,7 +58,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tabs_list",
     title: "List tabs",
     description:
-      "Show the open tabs of the shared browser and the state of the server. Returns every tab with its id, whose it is, its URL and title, then the browser status (engine, Chrome version, profile), the output directory where results and files are saved, the secret store, the model adapter that ask_pages and compare_design use, the log directory with the number of errors logged in the last hour (read them with server_log), and recent background errors. Use it to find a tab id again, to see what another session or the user has open, or to learn where output files go. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. It does not start the browser.",
+      "Show the open tabs of the shared browser and the state of the server. Returns every tab with its id, whose it is, its URL and title, then the browser status (engine, Chrome version, profile), the output directory where results and files are saved, the secret store, the model adapter that ask_pages and compare_design use, the log directory with the number of errors logged in the last hour (read them with server_log), and recent background errors. Use it to find a tab id again, to see what another session or the user has open, or to learn where output files go. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours; an orphaned tab nobody uses for 30 minutes is closed. A tab whose page does not answer is listed with (unresponsive) instead of its title. It does not start the browser.",
     input: {},
     readOnly: true,
     handler: async (_input, owner) => {
@@ -86,7 +87,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_open",
     title: "Open tab",
     description:
-      "Open a new tab for this session, optionally load a URL in it, and return the tab id that every page tool takes as tab. This is where work on any web page starts, local development servers included: the browser renders JavaScript and carries the user's cookies and sign-ins from earlier sessions, which a plain HTTP fetch does not. With a URL, the result gives the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path instead. Starts the browser on first use. To load another URL in a tab you already have, use navigate; to load many URLs at once, collect_pages.",
+      "Open a new tab for this session, optionally load a URL in it, and return the tab id that every page tool takes as tab. This is where work on any web page starts, local development servers included: the browser renders JavaScript and carries the user's cookies and sign-ins from earlier sessions, which a plain HTTP fetch does not. With a URL, the result gives the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path instead. A cookie banner that shows within about 1.5 s of loading is accepted (WEB_AGENT_AUTO_CONSENT on the server: accept, reject or off) and reported as an event, here or with the next call. When the URL fails to load, the call fails but the tab stays open on the error page and the error names its id, so navigate can retry in it or tab_close can close it. Starts the browser on first use. To load another URL in a tab you already have, use navigate; to load many URLs at once, collect_pages.",
     input: {
       url: z.string().optional().describe("URL to load. https:// is assumed when no scheme is given. Omit for a blank tab."),
       wait_until: waitUntilParam,
@@ -103,11 +104,21 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       try {
         response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
       } catch (error) {
-        const text = await downloadInstead(manager, tab, startedAt, error);
+        let text: string;
+        try {
+          text = await downloadInstead(manager, tab, startedAt, error);
+        } catch (failure) {
+          manager.markSeen(tab);
+          throw new ToolError(
+            `${describeError(failure)}\nTab ${tab.id} was opened and stays open at ${tab.page.isClosed() ? "a closed page" : tab.page.url()} so the error page can be inspected.`,
+            `Use navigate on ${tab.id} to try again, or tab_close to close it.`,
+          );
+        }
         manager.markSeen(tab);
         return `Opened ${tab.id}.\n${text}`;
       }
       manager.markSeen(tab);
+      await watchConsent(tab, manager.config.autoConsent);
       const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
       lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
       lines.push(...manager.drainEvents(tab, startedAt));
@@ -154,7 +165,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "navigate",
     title: "Navigate",
     description:
-      "Load a URL in a tab you already have, or go back, forward or reload. Returns the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path while the tab stays where it was. Refs from earlier snapshots of the tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; force: true leaves anyway. tab_open opens a page in a new tab, and collect_pages loads many URLs at once without opening them one by one.",
+      "Load a URL in a tab you already have, or go back, forward or reload. Returns the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path while the tab stays where it was. Refs from earlier snapshots of the tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; force: true leaves anyway. On a tab this session owns, a cookie banner that shows within about 1.5 s is accepted (WEB_AGENT_AUTO_CONSENT on the server: accept, reject or off) and reported as an event. tab_open opens a page in a new tab, and collect_pages loads many URLs at once without opening them one by one.",
     input: {
       tab: tabParam,
       url: z.string().describe("URL to load, or one of back, forward, reload. https:// is assumed when no scheme is given."),
@@ -163,7 +174,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       force: z.boolean().optional().describe("Leave even if the page asks to confirm leaving because of unsaved changes, which are then lost. Default false."),
       include_snapshot: includeSnapshotParam,
     },
-    handler: async (input) => {
+    handler: async (input, owner) => {
       const tab = manager.getTab(input.tab);
       const startedAt = Date.now();
       const previousUrl = tab.page.url();
@@ -191,6 +202,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       if (input.url === "back" || input.url === "forward") {
         await tab.page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => undefined);
       }
+      if (tab.owner === owner) await watchConsent(tab, manager.config.autoConsent);
       const lines = [`${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
       lines.push(
         ...(await landingLines(manager, tab, { previousUrl, requestedUrl, status: response?.status(), redirected: response ? response.request().redirectedFrom() !== null : undefined })),
@@ -222,7 +234,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
         })
         .optional()
         .describe("Viewport to emulate: a preset, a size, or both."),
-      color_scheme: z.enum(["light", "dark", "none"]).optional().describe("prefers-color-scheme to report; none removes the override."),
+      color_scheme: z.enum(["light", "dark", "none"]).optional().describe("prefers-color-scheme to report for this tab; none removes the override, and pages then follow the system setting as they do by default."),
       reduced_motion: z.enum(["reduce", "no-preference", "none"]).optional().describe("prefers-reduced-motion to report; none removes the override."),
       geolocation: z
         .object({

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
-import { sandboxLaunchError } from "./browser.ts";
+import { sandboxLaunchError, shouldRetainBody } from "./browser.ts";
 import { normalizeUrl } from "./collect.ts";
 import { loadConfig, parseLaunchArgs } from "./config.ts";
 import { isAllowedHost, isAllowedOrigin, isDaemonProcess } from "./daemon.ts";
@@ -352,4 +352,61 @@ test("the default ask adapter file is ~/.config/web-agent-mcp/ask-adapter.mjs an
   assert.equal(fallback.askAdapterPath, path.join(home, ".config", "web-agent-mcp", "ask-adapter.mjs"));
   assert.equal(fallback.askAdapter, undefined);
   assert.equal(loadConfig({ HOME: home, WEB_AGENT_ASK_ADAPTER: " /opt/adapters/mine.mjs " }).askAdapter, "/opt/adapters/mine.mjs");
+});
+
+test("response bodies are fetched for agent tabs and watched tabs, never above the size limit", () => {
+  const html = { "content-type": "text/html" };
+  assert.equal(shouldRetainBody({ owner: "session-1" }, html), true);
+  assert.equal(shouldRetainBody({ owner: "orphaned" }, html), true);
+  assert.equal(shouldRetainBody({ owner: "browser" }, html), false);
+  assert.equal(shouldRetainBody({ owner: "browser", captureBodies: true }, html), true);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { ...html, "content-length": String(2 * 1024 * 1024) }), false);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { "content-type": "image/png" }), false);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { "content-type": "text/event-stream" }), false);
+});
+
+test("pruning runs at start and again on every interval", async () => {
+  const { startPruning } = await import("./server.ts");
+  let store = 0;
+  let log = 0;
+  const stop = startPruning({ store: { prune: async () => void (store += 1) }, log: { prune: async () => ((log += 1), 0), log: () => undefined } }, 40);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  stop();
+  assert.ok(store >= 3 && log >= 3, `store ${store}, log ${log}`);
+});
+
+test("the browser launches without a color scheme override so pages follow the system", async () => {
+  const { launchOptions } = await import("./browser.ts");
+  const options = launchOptions(loadConfig({ HOME: "/tmp/x", WEB_AGENT_HEADLESS: "true" }));
+  assert.equal(options.colorScheme, null);
+  assert.equal(options.viewport, null);
+});
+
+test("WEB_AGENT_AUTO_CONSENT defaults to accept and takes reject or off", () => {
+  assert.equal(loadConfig({ HOME: "/tmp/x" }).autoConsent, "accept");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: "reject" }).autoConsent, "reject");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: " OFF " }).autoConsent, "off");
+  assert.equal(loadConfig({ HOME: "/tmp/x", WEB_AGENT_AUTO_CONSENT: "maybe" }).autoConsent, "accept");
+});
+
+test("code after an await is time-limited unless async hooks are on and their stack cannot be repaired", async () => {
+  const scriptModule = new URL("./script.ts", import.meta.url).href;
+  const run = (hooks: boolean) =>
+    new Promise<string>((resolve) => {
+      const source = `
+        import { createHook } from "node:async_hooks";
+        if (${hooks}) createHook({ init() {} }).enable();
+        let repairable = true;
+        try { process.noDeprecation = true; repairable = typeof process.binding("async_wrap").popAsyncContext === "function"; } catch { repairable = false; }
+        const { canTimeMicrotasks } = await import(${JSON.stringify(scriptModule)});
+        process.stdout.write(JSON.stringify({ timed: await canTimeMicrotasks(), repairable }));
+      `;
+      const child = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "ignore"] });
+      let out = "";
+      child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+      child.once("exit", () => resolve(out));
+    });
+  assert.equal(JSON.parse(await run(false)).timed, true);
+  const hooked = JSON.parse(await run(true)) as { timed: boolean; repairable: boolean };
+  assert.equal(hooked.timed, hooked.repairable);
 });

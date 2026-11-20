@@ -29,6 +29,9 @@ const DOWNLOAD_SAVE_MS = 60_000;
 const CLOSED_OUTSIDE_LIMIT = 200;
 export const LEAVE_CANCELLED = "the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
 const PASSKEY_KEY = "webAgent.passkey";
+const ISOLATED_WORLD = "web-agent-isolated";
+export const ORPHAN_IDLE_MS = 30 * 60 * 1000;
+const ORPHAN_SWEEP_MS = 5 * 60 * 1000;
 
 export type ConsoleEntry = {
   level: string;
@@ -64,6 +67,8 @@ export type Tab = {
   page: Page;
   owner: string;
   createdAt: number;
+  lastUsedAt: number;
+  orphanedAt?: number;
   console: ConsoleEntry[];
   network: NetworkEntry[];
   events: TabEvent[];
@@ -75,6 +80,7 @@ export type Tab = {
   openerId?: string;
   lastSeenUrl?: string;
   closingByTool?: boolean;
+  captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
 };
 
@@ -93,6 +99,14 @@ function evictBodies(entries: NetworkEntry[], keep: NetworkEntry, budget: number
     total -= candidate.body.length;
     candidate.body = undefined;
   }
+}
+
+export function shouldRetainBody(tab: Pick<Tab, "owner" | "captureBodies">, headers: Record<string, string>) {
+  if (tab.owner === UNCLAIMED_OWNER && !tab.captureBodies) return false;
+  const contentType = headers["content-type"];
+  if (!isTextualMime(contentType) || isStreamingMime(contentType)) return false;
+  const length = Number(headers["content-length"]);
+  return !(Number.isFinite(length) && length > BODY_ENTRY_LIMIT);
 }
 
 export function pushEvent(tab: Tab, text: string | (() => string)) {
@@ -180,6 +194,25 @@ export function sandboxLaunchError(error: unknown, sandbox: boolean) {
   );
 }
 
+export function launchOptions(config: Config) {
+  return {
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    channel: config.executablePath ? undefined : config.channel,
+    executablePath: config.executablePath,
+    headless: config.headless,
+    viewport: null,
+    colorScheme: null,
+    locale: config.locale,
+    timezoneId: config.timezoneId,
+    acceptDownloads: true,
+    ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
+    chromiumSandbox: config.chromeSandbox,
+    args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", "--test-type", ...config.extraArgs],
+  };
+}
+
 export class BrowserManager {
   readonly config: Config;
   readonly profile = new ProfileSettings();
@@ -197,6 +230,9 @@ export class BrowserManager {
 
   constructor(config: Config) {
     this.config = config;
+    setInterval(() => {
+      if (this.running) void this.closeIdleOrphans().catch(() => undefined);
+    }, ORPHAN_SWEEP_MS).unref();
   }
 
   get running() {
@@ -245,21 +281,7 @@ export class BrowserManager {
     const lock = await clearStaleProfileLock(config.profileDir);
     if (lock === "cleared") logEvent("profile_lock_cleared", { profileDir: config.profileDir }, "warn");
     if (lock === "in-use") logEvent("profile_lock_in_use", { profileDir: config.profileDir }, "warn");
-    const context = await chromium.launchPersistentContext(config.profileDir, {
-      handleSIGINT: false,
-      handleSIGTERM: false,
-      handleSIGHUP: false,
-      channel: config.executablePath ? undefined : config.channel,
-      executablePath: config.executablePath,
-      headless: config.headless,
-      viewport: null,
-      locale: config.locale,
-      timezoneId: config.timezoneId,
-      acceptDownloads: true,
-      ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
-      chromiumSandbox: config.chromeSandbox,
-      args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", "--test-type", ...config.extraArgs],
-    }).catch((error: unknown) => {
+    const context = await chromium.launchPersistentContext(config.profileDir, launchOptions(config)).catch((error: unknown) => {
       throw sandboxLaunchError(error, config.chromeSandbox) ?? error;
     });
 
@@ -297,6 +319,7 @@ export class BrowserManager {
       page,
       owner: UNCLAIMED_OWNER,
       createdAt: Date.now(),
+      lastUsedAt: Date.now(),
       console: [],
       network: [],
       events: [],
@@ -374,8 +397,7 @@ export class BrowserManager {
         response,
       };
       pushBounded(tab.network, entry, NETWORK_LIMIT);
-      const contentType = response.headers()["content-type"];
-      if (isTextualMime(contentType) && !isStreamingMime(contentType)) {
+      if (shouldRetainBody(tab, response.headers())) {
         void response
           .body()
           .then((body) => this.retainBody(tab, entry, body))
@@ -494,6 +516,7 @@ export class BrowserManager {
   }
 
   markSeen(tab: Tab) {
+    tab.lastUsedAt = Date.now();
     if (!tab.page.isClosed()) tab.lastSeenUrl = tab.page.url();
   }
 
@@ -592,7 +615,9 @@ export class BrowserManager {
 
   claimIfOrphaned(id: string, owner: string) {
     const tab = this.tabs.get(id.trim());
-    if (tab?.owner === ORPHANED_OWNER) tab.owner = owner;
+    if (tab?.owner !== ORPHANED_OWNER) return;
+    tab.owner = owner;
+    tab.orphanedAt = undefined;
   }
 
   orphanTabsOf(owner: string) {
@@ -600,9 +625,27 @@ export class BrowserManager {
     for (const tab of this.tabs.values()) {
       if (tab.owner !== owner) continue;
       tab.owner = ORPHANED_OWNER;
+      tab.orphanedAt = Date.now();
       count += 1;
     }
     return count;
+  }
+
+  async closeIdleOrphans(now = Date.now()) {
+    const idle = this.listTabs().filter((tab) => tab.owner === ORPHANED_OWNER && now - Math.max(tab.orphanedAt ?? 0, tab.lastUsedAt) > ORPHAN_IDLE_MS);
+    let closed = 0;
+    for (const tab of idle) {
+      const url = tab.page.url();
+      const idleMinutes = Math.round((now - Math.max(tab.orphanedAt ?? 0, tab.lastUsedAt)) / 60_000);
+      try {
+        await this.closeTab(tab.id);
+        closed += 1;
+        logEvent("orphan_tab_closed", { tab: tab.id, url, idleMinutes });
+      } catch (error) {
+        logEvent("orphan_tab_close_failed", { tab: tab.id, url, error: error instanceof Error ? error.message : String(error) }, "warn");
+      }
+    }
+    return closed;
   }
 
   locate(tab: Tab, target: string): Locator {
@@ -633,6 +676,23 @@ export class BrowserManager {
       return evaluate(expression, undefined, undefined, false);
     }
     return page.evaluate(expression) as Promise<T>;
+  }
+
+  async evaluateIsolated<T>(page: Page, expression: string): Promise<T> {
+    if (this.config.engine === "patchright") return (await page.evaluate(expression)) as T;
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { frameTree } = (await session.send("Page.getFrameTree")) as { frameTree: { frame: { id: string } } };
+      const { executionContextId } = (await session.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: ISOLATED_WORLD })) as { executionContextId: number };
+      const evaluated = (await session.send("Runtime.evaluate", { expression, contextId: executionContextId, awaitPromise: true, returnByValue: true })) as {
+        result: { value?: unknown; type: string };
+        exceptionDetails?: { text?: string; exception?: { description?: string } };
+      };
+      if (evaluated.exceptionDetails) throw new Error(evaluated.exceptionDetails.exception?.description ?? evaluated.exceptionDetails.text ?? "evaluation failed");
+      return evaluated.result.value as T;
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
   }
 
   async drainConsole(tab: Tab) {

@@ -142,6 +142,48 @@ test("the daemon survives failures that used to be unhandled rejections", async 
     assert.match(stderr, /unhandled rejection kept the server running/);
   });
 
+  await t.test("a script listener that throws synchronously", async () => {
+    const other = await connect();
+    const otherTab = /Opened (t\d+)/.exec(await ok(other, "tab_open", { url: fixture.url }))?.[1] ?? "";
+    const result = await ok(session, "run_script", {
+      tab,
+      code: `page.on("framenavigated", (frame) => { JSON.parse(frame.url()); }); await page.goto(${JSON.stringify(`${fixture.url}/article`)}); await sleep(500); return "alive";`,
+    });
+    assert.match(result, /Returned: alive/);
+    assert.match(result, /Error in a framenavigated callback: .*JSON/);
+    await pause(500);
+    await assertAlive();
+    assert.match(await ok(other, "tabs_list"), new RegExp(`${otherTab} \\[yours\\]`));
+    assert.match(await ok(other, "tabs_list"), /Recent background errors[\s\S]*run_script callback/);
+    await ok(other, "tab_close", { tab: otherTab });
+  });
+
+  await t.test("synchronous code after an await is stopped by timeout_ms and by the slice limit", async () => {
+    const startedAt = Date.now();
+    const busy = await session.client.callTool({ name: "run_script", arguments: { timeout_ms: 1000, code: "await sleep(10); const end = Date.now() + 6000; while (Date.now() < end) {} return 'finished';" } });
+    const elapsed = Date.now() - startedAt;
+    assert.equal(busy.isError, true, textOf(busy));
+    assert.match(textOf(busy), /timed out after 1000 ms/);
+    assert.ok(elapsed < 2500, `stopped after ${elapsed} ms`);
+
+    const other = await connect();
+    const started = await ok(session, "run_script", { background: true, code: "await sleep(10); while (true) {}" });
+    const id = /job (j\d+)/.exec(started)?.[1] ?? "";
+    const loopStarted = Date.now();
+    await pause(300);
+    assert.match(await ok(other, "tabs_list"), /Output files/);
+    const answeredAfter = Date.now() - loopStarted;
+    assert.ok(answeredAfter < 15_000, `tabs_list answered after ${answeredAfter} ms`);
+    let status = "";
+    for (let attempt = 0; attempt < 50 && !/ failed /.test(status); attempt += 1) {
+      status = await ok(session, "jobs", { action: "status", id });
+      await pause(100);
+    }
+    assert.match(status, / failed /);
+    assert.match(status, /without awaiting anything/);
+    await assertAlive();
+  });
+
   await t.test("a job whose result file cannot be written", async () => {
     const started = await ok(session, "run_script", { background: true, code: "await sleep(1500); return 'value';" });
     const id = /job (j\d+)/.exec(started)?.[1] ?? "";

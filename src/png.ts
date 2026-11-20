@@ -93,6 +93,16 @@ function sampleAt(row: Buffer, rowStart: number, index: number, bitDepth: number
   return (byte >> shift) & ((1 << bitDepth) - 1);
 }
 
+export function isDecodablePng(bytes: Buffer) {
+  try {
+    checkSupported(readChunks(bytes).header);
+    return true;
+  } catch (error) {
+    if (error instanceof UnsupportedPngError) return false;
+    throw error;
+  }
+}
+
 export async function decodePng(bytes: Buffer): Promise<RgbaImage> {
   const { header, palette, transparency, data } = readChunks(bytes);
   const channels = checkSupported(header);

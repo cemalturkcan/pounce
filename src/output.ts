@@ -5,7 +5,7 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_SECRET_LENGTH = 4;
 
 export const RETAINED_KINDS = new Set(["pages", "downloads", "cookies", "har", "extract"]);
-export const RETENTION_NOTE = "Transient output older than 7 days is deleted when the server starts; pages, downloads, cookies, har and extract files are kept.";
+export const RETENTION_NOTE = "Transient output older than 7 days is deleted when the server starts and every 24 hours after; pages, downloads, cookies, har and extract files are kept.";
 
 type MaskedValue = { name: string; expiresAt?: number };
 
@@ -66,6 +66,10 @@ export class OutputStore {
   constructor(root: string, redactor?: Redactor) {
     this.root = root;
     this.redactor = redactor;
+  }
+
+  redact(text: string) {
+    return this.redactor ? this.redactor.redact(text) : text;
   }
 
   async write(kind: string, name: string, content: string | Buffer, options: WriteOptions = {}) {

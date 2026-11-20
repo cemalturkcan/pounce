@@ -169,61 +169,33 @@ export function diffImages(reference: RgbaImage, page: RgbaImage, options: { tol
 
 type Cluster = { left: number; top: number; right: number; bottom: number; pixels: number };
 
-function cellClusters(diff: DiffResult, mergeGap: number) {
-  const cell = Math.max(1, Math.floor(mergeGap / 2));
-  const reach = Math.max(1, Math.ceil(mergeGap / cell));
-  const columns = Math.ceil(diff.width / cell);
-  const rows = Math.ceil(diff.height / cell);
-  const cells = new Map<number, Cluster>();
-  for (let y = 0; y < diff.height; y += 1) {
-    for (let x = 0; x < diff.width; x += 1) {
-      if (!diff.mask[y * diff.width + x]) continue;
-      const key = Math.floor(y / cell) * columns + Math.floor(x / cell);
-      const found = cells.get(key);
-      if (found) {
-        found.left = Math.min(found.left, x);
-        found.right = Math.max(found.right, x);
-        found.top = Math.min(found.top, y);
-        found.bottom = Math.max(found.bottom, y);
-        found.pixels += 1;
-      } else cells.set(key, { left: x, right: x, top: y, bottom: y, pixels: 1 });
-    }
+class DisjointSet {
+  private readonly parent: Int32Array;
+
+  constructor(size: number) {
+    this.parent = new Int32Array(size);
+    for (let index = 0; index < size; index += 1) this.parent[index] = index;
   }
-  const seen = new Set<number>();
-  const clusters: Cluster[] = [];
-  for (const start of cells.keys()) {
-    if (seen.has(start)) continue;
-    seen.add(start);
-    const stack = [start];
-    const merged: Cluster = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity, pixels: 0 };
-    while (stack.length) {
-      const key = stack.pop() ?? 0;
-      const current = cells.get(key);
-      if (!current) continue;
-      merged.left = Math.min(merged.left, current.left);
-      merged.top = Math.min(merged.top, current.top);
-      merged.right = Math.max(merged.right, current.right);
-      merged.bottom = Math.max(merged.bottom, current.bottom);
-      merged.pixels += current.pixels;
-      const cx = key % columns;
-      const cy = Math.floor(key / columns);
-      for (let dy = -reach; dy <= reach; dy += 1) {
-        for (let dx = -reach; dx <= reach; dx += 1) {
-          const nx = cx + dx;
-          const ny = cy + dy;
-          if (nx < 0 || ny < 0 || nx >= columns || ny >= rows) continue;
-          const neighbour = ny * columns + nx;
-          if (seen.has(neighbour) || !cells.has(neighbour)) continue;
-          const other = cells.get(neighbour);
-          if (!other || gapBetween(current, other) > mergeGap) continue;
-          seen.add(neighbour);
-          stack.push(neighbour);
-        }
-      }
+
+  find(index: number): number {
+    let root = index;
+    while (this.parent[root] !== root) root = this.parent[root] ?? root;
+    let current = index;
+    while (current !== root) {
+      const next = this.parent[current] ?? root;
+      this.parent[current] = root;
+      current = next;
     }
-    clusters.push(merged);
+    return root;
   }
-  return clusters;
+
+  union(a: number, b: number) {
+    const left = this.find(a);
+    const right = this.find(b);
+    if (left === right) return false;
+    this.parent[Math.max(left, right)] = Math.min(left, right);
+    return true;
+  }
 }
 
 function gapBetween(a: Cluster, b: Cluster) {
@@ -232,24 +204,104 @@ function gapBetween(a: Cluster, b: Cluster) {
   return Math.max(dx, dy);
 }
 
-function mergeClose(clusters: Cluster[], mergeGap: number) {
-  const pending = [...clusters];
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < pending.length && !changed; i += 1) {
-      for (let j = i + 1; j < pending.length; j += 1) {
-        const a = pending[i];
-        const b = pending[j];
-        if (!a || !b || gapBetween(a, b) > mergeGap) continue;
-        pending[i] = { left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom), pixels: a.pixels + b.pixels };
-        pending.splice(j, 1);
-        changed = true;
-        break;
+function mergeGroups(clusters: Cluster[], sets: DisjointSet) {
+  const merged = new Map<number, Cluster>();
+  clusters.forEach((cluster, index) => {
+    const root = sets.find(index);
+    const target = merged.get(root);
+    if (!target) {
+      merged.set(root, { ...cluster });
+      return;
+    }
+    target.left = Math.min(target.left, cluster.left);
+    target.top = Math.min(target.top, cluster.top);
+    target.right = Math.max(target.right, cluster.right);
+    target.bottom = Math.max(target.bottom, cluster.bottom);
+    target.pixels += cluster.pixels;
+  });
+  return [...merged.values()];
+}
+
+function cellClusters(diff: DiffResult, mergeGap: number) {
+  const cell = Math.max(1, Math.floor(mergeGap / 2));
+  const reach = Math.max(1, Math.ceil(mergeGap / cell));
+  const columns = Math.ceil(diff.width / cell);
+  const rows = Math.ceil(diff.height / cell);
+  const slot = new Int32Array(columns * rows).fill(-1);
+  const cells: Cluster[] = [];
+  const keys: number[] = [];
+  for (let y = 0; y < diff.height; y += 1) {
+    const rowKey = Math.floor(y / cell) * columns;
+    for (let x = 0; x < diff.width; x += 1) {
+      if (!diff.mask[y * diff.width + x]) continue;
+      const key = rowKey + Math.floor(x / cell);
+      const index = slot[key] ?? -1;
+      if (index === -1) {
+        slot[key] = cells.length;
+        keys.push(key);
+        cells.push({ left: x, right: x, top: y, bottom: y, pixels: 1 });
+        continue;
       }
+      const found = cells[index] as Cluster;
+      if (x < found.left) found.left = x;
+      if (x > found.right) found.right = x;
+      found.bottom = y;
+      found.pixels += 1;
     }
   }
-  return pending;
+  const sets = new DisjointSet(cells.length);
+  cells.forEach((current, index) => {
+    const key = keys[index] ?? 0;
+    const cx = key % columns;
+    const cy = Math.floor(key / columns);
+    for (let dy = 0; dy <= reach; dy += 1) {
+      for (let dx = -reach; dx <= reach; dx += 1) {
+        if (dy === 0 && dx <= 0) continue;
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= columns || ny >= rows) continue;
+        const other = slot[ny * columns + nx] ?? -1;
+        if (other === -1 || gapBetween(current, cells[other] as Cluster) > mergeGap) continue;
+        sets.union(index, other);
+      }
+    }
+  });
+  return mergeGroups(cells, sets);
+}
+
+function mergeClose(clusters: Cluster[], mergeGap: number) {
+  let current = clusters;
+  const bucketSize = Math.max(64, mergeGap * 4);
+  const half = Math.ceil(mergeGap / 2);
+  for (;;) {
+    const sets = new DisjointSet(current.length);
+    const buckets = new Map<number, number[]>();
+    let merged = false;
+    current.forEach((cluster, index) => {
+      const left = Math.floor(Math.max(0, cluster.left - half) / bucketSize);
+      const right = Math.floor((cluster.right + half) / bucketSize);
+      const top = Math.floor(Math.max(0, cluster.top - half) / bucketSize);
+      const bottom = Math.floor((cluster.bottom + half) / bucketSize);
+      for (let by = top; by <= bottom; by += 1) {
+        for (let bx = left; bx <= right; bx += 1) {
+          const key = by * 1_000_003 + bx;
+          const members = buckets.get(key);
+          if (!members) {
+            buckets.set(key, [index]);
+            continue;
+          }
+          for (const other of members) {
+            if (sets.find(other) === sets.find(index) || gapBetween(cluster, current[other] as Cluster) > mergeGap) continue;
+            sets.union(other, index);
+            merged = true;
+          }
+          members.push(index);
+        }
+      }
+    });
+    if (!merged) return current;
+    current = mergeGroups(current, sets);
+  }
 }
 
 export function clusterRegions(diff: DiffResult, options: { minArea: number; mergeGap: number }): Region[] {

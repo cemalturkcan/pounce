@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT, FEED_TOTAL, FRAME_TEXT, SPA_TEXT } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT, stallRequests, SPA_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -192,7 +192,8 @@ test("browser flow", async (t) => {
     assert.match(await ok("evaluate", { tab, expression: "document.title" }), /Fixture Home/);
     assert.match(await ok("evaluate", { tab, expression: "() => window.appState.ready" }), /true/);
     assert.match(await ok("evaluate", { tab, expression: "const n = 20; return n + 1;" }), /21/);
-    assert.match(await ok("evaluate", { tab, expression: "typeof window.appState", world: "isolated" }), /undefined|object/);
+    assert.match(await ok("evaluate", { tab, expression: "typeof window.appState", world: "isolated" }), /undefined$/);
+    assert.match(await ok("evaluate", { tab, expression: "document.title", world: "isolated" }), /Fixture Home$/);
   });
 
   await t.test("dialogs are accepted and reported", async () => {
@@ -559,17 +560,16 @@ test("browser flow", async (t) => {
     assert.equal((await call("site_notes", { action: "append", tab })).isError, true);
   });
 
-  await t.test("dismiss_overlays rejects cookie banners, closes modals and handles iframes", async () => {
-    await ok("navigate", { tab, url: `${fixture.url}/consent` });
-    const text = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.match(text, /Clicked "reject all" \(reject\) in #cookie-banner, main frame/);
-    assert.match(text, /Clicked "kapat" \(close\)/);
-    assert.match(text, /Clicked "alle ablehnen" \(reject\) in #consent, frame/);
+  await t.test("navigate accepts cookie banners and dismiss_overlays closes modals and handles iframes", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/consent` }), /^Event: accepted the cookie banner \(Accept all\)$/m);
+    const text = await ok("dismiss_overlays", { tab, consent: "reject" });
+    assert.match(text, /Clicked "Kapat" \(close\)/);
+    assert.doesNotMatch(text, /Accept all|Reject all/);
     const state = await ok("evaluate", {
       tab,
       expression: "[...['status', 'modal-state', 'frame-state']].map((id) => document.getElementById(id).textContent).join('|')",
     });
-    assert.match(state, /rejected\|modal closed\|frame rejected/);
+    assert.match(state, /accepted\|modal closed\|frame accepted/);
     assert.match(await ok("dismiss_overlays", { tab }), /No cookie banner or modal/);
   });
 
@@ -696,6 +696,40 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab });
   });
 
+  await t.test("routes, listeners, bindings and init scripts of a script end with it", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const registered = await ok("run_script", {
+      tab,
+      code: [
+        `await context.route("**/*", (route) => route.abort());`,
+        `await page.route("**/*", (route) => route.abort());`,
+        `await context.addInitScript(() => { window.__scriptLeak = "init script"; });`,
+        `await context.exposeBinding("scriptLeakBinding", () => "binding");`,
+        `page.on("request", () => log("listener still attached"));`,
+        `return "registered";`,
+      ].join("\n"),
+    });
+    assert.match(registered, /Returned: registered/);
+    const other = openedTab(await ok("tab_open", { url: `${fixture.url}/article` }));
+    assert.match(await ok("read_text", { tab: other }), /Paragraph 7 of/);
+    assert.equal(await ok("evaluate", { tab: other, expression: "typeof window.__scriptLeak + ' ' + typeof window.scriptLeakBinding" }).then((text) => text.split("\n").pop()), "undefined undefined");
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/article` }), /HTTP 200/);
+    const timedOut = await call("run_script", { tab, timeout_ms: 1000, code: `await page.route("**/*", (route) => route.abort()); await sleep(5000);` });
+    assert.match(timedOut.text, /timed out/);
+    assert.match(await ok("navigate", { tab, url: fixture.url }), /HTTP 200/);
+    await ok("tab_close", { tab: other });
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("a synchronous loop before the first await is stopped by timeout_ms", async () => {
+    const startedAt = Date.now();
+    const busy = await call("run_script", { timeout_ms: 1000, code: "const end = Date.now() + 6000; while (Date.now() < end) {} return 'finished';" });
+    const elapsed = Date.now() - startedAt;
+    assert.equal(busy.isError, true, busy.text);
+    assert.match(busy.text, /timed out after 1000 ms/);
+    assert.ok(elapsed < 2500, `stopped after ${elapsed} ms`);
+  });
+
   await t.test("run_script save() defaults to .txt", async () => {
     const text = await ok("run_script", { code: "return await save('report', 'plain text');" });
     assert.match(text, /-report\.txt$/m);
@@ -704,15 +738,12 @@ test("review regressions", async (t) => {
   await t.test("dismiss_overlays never clicks commit buttons", async () => {
     const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/checkout` }));
     const text = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.match(text, /Clicked "vazgeç" \(cancel\)/);
+    assert.match(text, /Clicked "Vazgeç" \(cancel\)/);
     assert.doesNotMatch(text, /onayla|payment/i);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
     const again = await ok("dismiss_overlays", { tab, allow_accept: true });
     assert.doesNotMatch(again, /Clicked/);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
-    await ok("navigate", { tab, url: `${fixture.url}/consent` });
-    const defaults = await ok("dismiss_overlays", { tab });
-    assert.match(defaults, /Clicked "reject all"/);
     await ok("tab_close", { tab });
   });
 
@@ -746,6 +777,23 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab });
   });
 
+  await t.test("collected files and ask_pages prompts mask stored secrets", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("fill", { tab, target: "#password", secret: "fixture/site" });
+    await ok("tab_close", { tab });
+    const page = `data:text/html,<title>Account</title><main><h1>Account</h1><p>Your key is ${TEST_SECRET}</p><table><tr><td>password</td><td>${TEST_SECRET}</td></tr></table><a href="/x?k=${TEST_SECRET}">link</a></main>`;
+    const collected = await ok("collect_pages", { urls: [page], include: ["text", "markdown", "snapshot", "structured", "links"] });
+    const dir = /into (\S+)/.exec(collected)?.[1] ?? "";
+    for (const name of await readdir(dir)) {
+      const content = await readFile(path.join(dir, name), "utf8");
+      assert.ok(!content.includes(TEST_SECRET), `secret leaked into ${name}`);
+    }
+    askPrompts.length = 0;
+    await ok("ask_pages", { question: "What is the key?", dir });
+    assert.ok(askPrompts.length > 0);
+    assert.ok(askPrompts.every((prompt) => !prompt.includes(TEST_SECRET)), "secret sent to the model");
+  });
+
   await t.test("evaluate runs code once and reports runtime errors", async () => {
     const tab = openedTab(await ok("tab_open", { url: fixture.url }));
     const before = fixture.hits();
@@ -777,6 +825,35 @@ test("review regressions", async (t) => {
     assert.ok(Date.now() - collectStart < 15_000);
     await pause(300);
     assert.equal(deps.manager.listTabs().length, before);
+  });
+
+  await t.test("page reads on a hung tab fail instead of waiting forever", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("evaluate", { tab, expression: "setTimeout(() => { for (;;) {} }, 50); 'armed'" });
+    await pause(300);
+    const started = Date.now();
+    const results = await Promise.all([
+      call("read_text", { tab }),
+      call("extract", { tab }),
+      call("storage", { tab, action: "list", area: "local" }),
+      call("scroll", { tab, direction: "bottom" }),
+    ]);
+    assert.ok(Date.now() - started < 40_000, `took ${Date.now() - started} ms`);
+    for (const result of results) {
+      assert.equal(result.isError, true, result.text);
+      assert.match(result.text, /did not finish within \d+ s/);
+    }
+    await ok("tab_close", { tab, force: true });
+  });
+
+  await t.test("request from_request does not ask for an encoding it cannot decode", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/zstd` }));
+    const list = await ok("network_requests", { tab, pattern: "/zstd" });
+    const id = Number(/#(\d+) GET 200/.exec(list)?.[1]);
+    assert.ok(id, list);
+    const replay = await ok("request", { tab, from_request: id });
+    assert.match(replay, /"item-19"/);
+    await ok("tab_close", { tab });
   });
 
   await t.test("streaming responses do not hang network tools", async () => {
@@ -846,6 +923,46 @@ test("review regressions", async (t) => {
     const text = await ok("click", { tab, target: "#noop" });
     assert.match(text, /Earlier event .*"from before"/);
     await ok("tab_close", { tab });
+  });
+
+  await t.test("a failed tab_open names the tab it opened and keeps it", async () => {
+    const failed = await call("tab_open", { url: "http://127.0.0.1:9/" });
+    assert.equal(failed.isError, true);
+    const tab = /Tab (t\d+) was opened/.exec(failed.text)?.[1] ?? "";
+    assert.ok(tab, failed.text);
+    assert.match(await ok("tabs_list"), new RegExp(`^${tab} \\[yours\\]`, "m"));
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("orphaned tabs close after 30 idle minutes", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const kept = openedTab(await ok("tab_open", { url: fixture.url }));
+    assert.ok(deps.manager.orphanTabsOf("stdio") >= 2);
+    for (const other of deps.manager.listTabs()) if (other.id !== tab) deps.manager.claimIfOrphaned(other.id, "stdio");
+    assert.equal(await deps.manager.closeIdleOrphans(Date.now() + 10 * 60_000), 0);
+    assert.equal(await deps.manager.closeIdleOrphans(Date.now() + 31 * 60_000), 1);
+    assert.doesNotMatch(await ok("tabs_list"), new RegExp(`^${tab} `, "m"));
+    assert.match(await ok("tabs_list"), new RegExp(`^${kept} \\[yours\\]`, "m"));
+    await ok("tab_close", { tab: kept });
+  });
+
+  await t.test("response bodies of a user tab are fetched only after a network tool asked for it", async () => {
+    const context = await deps.manager.ensureContext();
+    const page = await context.newPage();
+    try {
+      await page.goto(fixture.url);
+      await page.click("#load");
+      await pause(600);
+      const tab = deps.manager.tabOf(page);
+      assert.ok(tab && tab.network.length > 0);
+      assert.equal(tab.network.filter((entry) => entry.body).length, 0);
+      assert.match(await ok("network_requests", { tab: tab.id }), /GET 200/);
+      await page.reload();
+      await pause(600);
+      assert.ok(tab.network.some((entry) => entry.body), "no body was kept after network_requests asked for the tab");
+    } finally {
+      await page.close();
+    }
   });
 
   await t.test("tab_open does not take over an unclaimed popup", async () => {
@@ -1321,6 +1438,41 @@ test("ask_pages edge cases through the tool", async (t) => {
     await t.test("urls are collected and sent through the injected adapter", async () => {
       const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`] });
       assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);
+    });
+
+    await t.test("the raw reply of every call is saved next to the answers", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", files });
+      const dir = /^Raw model replies: (\S+)$/m.exec(text)?.[1] ?? "";
+      assert.ok(dir, text);
+      const names = (await readdir(dir)).sort();
+      assert.deepEqual(names, ["call-1.txt"]);
+      assert.match(await readFile(path.join(dir, "call-1.txt"), "utf8"), /^- seen \[/m);
+    });
+
+    await t.test("urls that fail to load are reported as not loaded", async () => {
+      const dead = "http://127.0.0.1:9/";
+      const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`, dead], images: "none" });
+      assert.match(text, /^Not loaded: http:\/\/127\.0\.0\.1:9\/ — .*net::ERR_/m);
+      const saved = /Full answers: (\S+)/.exec(text)?.[1] ?? "";
+      assert.match(await readFile(saved, "utf8"), /^Not loaded: http:\/\/127\.0\.0\.1:9\/ — /m);
+      const none = await call("ask_pages", { question: "What is here?", urls: [dead, "http://127.0.0.1:9/second"], images: "none" });
+      assert.equal(none.isError, true);
+      assert.match(none.text, /No page loaded/);
+      assert.match(none.text, /127\.0\.0\.1:9\/second — /);
+    });
+
+    await t.test("cancelling ask_pages with urls stops the collection", async () => {
+      const before = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+      const controller = new AbortController();
+      const urls = Array.from({ length: 12 }, (_value, index) => `${fixture.url}/stall?${index}`);
+      const pending = client.callTool({ name: "ask_pages", arguments: { question: "What is here?", urls, images: "none" } }, undefined, { signal: controller.signal, timeout: 120_000 });
+      await pause(1500);
+      controller.abort();
+      await assert.rejects(pending);
+      await pause(1500);
+      const after = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+      assert.ok(after <= before, `tabs still open: ${after} > ${before}`);
+      assert.ok(stallRequests() <= 6, `collection kept going: ${stallRequests()} stalled requests`);
     });
   } finally {
     failAll = false;

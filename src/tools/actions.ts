@@ -10,7 +10,7 @@ import { describePage, runAction } from "../page.ts";
 import { registerSecret } from "../script.ts";
 import type { SecretField } from "../secrets.ts";
 import { describeOverlayClicks, dismissOverlays } from "../overlays.ts";
-import { cancelled, defineTool, includeDiffParam, includeSnapshotParam, NO_DOM_CHANGE, tabParam, targetParam, timeoutParam, type ToolDeps } from "./common.ts";
+import { cancelled, defineTool, includeDiffParam, includeSnapshotParam, NO_DOM_CHANGE, pageBound, tabParam, targetParam, timeoutParam, type ToolDeps } from "./common.ts";
 
 export function registerActionTools(server: McpServer, deps: ToolDeps) {
   const { manager, store, secrets, redactor } = deps;
@@ -155,7 +155,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     title: "Fill field",
     description: [
       "Set the value of one form control: types into text inputs and textareas, picks an option in a <select> by label or value, and checks or unchecks checkboxes and radios (text \"true\" or \"false\"). Replaces the existing value, and says when the page reformatted or rejected it. Rich-text editors (contenteditable, or an iframe whose body is editable) are filled with line breaks kept. A custom control that is not a text field (a role=combobox or listbox button, a read-only date or option picker) is clicked open and the visible option whose name matches text is picked; if none matches, the error lists the options or says to click, snapshot and click the option yourself.",
-      "To enter a stored credential, pass secret, a name from secrets_list, instead of text: the server reads the value from the password store and types it without returning it. Passwords and other secret fields are then masked in later results and written files (also in JSON- and URL-encoded form), one-time codes for 2 minutes; usernames are not masked, and raw exports (cookies export, network_export, storage export) are not either.",
+      "To enter a stored credential, pass secret, a name from secrets_list, instead of text: the server reads the value from the password store and types it without returning it. Passwords and other secret fields are then masked, also in JSON- and URL-encoded form and one-time codes for 2 minutes, in later tool results, in the text files the server writes (collect_pages files, overflow files, reports, script and job output), in page text sent to the ask_pages model and in the server log. They are not masked in usernames, raw exports (cookies export, network_export, storage export), downloads, binary files and screenshots.",
       "For several fields of one form, fill_form fills them in one call and reports invalid fields; for file inputs use upload.",
     ].join("\n"),
     input: {
@@ -358,7 +358,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
             return `Scrolled ${input.target} into view.`;
           }
           if (direction === "top" || direction === "bottom") {
-            await tab.page.evaluate((toBottom) => window.scrollTo(0, toBottom ? document.documentElement.scrollHeight : 0), direction === "bottom");
+            await pageBound(tab.page.evaluate((toBottom) => window.scrollTo(0, toBottom ? document.documentElement.scrollHeight : 0), direction === "bottom"), "scroll");
             return `Scrolled to the ${direction}.`;
           }
           const horizontal = direction === "left" ? -amount : direction === "right" ? amount : 0;
@@ -447,18 +447,19 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
     name: "dismiss_overlays",
     title: "Dismiss cookie banners and modals",
     description: [
-      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that closes each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it prefers reject all, then only necessary, then close or cancel, and clicks accept only with allow_accept and when nothing else is offered. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never a confirm, continue, order or pay button. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found.",
-      "Use it when a banner or pop-up covers the page, or a click reports that another element intercepts pointer events. It does not install anything that runs later, so call it again after a navigation if a new banner appears. A dialog that asks to confirm an order or payment the task wants is answered with click.",
+      "Make one pass over the page and its iframes, find cookie and consent banners, newsletter pop-ups and other modals, and click the control that dismisses each one. In consent banners (marked as cookie, consent, GDPR, privacy, KVKK, Datenschutz or a known consent platform, or mentioning cookies) it clicks accept all (accept all, allow all, agree, OK, tümünü kabul et, alle akzeptieren, tout accepter, aceptar todo and the like), falling back to close or cancel; with consent: reject it prefers reject all, then only necessary, then close or cancel, and accepts only when nothing else is offered and allow_accept is not false. In any other dialog or pop-up it clicks only a close or cancel control (close, ×, no thanks, cancel, vazgeç, iptal and the like), never an accept, confirm, continue, order or pay button, and a button whose name contains an order or payment word is never clicked anywhere. Buttons are recognised by their accessible name in English, Turkish, German, French and Spanish. Reports what it clicked, what it left alone, or that nothing was found.",
+      "tab_open, navigate and collect_pages already accept cookie banners on the agent's own tabs by themselves (WEB_AGENT_AUTO_CONSENT=accept, reject or off on the server), so call this when a banner or pop-up still covers the page, or a click reports that another element intercepts pointer events. It does not install anything that runs later. A dialog that asks to confirm an order or payment the task wants is answered with click.",
     ].join("\n"),
     input: {
       tab: tabParam,
-      allow_accept: z.boolean().optional().describe("In a consent banner that offers no reject, close or cancel control, click its accept or OK button. Default false."),
+      consent: z.enum(["accept", "reject"]).optional().describe("What to click in a consent banner: accept (default) or reject."),
+      allow_accept: z.boolean().optional().describe("With consent: reject, click accept in a consent banner that offers no reject, close or cancel control. Default true."),
       include_snapshot: includeSnapshotParam,
     },
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
-      const allowAccept = input.allow_accept ?? false;
-      return runAction(manager, store, tab, async () => describeOverlayClicks(await dismissOverlays(tab.page, allowAccept), allowAccept), {
+      const options = { consent: input.consent ?? ("accept" as const), allowAccept: input.allow_accept ?? true };
+      return runAction(manager, store, tab, async () => describeOverlayClicks(await dismissOverlays(tab.page, options)), {
         includeSnapshot: input.include_snapshot,
       });
     },

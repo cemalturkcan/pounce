@@ -10,7 +10,7 @@ import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
 import { untrusted } from "./output.ts";
 import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "./settle.ts";
-import { clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
+import { cancelled, clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
 import { registerTabTools } from "./tools/tabs.ts";
 import { registerPageReadTools } from "./tools/page-read.ts";
 import { registerActionTools } from "./tools/actions.ts";
@@ -45,7 +45,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       "Give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. The model sees only the page text and screenshots, so it cannot click, follow links or check anything; for work that needs that, use run_script. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
       "Screenshots: with tabs or urls, images auto (the default in answer mode) also sends a viewport screenshot of pages that look visual (little text for their size, mostly images, canvas, video or SVG, or no text), viewport sends one for every page, full sends the whole page as overlapping 1600 px tall tiles, none sends text only; regions adds element screenshots by ref or selector. Images go into the same call as their page's text and findings read from them cite that page. The images are saved to files listed in the result, never returned inline; each image costs about as much as 6000 characters of text.",
       "There are no default limits: pages are not clipped, a call takes as many pages as fit about 3 million characters, the output limit is the model maximum, and a model call has no time limit (timeout_ms sets one; the client can always cancel). A call that exceeds the model's context window is split in half and retried, down to single pages; a page too large on its own is reported as failed. Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); lower batch_chars, max_chars_per_page or max_output_tokens to trade completeness for speed and cost. A call cut off at the output limit is listed with its partial answers.",
-      "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix.",
+      "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped; with urls, a page that failed to load is listed as \"Not loaded: <url> — <reason>\", and the call fails when none loaded. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix. Stored secrets in the page text are masked before it is sent. The raw reply of every model call is saved in a folder named in the result, next to the full answers.",
     ].join("\n"),
     input: {
       mode: z.enum(["answer", "review"]).optional().describe("answer (default) returns facts with their source page. review checks the pages for visual and layout problems and returns one line per issue, \"- [high|medium|low] <page>, <where>: <issue>\", sorted by severity, plus the pages with no issues; question is then the review brief, and images default to full."),
@@ -75,6 +75,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const wantsImages = imageMode !== "none" || regions.length > 0;
       const shots = new Map<string, PageImages>();
       const imageLines: string[] = [];
+      const notLoaded: string[] = [];
       let imageDir: string | undefined;
       if (input.files) {
         const names = sourceNames(input.files);
@@ -84,31 +85,35 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
           documents.push({ source: names[index] ?? path.basename(file), text });
         }
       } else if (input.dir || input.urls) {
-        const dir = input.dir
-          ? input.dir
-          : (
-              await collectPages(manager, store, owner, {
-                urls: input.urls ?? [],
-                include: ["markdown"],
-                scope: "main",
-                concurrency: 6,
-                waitUntil: "domcontentloaded",
-                settleMs: DEFAULT_QUIET_MS,
-                maxWaitMs: DEFAULT_MAX_WAIT_MS,
-                timeoutMs: 30_000,
-                fullPage: false,
-                previewChars: 0,
-                label: "ask",
-                capture: wantsImages
-                  ? async (tab, base, dir) => {
-                      imageDir = dir;
-                      const captured = await capturePageImages(manager, tab, { mode: imageMode, regions, source: `${base}.md`, dir, base });
-                      shots.set(`${base}.md`, captured);
-                      return captured.files.map((file) => path.basename(file));
-                    }
-                  : undefined,
-              })
-            ).dir;
+        let dir = input.dir;
+        if (!dir) {
+          const collected = await collectPages(manager, store, owner, {
+            urls: input.urls ?? [],
+            include: ["markdown"],
+            scope: "main",
+            concurrency: 6,
+            waitUntil: "domcontentloaded",
+            settleMs: DEFAULT_QUIET_MS,
+            maxWaitMs: DEFAULT_MAX_WAIT_MS,
+            timeoutMs: 30_000,
+            fullPage: false,
+            previewChars: 0,
+            label: "ask",
+            signal,
+            capture: wantsImages
+              ? async (tab, base, dir) => {
+                  imageDir = dir;
+                  const captured = await capturePageImages(manager, tab, { mode: imageMode, regions, source: `${base}.md`, dir, base });
+                  shots.set(`${base}.md`, captured);
+                  return captured.files.map((file) => path.basename(file));
+                }
+              : undefined,
+          });
+          if (signal.aborted) throw cancelled();
+          dir = collected.dir;
+          notLoaded.push(...collected.results.filter((result) => result.error).map((result) => `Not loaded: ${result.url} — ${result.error}`));
+          if (collected.results.every((result) => result.error)) throw new ToolError(`No page loaded, so nothing was asked.\n${notLoaded.join("\n")}`);
+        }
         const names = await readdir(dir).catch(() => undefined);
         if (!names) throw new ToolError(`Cannot read the folder ${dir}.`);
         const markdown = new Set(names.filter((name) => name.endsWith(".md")).map((name) => name.slice(0, -3)));
@@ -136,7 +141,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const model = modelId(input.model ?? "haiku");
       const report = await askPages(adapter, {
         question: input.question,
-        documents,
+        documents: documents.map((document) => ({ ...document, source: deps.redactor.redact(document.source), text: deps.redactor.redact(document.text) })),
         batchChars: input.batch_chars ?? DEFAULT_BATCH_CHARS,
         maxPagesPerBatch: input.max_pages_per_batch,
         maxCharsPerPage: input.max_chars_per_page,
@@ -150,10 +155,19 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const prepared = [...shots.values()].flatMap((captured) => captured.prepared);
       const sentLine = prepared.length ? `\n${describeSent(prepared)}` : "";
       const imageFooter = imageLines.length || prepared.length ? `\n\nScreenshots (${prepared.length} sent${imageDir && prepared.length ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}${sentLine}` : "";
-      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${imageFooter}`;
-      const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
-      if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
-      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;
+      const notLoadedBlock = notLoaded.length ? `\n\n${notLoaded.join("\n")}` : "";
+      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${notLoadedBlock}${imageFooter}`;
+      const answersName = store.uniqueName(input.question, "md");
+      const rawName = answersName.replace(/\.md$/, ".raw");
+      const replies = report.batches.filter((batch) => batch.reply !== undefined);
+      if (replies.length) await store.dir("ask", rawName);
+      for (const batch of replies) await store.write("ask", path.join(rawName, `call-${batch.index}.txt`), batch.reply ?? "");
+      const rawLine = replies.length ? `\nRaw model replies: ${path.join(store.root, "ask", rawName)}` : "";
+      const withRaw = `${rendered}${rawLine}`;
+      const reportJson = JSON.stringify({ ...report, batches: report.batches.map(({ reply: _reply, ...batch }) => batch) }, null, 2);
+      const file = await store.write("ask", answersName, `${withRaw}\n\n<!-- raw -->\n${reportJson}\n`);
+      if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${withRaw}`, `Full report: ${file}`);
+      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}${rawLine}\nFull answers: ${file}`;
       return untrusted(`${documents.length} page(s), answered by ${adapter.name}`, body);
     },
   });

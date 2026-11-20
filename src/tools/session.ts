@@ -18,7 +18,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     name: "secrets_list",
     title: "List stored secrets",
     description:
-      "List the names of entries in the user's password store, without their values. Use it before signing in to a site: a matching name goes to fill or fill_form as secret (with secret_field username, password or otp), and the server types the value, which you never see. Passwords and other secret fields are then masked in tool results and written files (one-time codes for 2 minutes, usernames not at all, raw exports excepted). For a site that answers with the browser's own login dialog, pass the name to http_auth instead.",
+      "List the names of entries in the user's password store, without their values. Use it before signing in to a site: a matching name goes to fill or fill_form as secret (with secret_field username, password or otp), and the server types the value, which you never see. Passwords and other secret fields are then masked in tool results, in the text files the server writes, in page text sent to the ask_pages model and in the server log (one-time codes for 2 minutes); usernames, raw exports (cookies export, network_export, storage export), downloads, binary files and screenshots are not masked. For a site that answers with the browser's own login dialog, pass the name to http_auth instead.",
     input: {
       query: z.string().optional().describe("Keep only names containing this, case-insensitive, for example a site name."),
     },
@@ -71,7 +71,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     title: "Grant or clear site permissions",
     description: [
       "Grant browser permissions (geolocation, notifications, camera, microphone, clipboard-read, clipboard-write and others) to an origin, or clear the grants this tool made. Use it when a site asks for location, notifications, camera, microphone or clipboard access: the native permission prompt, the bubble under the address bar, is browser UI and not part of the page, so snapshot, click and dismiss_overlays cannot see or answer it. Grant the permission here, then reload or repeat the page action that asked.",
-      "Grants apply to that origin in every tab of the shared profile, add up across calls, and last until cleared or until the browser restarts. Clearing also drops a geolocation grant made by emulate.",
+      "Grants apply to that origin in every tab of the shared profile and add up across calls. The server keeps them and applies them again when the browser relaunches, so they last until cleared or until the server restarts; they are not saved in the profile. Clearing also drops a geolocation grant made by emulate.",
     ].join("\n"),
     input: {
       action: z.enum(["grant", "clear"]).describe("grant adds the permissions in grant for the origin; clear removes every grant of the origin (of all origins when neither origin nor tab is given)."),
