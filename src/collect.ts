@@ -89,7 +89,7 @@ async function collectOne(
   url: string,
   index: number,
 ): Promise<CollectedPage> {
-  const base = `${String(index + 1).padStart(2, "0")}-${slugify(url)}`;
+  const base = collectedBase({ index: index + 1, url });
   const result: CollectedPage = { index: index + 1, url, files: [] };
   const tab = await openTab();
 
@@ -235,15 +235,23 @@ async function saveBody(dir: string, base: string, type: BodyType, body: Buffer,
   keepText(result, extracted.text, input.previewChars);
 }
 
-export async function collectPages(manager: BrowserManager, store: OutputStore, owner: string, input: CollectInput) {
-  const dir = await store.dir("collect", `${timestampSlug()}-${slugify(input.label ?? "pages", 40)}`);
-  const urls = input.urls.map(normalizeUrl);
+export function serializedOpener(manager: BrowserManager, owner: string) {
   let opening: Promise<unknown> = Promise.resolve();
-  const openTab = () => {
+  return () => {
     const next = opening.then(() => manager.openTab(owner));
     opening = next.catch(() => undefined);
     return next;
   };
+}
+
+export function collectedBase(page: Pick<CollectedPage, "index" | "url">) {
+  return `${String(page.index).padStart(2, "0")}-${slugify(page.url)}`;
+}
+
+export async function collectPages(manager: BrowserManager, store: OutputStore, owner: string, input: CollectInput) {
+  const dir = await store.dir("collect", `${timestampSlug()}-${slugify(input.label ?? "pages", 40)}`);
+  const urls = input.urls.map(normalizeUrl);
+  const openTab = serializedOpener(manager, owner);
   const job: CollectInput = { ...input, redact: input.redact ?? ((text) => store.redact(text)) };
   const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, openTab, dir, job, url, index), input.signal);
   const results = collected.map((result, index): CollectedPage => result ?? { index: index + 1, url: urls[index] ?? "", files: [], error: "not started: the call was cancelled" });
