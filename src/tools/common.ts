@@ -87,7 +87,9 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
       const tabId = (input as { tab?: unknown }).tab;
       const tab = typeof tabId === "string" ? deps.manager.peekTab(tabId) : undefined;
       const moved = tab ? deps.manager.movedSinceSeen(tab) : undefined;
-      const withNote = (text: string) => deps.redactor.redact(moved ? `Note: the tab moved to ${moved} since your last call.\n${text}` : text);
+      const foreign = tab !== undefined && tab.owner !== owner && tab.owner !== UNCLAIMED_OWNER && tab.owner !== ORPHANED_OWNER;
+      const notes = [foreign ? `Note: ${tab.id} belongs to another session.` : "", moved ? `Note: the tab moved to ${moved} since your last call.` : ""].filter(Boolean);
+      const withNote = (text: string) => deps.redactor.redact([...notes, text].join("\n"));
       const record = (fields: Record<string, unknown>) =>
         deps.log.log(fields.ok ? "info" : "warn", "tool_call", {
           requestId,

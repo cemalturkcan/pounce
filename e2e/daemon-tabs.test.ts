@@ -132,3 +132,15 @@ test("a tab closed in this daemon is described with its last url and title", asy
   assert.match(gone.text, new RegExp(`^Tab ${tab} is not open \\(it was at ${fixture.url}/doc "Fixture Doc"\\); it was closed\\.`));
   await stopDaemon(daemon);
 });
+
+test("acting on a tab of another live session is allowed and noted at the start of the result", async () => {
+  const daemon = await startDaemon(path.join(workDir, "owners"));
+  const owner = await connect(daemon);
+  const other = await connect(daemon);
+  const tab = openedId(await ok(owner, "tab_open", { url: fixture.url }));
+  const foreign = await ok(other, "read_text", { tab, max_chars: 200 });
+  assert.ok(foreign.startsWith(`Note: ${tab} belongs to another session.\n`), foreign);
+  assert.match(foreign, /Fixture/);
+  assert.doesNotMatch(await ok(owner, "read_text", { tab, max_chars: 200 }), /belongs to another session/);
+  await stopDaemon(daemon);
+});
