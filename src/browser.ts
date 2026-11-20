@@ -10,6 +10,7 @@ import { timestampSlug } from "./output.ts";
 import { clearStaleProfileLock } from "./profile-lock.ts";
 import { ProfileSettings } from "./profile-settings.ts";
 import { parseRef } from "./snapshot.ts";
+import { TabCounter } from "./tab-ids.ts";
 
 const CONSOLE_LIMIT = 300;
 const NETWORK_LIMIT = 1000;
@@ -222,7 +223,7 @@ export class BrowserManager {
   private readonly byPage = new WeakMap<Page, Tab>();
   private readonly closedOutside = new Set<string>();
   private readonly recentPages: { at: number; page: Page }[] = [];
-  private counter = 0;
+  private readonly ids: TabCounter;
   private browserVersion?: string;
   private closing: Promise<unknown> = Promise.resolve();
   private launches = 0;
@@ -230,6 +231,7 @@ export class BrowserManager {
 
   constructor(config: Config) {
     this.config = config;
+    this.ids = new TabCounter(config.dataDir);
     setInterval(() => {
       if (this.running) void this.closeIdleOrphans().catch(() => undefined);
     }, ORPHAN_SWEEP_MS).unref();
@@ -313,9 +315,8 @@ export class BrowserManager {
 
     pushBounded(this.recentPages, { at: Date.now(), page }, 20);
     for (const other of this.tabs.values()) for (const check of [...other.popupChecks]) check.finish(false);
-    this.counter += 1;
     const tab: Tab = {
-      id: `t${this.counter}`,
+      id: this.ids.next(),
       page,
       owner: UNCLAIMED_OWNER,
       createdAt: Date.now(),
