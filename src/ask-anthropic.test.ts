@@ -5,6 +5,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { anthropicAskAdapter } from "./ask-anthropic.ts";
 import { AskSetupError } from "./ask.ts";
+import { ToolError } from "./errors.ts";
 
 const input = {
   system: "Answer from the page.",
@@ -245,6 +246,115 @@ test("Anthropic adapter stops waiting for a shared refresh when its call is abor
   const startedAt = Date.now();
   await assert.rejects(pending, /caller cancelled/);
   assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test("Anthropic adapter refreshes a session the profile endpoint rejects", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, null, "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    const authorized = new Headers(request?.headers).get("authorization") === "Bearer new-access";
+    if (url.endsWith("/api/oauth/profile")) {
+      return authorized
+        ? Response.json({ account: { uuid: "profile-account" } })
+        : Response.json({ error: { type: "authentication_error", message: "Invalid token" } }, { status: 401 });
+    }
+    assert.ok(authorized);
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter waits briefly for a concurrent refresh that writes after its own was rejected", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      setTimeout(() => void writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh"), 300);
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter keeps using a still valid token when its refresh fails transiently", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("current-access", Date.now() + 60_000, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) throw new TypeError("fetch failed", { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer current-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter retries a transient refresh failure and reports it as a call failure, not a sign-in problem", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      return Response.json({ error: "server_error" }, { status: 503 });
+    }
+    return streamReply("OK");
+  });
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(!(error instanceof AskSetupError));
+    assert.match(String((error as Error).message), /refresh.*HTTP 503/);
+    return true;
+  });
+  assert.equal(refreshCalls, 3);
+});
+
+test("Anthropic adapter retries a transient profile failure", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60 * 60_000, null);
+  let profileCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) {
+      profileCalls += 1;
+      return profileCalls === 1 ? new Response("unavailable", { status: 503 }) : Response.json({ account: { uuid: "profile-account" } });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(profileCalls, 2);
+});
+
+test("Anthropic adapter reads the profile once for concurrent first calls", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60 * 60_000, null);
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return Response.json({ account: { uuid: "profile-account" } });
+    }
+    return streamReply("OK");
+  });
+  await Promise.all([adapter.complete(input), adapter.complete(input), adapter.complete(input)]);
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).endsWith("/api/oauth/profile")).length, 1);
+});
+
+test("Anthropic adapter masks both tokens in refresh errors", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: "invalid_grant", error_description: "old-access and old-refresh are revoked" }, { status: 400 }));
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    const message = String((error as Error).message);
+    assert.doesNotMatch(message, /old-access|old-refresh/);
+    assert.match(message, /\[REDACTED\] and \[REDACTED\] are revoked/);
+    return true;
+  });
+});
+
+test("Anthropic adapter uses a token without a refresh token until it really expires", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("short-lived", Date.now() + 60_000);
+  t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  assert.equal((await adapter.complete(input)).text, "OK");
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {
@@ -557,15 +667,16 @@ test("Anthropic exposes masked network causes for request and stream failures", 
   assert.equal(fetch.mock.callCount(), 6);
 });
 
-test("Anthropic wraps profile network failures with their cause and masks the token", async (t) => {
+test("Anthropic retries profile network failures, then reports them with their cause and masks the token", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token", Date.now() + 10 * 60_000, null);
-  t.mock.method(globalThis, "fetch", async () => {
+  const fetch = t.mock.method(globalThis, "fetch", async () => {
     const cause = Object.assign(new Error("DNS failed for test-token"), { code: "ENOTFOUND" });
     throw new TypeError("fetch failed", { cause });
   });
   await assert.rejects(adapter.complete(input), (error: unknown) => {
-    assert.ok(error instanceof AskSetupError);
+    assert.ok(error instanceof ToolError && !(error instanceof AskSetupError));
+    assert.equal(fetch.mock.callCount(), 3);
     assert.match(error.message, /profile: ENOTFOUND: DNS failed for \[REDACTED\]/);
     return true;
   });

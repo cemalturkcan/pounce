@@ -1,4 +1,4 @@
-import { type AskAdapter, type AskImage, type AskReply, type AskUsage, completeLogged } from "./ask-adapter.ts";
+import { type AskAdapter, type AskImage, type AskReply, type AskUsage, completeLogged, isCutOff } from "./ask-adapter.ts";
 import { AskSetupError } from "./ask.ts";
 import { runPool } from "./async.ts";
 import { type Box, type Region, type RgbaImage, scaleForModel } from "./pixels.ts";
@@ -150,7 +150,7 @@ export async function describeDifferences(adapter: AskAdapter, options: ModelLay
     if (typeof reply?.text !== "string") throw new Error(`${adapter.name} returned no text.`);
     addUsage(usage, reply.usage);
     if (reply.stopReason === "refusal") throw new Error("the model refused to answer (stop reason refusal)");
-    return { ...parseFindings(reply.text), truncated: reply.stopReason === "max_tokens" ? true : undefined };
+    return { ...parseFindings(reply.text), truncated: isCutOff(reply.stopReason) || reply.stopReason === "interrupted" ? true : undefined };
   };
 
   const work = async (job: Job) => {
@@ -169,7 +169,7 @@ export async function describeDifferences(adapter: AskAdapter, options: ModelLay
       }
     } catch (error) {
       if (error instanceof AskSetupError) {
-        setupError = failureReason(error, options.timeoutMs);
+        setupError = [failureReason(error, options.timeoutMs), error.hint].filter(Boolean).join(" ");
         return;
       }
       const reason = failureReason(error, options.timeoutMs);

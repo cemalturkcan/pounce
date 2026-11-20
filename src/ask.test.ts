@@ -505,6 +505,25 @@ test("a batch that exceeds the context window is split in half until it fits, an
   assert.match(text, /call 4 \[huge\.md\]: the page does not fit the model's context window on its own/);
 });
 
+test("a batch over the request size limit is split like a context overflow", async () => {
+  const adapter: AskAdapter = {
+    name: "byte limit",
+    complete: async ({ prompt }) => {
+      const sources = promptSources(prompt);
+      if (sources.length > 1) throw new Error("Anthropic Messages returned HTTP 413: request_too_large: Request exceeds the maximum allowed number of bytes");
+      return { text: `- seen [${sources[0]}]` };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10)], { concurrency: 1 }));
+  assert.deepEqual(report.batches.map((batch) => [batch.sources.join(","), batch.error]), [["a.md", undefined], ["b.md", undefined]]);
+});
+
+test("a batch stopped at the context window is marked truncated", async () => {
+  const adapter: AskAdapter = { name: "full", complete: async () => ({ text: "- first fact [a.md]\n- second fa", stopReason: "model_context_window_exceeded" }) };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10)]));
+  assert.equal(report.batches[0]?.truncated, true);
+});
+
 test("failures other than a context overflow are not split", async () => {
   const adapter: AskAdapter = { name: "broken", complete: async () => { throw new Error("upstream down"); } };
   const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10)]));

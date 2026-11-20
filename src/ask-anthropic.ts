@@ -4,7 +4,8 @@ import { homedir, hostname, userInfo } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AskAdapter, AskImage, AskReply, AskUsage } from "./ask-adapter.ts";
-import { AskSetupError } from "./ask.ts";
+import { AskSetupError, modelId } from "./ask.ts";
+import { untilAborted } from "./async.ts";
 import { ToolError } from "./errors.ts";
 
 const API_ORIGIN = "https://api.anthropic.com";
@@ -34,17 +35,17 @@ const CLAUDE_CODE_BETAS = [
   "effort-2025-11-24",
   "extended-cache-ttl-2025-04-11",
 ].join(",");
-const MODEL_ALIASES = new Map([
-  ["haiku", "claude-haiku-5-5"],
-  ["sonnet", "claude-sonnet-5-5"],
-  ["opus", "claude-opus-5-5"],
-]);
-const SIGN_IN = "Sign in to Claude Code with `claude auth login`, then try ask_pages again.";
+const SIGN_IN = "Sign in to Claude Code with `claude auth login`, then try again.";
 const MAX_RETRIES = 2;
 const MAX_RETRY_DELAY_MS = 60_000;
 const RETRY_JITTER_MS = 250;
 const RETRY_OUTPUT_TOKEN_LIMIT = 4_096;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_BACKOFF_MS = 8_000;
 const REFRESH_WINDOW_MS = 5 * 60_000;
+const REFRESH_TIMEOUT_MS = 30_000;
+const REFRESH_RACE_WAIT_MS = 2_000;
+const REFRESH_RACE_POLL_MS = 100;
 
 type ApiError = { type?: unknown; message?: unknown };
 type ClaudeCredentials = {
@@ -66,16 +67,20 @@ class RetryableAnthropicError extends ToolError {
   }
 }
 
-function errorDetail(error: ApiError | undefined, token: string) {
+function redact(value: string, secrets: string | string[]) {
+  return [secrets].flat().filter(Boolean).reduce((text, secret) => text.replaceAll(secret, "[REDACTED]"), value);
+}
+
+function errorDetail(error: ApiError | undefined, secrets: string | string[]) {
   const detail = [error?.type, error?.message]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.replaceAll(token, "[REDACTED]").replace(/\s+/g, " ").trim())
+    .map((value) => redact(value, secrets).replace(/\s+/g, " ").trim())
     .join(": ")
     .slice(0, 500);
   return detail ? `: ${detail}` : ".";
 }
 
-function networkErrorDetail(error: unknown, token: string) {
+function networkErrorDetail(error: unknown, token: string | string[]) {
   const cause = error instanceof Error ? error.cause ?? error : error;
   const detail = cause instanceof AggregateError ? cause.errors[0] ?? cause : cause;
   if (detail && typeof detail === "object") {
@@ -108,7 +113,38 @@ async function readCredentials(credentialsPath: string, signal: AbortSignal) {
   };
 }
 
-async function requestTokenRefresh(refreshToken: string, scope: string | undefined, signal: AbortSignal) {
+function shouldRetry(response: Response) {
+  const retry = response.headers.get("x-should-retry");
+  const retryableStatus = [408, 409, 429].includes(response.status) || (response.status >= 500 && response.status < 600);
+  return retry === "true" || (retry !== "false" && retryableStatus);
+}
+
+async function withRetries<T>(signal: AbortSignal, run: (attempt: number) => Promise<T>) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run(attempt);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!(error instanceof RetryableAnthropicError)) throw error;
+      const wait = error.retryAfterMs ?? Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_BACKOFF_MS);
+      if (wait > MAX_RETRY_DELAY_MS) {
+        const failure = error.failure;
+        const Failure = failure.constructor as typeof ToolError;
+        throw new Failure(`${failure.message} Retry-After (${wait / 1000} s) exceeds the 60-second wait limit.`, failure.hint);
+      }
+      if (attempt >= MAX_RETRIES) throw error.failure;
+      const withJitter = Math.min(wait + Math.random() * RETRY_JITTER_MS, MAX_RETRY_DELAY_MS);
+      await delay(withJitter, undefined, { signal }).catch((abort: unknown) => {
+        signal.throwIfAborted();
+        throw abort;
+      });
+    }
+  }
+}
+
+async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: string }, scope: string | undefined, signal: AbortSignal) {
+  const secrets = [tokens.accessToken, tokens.refreshToken];
+  const refreshToken = tokens.refreshToken;
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/json", "user-agent": CLAUDE_CODE_USER_AGENT },
@@ -121,7 +157,7 @@ async function requestTokenRefresh(refreshToken: string, scope: string | undefin
     signal,
   }).catch((error: unknown) => {
     signal.throwIfAborted();
-    throw new AskSetupError(`Could not refresh the local Claude session${networkErrorDetail(error, refreshToken)}`, SIGN_IN);
+    throw new RetryableAnthropicError(`Could not refresh the local Claude session${networkErrorDetail(error, secrets)}`);
   });
   const payload = await response.json().catch(() => undefined) as {
     access_token?: unknown;
@@ -131,6 +167,10 @@ async function requestTokenRefresh(refreshToken: string, scope: string | undefin
     error_description?: unknown;
   } | undefined;
   if (!response.ok) {
+    if (shouldRetry(response)) {
+      const failure = new ToolError(`Claude session refresh failed (HTTP ${response.status})${refreshErrorDetail(payload, secrets)}`);
+      throw new RetryableAnthropicError(failure, retryDelay(response));
+    }
     return { response, payload };
   }
   if (typeof payload?.access_token !== "string" || !payload.access_token) {
@@ -139,17 +179,28 @@ async function requestTokenRefresh(refreshToken: string, scope: string | undefin
   return { response, payload };
 }
 
+function refreshErrorDetail(payload: { error?: unknown; error_description?: unknown } | undefined, secrets: string[]) {
+  const type = typeof payload?.error === "string" ? payload.error : undefined;
+  const message = typeof payload?.error_description === "string" ? payload.error_description : undefined;
+  return errorDetail({ type, message }, secrets);
+}
+
 function isExpiring(credentials: { expiresAt?: number }) {
   return credentials.expiresAt !== undefined && credentials.expiresAt <= Date.now() + REFRESH_WINDOW_MS;
 }
 
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal) {
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-  });
+function isUsable(credentials: { expiresAt?: number }) {
+  return credentials.expiresAt === undefined || credentials.expiresAt > Date.now();
+}
+
+async function waitForNewerCredentials(credentialsPath: string, staleToken: string, signal: AbortSignal) {
+  const deadline = Date.now() + REFRESH_RACE_WAIT_MS;
+  while (true) {
+    const latest = await readCredentials(credentialsPath, signal);
+    if (latest.accessToken !== staleToken && !isExpiring(latest)) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(REFRESH_RACE_POLL_MS, undefined, { signal });
+  }
 }
 
 async function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, rejectedToken?: string) {
@@ -157,16 +208,13 @@ async function refreshCredentialsFile(credentialsPath: string, signal: AbortSign
   if (rejectedToken === undefined ? !isExpiring(credentials) : credentials.accessToken !== rejectedToken) return;
   if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
 
-  let answer = await requestTokenRefresh(credentials.refreshToken, OAUTH_SCOPES, signal);
-  if (!answer.response.ok && answer.payload?.error === "invalid_scope") {
-    answer = await requestTokenRefresh(credentials.refreshToken, undefined, signal);
-  }
+  const tokens = { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken };
+  const refresh = (scope: string | undefined) => withRetries(signal, () => requestTokenRefresh(tokens, scope, signal));
+  let answer = await refresh(OAUTH_SCOPES);
+  if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(undefined);
   if (!answer.response.ok) {
-    const latest = await readCredentials(credentialsPath, signal);
-    if (latest.accessToken !== credentials.accessToken && !isExpiring(latest)) return;
-    const error = typeof answer.payload?.error === "string" ? answer.payload.error : undefined;
-    const description = typeof answer.payload?.error_description === "string" ? answer.payload.error_description : undefined;
-    throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${errorDetail({ type: error, message: description }, credentials.refreshToken)}`, SIGN_IN);
+    if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
+    throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`, SIGN_IN);
   }
 
   const expiresIn = typeof answer.payload?.expires_in === "number" ? answer.payload.expires_in : 3_600;
@@ -242,14 +290,16 @@ async function readAccountUuid(token: string, signal: AbortSignal) {
     signal,
   }).catch((error: unknown) => {
     signal.throwIfAborted();
-    throw new AskSetupError(`Could not read the local Claude account profile${networkErrorDetail(error, token)}`, SIGN_IN);
+    throw new RetryableAnthropicError(`Could not read the local Claude account profile${networkErrorDetail(error, token)}`);
   });
   const payload = await response.json().catch(() => undefined) as { account?: { uuid?: unknown }; error?: ApiError } | undefined;
+  signal.throwIfAborted();
   const uuid = payload?.account?.uuid;
-  if (!response.ok || typeof uuid !== "string" || !uuid) {
-    throw new AskSetupError(`Could not read the local Claude account profile (HTTP ${response.status})${errorDetail(payload?.error, token)}`, SIGN_IN);
-  }
-  return uuid;
+  if (response.ok && typeof uuid === "string" && uuid) return uuid;
+  const message = `Could not read the local Claude account profile (HTTP ${response.status})${errorDetail(payload?.error, token)}`;
+  if (response.status === 401) throw new RejectedSessionError(message, SIGN_IN);
+  if (shouldRetry(response)) throw new RetryableAnthropicError(new ToolError(message), retryDelay(response));
+  throw new AskSetupError(message, SIGN_IN);
 }
 
 function messageContent(prompt: string, images?: AskImage[]) {
@@ -407,86 +457,81 @@ async function postMessage(body: string, token: string, sessionId: string, retry
   const failure = response.status === 401
     ? new RejectedSessionError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
     : new ToolError(`Anthropic Messages returned HTTP ${response.status}${detail}`);
-  const retry = response.headers.get("x-should-retry");
-  const retryableStatus = [408, 409, 429].includes(response.status) || (response.status >= 500 && response.status < 600);
-  if (retry === "true" || (retry !== "false" && retryableStatus)) {
-    throw new RetryableAnthropicError(failure, retryDelay(response));
-  }
+  if (shouldRetry(response)) throw new RetryableAnthropicError(failure, retryDelay(response));
   throw failure;
 }
 
-async function completeMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await readMessage(await postMessage(body, token, sessionId, attempt, signal), token, signal);
-    } catch (error) {
-      signal.throwIfAborted();
-      if (!(error instanceof RetryableAnthropicError)) throw error;
-      const wait = error.retryAfterMs ?? 250 * 2 ** attempt;
-      if (wait > MAX_RETRY_DELAY_MS) {
-        const failure = error.failure;
-        const message = `${failure.message} Retry-After (${wait / 1000} s) exceeds the 60-second wait limit.`;
-        if (failure instanceof AskSetupError) throw new AskSetupError(message, failure.hint);
-        throw new ToolError(message, failure.hint);
-      }
-      if (attempt >= MAX_RETRIES) throw error.failure;
-      const withJitter = Math.min(wait + Math.random() * RETRY_JITTER_MS, MAX_RETRY_DELAY_MS);
-      await delay(withJitter, undefined, { signal }).catch((abort: unknown) => {
-        signal.throwIfAborted();
-        throw abort;
-      });
-    }
-  }
+function completeMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
+  return withRetries(signal, async (attempt) => readMessage(await postMessage(body, token, sessionId, attempt, signal), token, signal));
 }
 
 export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude")): AskAdapter {
   const credentialsPath = path.join(configDir, ".credentials.json");
   const sessionId = randomUUID();
   const localDeviceId = deviceId();
-  let profiledToken: string | undefined;
-  let profiledAccountUuid: string | undefined;
+  let profile: { token: string; uuid: Promise<string> } | undefined;
   let refreshPromise: Promise<void> | undefined;
+  const accountUuidFor = (token: string, signal: AbortSignal) => {
+    if (profile?.token !== token) {
+      const uuid = withRetries(AbortSignal.timeout(REFRESH_TIMEOUT_MS), () => readAccountUuid(token, AbortSignal.timeout(REFRESH_TIMEOUT_MS)));
+      const entry = { token, uuid };
+      profile = entry;
+      uuid.catch(() => {
+        if (profile === entry) profile = undefined;
+      });
+    }
+    return untilAborted(profile.uuid, signal, () => signal.reason as Error);
+  };
   const refreshSession = async (signal: AbortSignal, rejectedToken?: string) => {
-    refreshPromise ??= refreshCredentialsFile(credentialsPath, AbortSignal.timeout(30_000), rejectedToken).finally(() => {
-      refreshPromise = undefined;
-    });
-    await untilAborted(refreshPromise, signal);
+    const timeout = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
+    refreshPromise ??= refreshCredentialsFile(credentialsPath, timeout, rejectedToken)
+      .catch((error: unknown) => {
+        if (timeout.aborted) throw new ToolError(`Claude session refresh did not answer within ${REFRESH_TIMEOUT_MS / 1000} s.`);
+        throw error;
+      })
+      .finally(() => {
+        refreshPromise = undefined;
+      });
+    await untilAborted(refreshPromise, signal, () => signal.reason as Error);
     return readCredentials(credentialsPath, signal);
   };
   return {
     name: "Anthropic Claude account",
     async complete({ system, prompt, model, maxTokens, images, signal }) {
+      const send = async (credentials: Awaited<ReturnType<typeof readCredentials>>) => {
+        const accountUuid = credentials.accountUuid ?? await accountUuidFor(credentials.accessToken, signal);
+        const body = JSON.stringify({
+          model: modelId(model),
+          max_tokens: maxTokens,
+          stream: true,
+          system: [
+            { type: "text", text: billingHeader(prompt) },
+            { type: "text", text: CLAUDE_CODE_IDENTITY },
+            { type: "text", text: system },
+          ],
+          messages: [{ role: "user", content: messageContent(prompt, images) }],
+          metadata: {
+            user_id: JSON.stringify({ device_id: localDeviceId, account_uuid: accountUuid, session_id: sessionId }),
+          },
+        });
+        return completeMessage(body, credentials.accessToken, sessionId, signal);
+      };
+
       let credentials = await readCredentials(credentialsPath, signal);
-      if (isExpiring(credentials)) credentials = await refreshSession(signal);
-      const token = credentials.accessToken;
-      let accountUuid = credentials.accountUuid;
-      if (!accountUuid && profiledToken === token) accountUuid = profiledAccountUuid;
-      if (!accountUuid) {
-        accountUuid = await readAccountUuid(token, signal);
-        profiledToken = token;
-        profiledAccountUuid = accountUuid;
+      if (isExpiring(credentials)) {
+        const current = credentials;
+        credentials = await refreshSession(signal).catch((error: unknown) => {
+          if (signal.aborted || !isUsable(current)) throw error;
+          return current;
+        });
       }
-      const body = JSON.stringify({
-        model: MODEL_ALIASES.get(model) ?? model,
-        max_tokens: maxTokens,
-        stream: true,
-        system: [
-          { type: "text", text: billingHeader(prompt) },
-          { type: "text", text: CLAUDE_CODE_IDENTITY },
-          { type: "text", text: system },
-        ],
-        messages: [{ role: "user", content: messageContent(prompt, images) }],
-        metadata: {
-          user_id: JSON.stringify({ device_id: localDeviceId, account_uuid: accountUuid, session_id: sessionId }),
-        },
-      });
       try {
-        return await completeMessage(body, token, sessionId, signal);
+        return await send(credentials);
       } catch (error) {
         if (!(error instanceof RejectedSessionError) || !credentials.refreshToken) throw error;
-        const refreshed = await refreshSession(signal, token);
-        if (refreshed.accessToken === token) throw error;
-        return completeMessage(body, refreshed.accessToken, sessionId, signal);
+        const refreshed = await refreshSession(signal, credentials.accessToken);
+        if (refreshed.accessToken === credentials.accessToken) throw error;
+        return send(refreshed);
       }
     },
   };

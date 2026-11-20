@@ -121,6 +121,20 @@ test("a failed, refused or cut-off region call is reported on that region only",
   assert.equal(result.overview, undefined);
 });
 
+test("an interrupted or context-limited region call is marked cut off", async () => {
+  const { adapter } = recording((input) => input.prompt.includes("Region R1 ")
+    ? { text: "- [high] [color] button: design blue #2563EB, pa", stopReason: "interrupted" }
+    : { text: "- [low] [font] heading: design 600, pa", stopReason: "model_context_window_exceeded" });
+  const result = await describeDifferences(adapter, { ...baseOptions, crops: crops(2), overview: undefined });
+  assert.deepEqual(result.regions.map((verdict) => verdict.truncated), [true, true]);
+});
+
+test("a setup error keeps its sign-in hint", async () => {
+  const adapter: AskAdapter = { name: "signed out", complete: async () => { throw new AskSetupError("session expired", "Sign in again."); } };
+  const result = await describeDifferences(adapter, { ...baseOptions, concurrency: 1, crops: crops(1), overview: undefined });
+  assert.match(result.setupError ?? "", /session expired.*Sign in again\./);
+});
+
 test("a setup error stops the model layer and is returned once instead of per call", async () => {
   let calls = 0;
   const adapter: AskAdapter = {
