@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import path from "node:path";
 import type { Config } from "./config.ts";
+import { SERVER_SCRIPT } from "./version.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const IDLE_SESSION_MS = 12 * 60 * 60 * 1000;
@@ -43,10 +45,21 @@ export function readRegistry(config: Config): DaemonRegistry | undefined {
   }
 }
 
-export function isDaemonProcess(pid: number | undefined) {
+function sameFile(candidate: string, expected: string) {
+  try {
+    return realpathSync(candidate) === realpathSync(expected);
+  } catch {
+    return false;
+  }
+}
+
+export function isDaemonProcess(pid: number | undefined, script = SERVER_SCRIPT) {
   if (!pid || pid <= 0) return false;
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("server.ts");
+    const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+    if (!args.includes("--daemon")) return false;
+    const cwd = readlinkSync(`/proc/${pid}/cwd`);
+    return args.some((arg) => arg.endsWith("server.ts") && sameFile(path.resolve(cwd, arg), script));
   } catch {
     try {
       process.kill(pid, 0);
@@ -89,8 +102,18 @@ function isInitialize(body: unknown): boolean {
   return Boolean(body && typeof body === "object" && "method" in body && body.method === "initialize");
 }
 
-export async function startDaemon(config: Config, createServer: () => McpServer, onShutdown: () => Promise<void>) {
+export async function startDaemon(
+  config: Config,
+  createServer: () => McpServer,
+  onShutdown: () => Promise<void>,
+  onSessionEnd: (sessionId: string) => void = () => undefined,
+) {
   const sessions = new Map<string, Session>();
+  const endSession = (sessionId: string | undefined) => {
+    if (!sessionId) return;
+    sessions.delete(sessionId);
+    onSessionEnd(sessionId);
+  };
 
   async function openSession() {
     const transport = new StreamableHTTPServerTransport({
@@ -98,10 +121,9 @@ export async function startDaemon(config: Config, createServer: () => McpServer,
       onsessioninitialized: (sessionId) => {
         sessions.set(sessionId, { transport, lastSeen: Date.now() });
       },
-      onsessionclosed: (sessionId) => {
-        sessions.delete(sessionId);
-      },
+      onsessionclosed: (sessionId) => endSession(sessionId),
     });
+    transport.onclose = () => endSession(transport.sessionId);
     transport.onerror = (error) => console.error("web-agent-mcp transport error:", error.message);
     await createServer().connect(transport);
     return transport;
@@ -183,7 +205,7 @@ export async function startDaemon(config: Config, createServer: () => McpServer,
     const cutoff = Date.now() - IDLE_SESSION_MS;
     for (const [sessionId, session] of sessions) {
       if (session.lastSeen < cutoff) {
-        sessions.delete(sessionId);
+        endSession(sessionId);
         void session.transport.close().catch(() => undefined);
       }
     }
@@ -202,8 +224,7 @@ export async function startDaemon(config: Config, createServer: () => McpServer,
     if (readRegistry(config)?.pid === process.pid) rmSync(config.registryPath, { force: true });
     process.exit(0);
   };
-  process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown());
 }
 
 export function daemonStatus(config: Config) {

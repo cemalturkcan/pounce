@@ -1,7 +1,7 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Tab } from "./browser.ts";
-import { describeError, ToolError } from "./errors.ts";
+import { describeError, recordFault, ToolError } from "./errors.ts";
 import { timestampSlug } from "./output.ts";
 import { runScript, serializeValue, type ScriptDeps } from "./script.ts";
 
@@ -12,7 +12,6 @@ export type JobState = "running" | "done" | "failed" | "cancelled";
 
 export type Job = {
   id: string;
-  owner: string;
   label: string;
   state: JobState;
   startedAt: number;
@@ -21,6 +20,7 @@ export type Job = {
   resultFile: string;
   logLines: number;
   recentLogs: string[];
+  resultError?: string;
   controller: AbortController;
   finished: Promise<void>;
 };
@@ -41,7 +41,6 @@ export class JobRunner {
     const controller = new AbortController();
     const job: Job = {
       id,
-      owner,
       label,
       state: "running",
       startedAt: Date.now(),
@@ -62,18 +61,27 @@ export class JobRunner {
       writes = writes.then(() => appendFile(logFile, `${text}\n`)).catch(() => undefined);
     };
 
+    const writeResult = async (text: string) => {
+      try {
+        await writeFile(resultFile, deps.redactor.redact(text));
+      } catch (error) {
+        job.resultError = describeError(error).split("\n")[0];
+        recordFault(`job ${id} result`, error);
+      }
+    };
     job.finished = runScript(deps, owner, tab, code, { signal: controller.signal, onLog })
       .then(
         async (result) => {
           job.state = "done";
-          await writeFile(resultFile, deps.redactor.redact(serializeValue(result.value)));
+          await writeResult(serializeValue(result.value));
         },
         async (error: unknown) => {
           job.state = controller.signal.aborted ? "cancelled" : "failed";
-          await writeFile(resultFile, deps.redactor.redact(describeError(error)));
+          await writeResult(describeError(error));
         },
       )
       .then(() => writes)
+      .catch((error: unknown) => recordFault(`job ${id}`, error))
       .finally(() => {
         job.endedAt = Date.now();
         this.trim();
@@ -116,7 +124,8 @@ export function describeJob(job: Job, detailed: boolean) {
   const head = `${job.id} ${job.state} ${seconds}s ${job.logLines} log lines${job.label ? ` — ${job.label}` : ""}`;
   if (!detailed) return head;
   const lines = [head, `Log: ${job.logFile}`];
-  if (job.state !== "running") lines.push(`Result: ${job.resultFile}`);
+  if (job.resultError) lines.push(`The result could not be written to ${job.resultFile}: ${job.resultError}`);
+  else if (job.state !== "running") lines.push(`Result: ${job.resultFile}`);
   if (job.recentLogs.length) lines.push("Recent log lines:", ...job.recentLogs);
   return lines.join("\n");
 }

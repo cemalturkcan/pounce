@@ -1,9 +1,31 @@
 import type { Route } from "playwright-core";
+import { TIMED_OUT, withDeadline } from "./async.ts";
 import type { InterceptRule, NetworkEntry, Tab } from "./browser.ts";
 import { ToolError } from "./errors.ts";
+import { isStreamingMime, isTextualMime } from "./mime.ts";
+import { SERVER_VERSION } from "./version.ts";
 
 const HAR_BODY_LIMIT = 2 * 1024 * 1024;
-const TEXT_MIME = /^(text\/|application\/(json|javascript|xml|x-www-form-urlencoded|graphql|ld\+json)|image\/svg)/i;
+const BODY_WAIT_MS = 3000;
+const HEADERS_WAIT_MS = 3000;
+
+export type BodyResult = { body?: Buffer; note?: string };
+
+export async function responseBody(entry: NetworkEntry): Promise<BodyResult> {
+  if (entry.body) return { body: entry.body };
+  const { response } = entry;
+  if (!response) return { note: "no response" };
+  if (isStreamingMime(response.headers()["content-type"])) return { note: "streaming response (text/event-stream); the body is not captured" };
+  const body = await withDeadline(response.body(), BODY_WAIT_MS).catch((error: Error) => error);
+  if (body === TIMED_OUT) return { note: `body not available within ${BODY_WAIT_MS / 1000} s; the response may still be streaming` };
+  if (body instanceof Error) return { note: `body unavailable: ${body.message.split("\n")[0]}` };
+  return { body };
+}
+
+export async function headersOf(source: { allHeaders(): Promise<Record<string, string>>; headers(): Record<string, string> }): Promise<Record<string, string>> {
+  const headers = await withDeadline(source.allHeaders(), HEADERS_WAIT_MS).catch(() => TIMED_OUT);
+  return typeof headers === "symbol" ? source.headers() : headers;
+}
 
 export type InterceptSpec = {
   url: string;
@@ -35,8 +57,8 @@ function queryList(url: string) {
 
 async function harEntry(entry: NetworkEntry, includeBodies: boolean) {
   const { request, response } = entry;
-  const requestHeaders = await request.allHeaders().catch(() => ({}) as Record<string, string>);
-  const responseHeaders = response ? await response.allHeaders().catch(() => ({}) as Record<string, string>) : {};
+  const requestHeaders = await headersOf(request);
+  const responseHeaders = response ? await headersOf(response) : {};
   const mimeType = responseHeaders["content-type"] ?? "";
   const postData = request.postData();
   const timing = request.timing();
@@ -44,10 +66,10 @@ async function harEntry(entry: NetworkEntry, includeBodies: boolean) {
   const content: Record<string, unknown> = { size: -1, mimeType };
 
   if (includeBodies && response) {
-    const body = entry.body ?? (await response.body().catch(() => undefined));
+    const { body, note } = await responseBody(entry);
     if (body && body.length <= HAR_BODY_LIMIT) {
       content.size = body.length;
-      if (TEXT_MIME.test(mimeType)) {
+      if (isTextualMime(mimeType)) {
         content.text = body.toString("utf8");
       } else {
         content.text = body.toString("base64");
@@ -57,7 +79,7 @@ async function harEntry(entry: NetworkEntry, includeBodies: boolean) {
       content.size = body.length;
       content.comment = "body omitted: larger than 2 MB";
     } else {
-      content.comment = "body no longer available from the browser";
+      content.comment = note ?? "body no longer available from the browser";
     }
   }
 
@@ -99,7 +121,7 @@ export async function buildHar(entries: NetworkEntry[], includeBodies: boolean, 
   return {
     log: {
       version: "1.2",
-      creator: { name: "web-agent-mcp", version: "0.2.0" },
+      creator: { name: "web-agent-mcp", version: SERVER_VERSION },
       pages: [{ startedDateTime: entries[0]?.time ?? new Date().toISOString(), id: "page_1", title: pageUrl, pageTimings: {} }],
       entries: harEntries.map((entry) => ({ ...entry, pageref: "page_1" })),
     },
@@ -130,9 +152,30 @@ function summarize(spec: InterceptSpec) {
   return `modify requests (${changes.join("; ") || "no changes"}) where URL ${where}`;
 }
 
-function buildHandler(spec: InterceptSpec, rule: { hits: number }) {
+async function fallBack(route: Route) {
+  try {
+    await route.continue();
+  } catch {
+    await route.abort("failed").catch(() => undefined);
+  }
+}
+
+function buildHandler(spec: InterceptSpec, rule: InterceptRule) {
+  const apply = buildAction(spec);
   return async (route: Route) => {
     rule.hits += 1;
+    try {
+      await apply(route);
+    } catch (error) {
+      rule.errors += 1;
+      rule.lastError = `${new Date().toISOString().slice(11, 19)} ${route.request().url().slice(0, 200)}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`;
+      await fallBack(route);
+    }
+  };
+}
+
+function buildAction(spec: InterceptSpec) {
+  return async (route: Route) => {
     const request = route.request();
 
     if (spec.mode === "block") {
@@ -153,12 +196,19 @@ function buildHandler(spec: InterceptSpec, rule: { hits: number }) {
     for (const name of spec.removeHeaders ?? []) delete headers[name.toLowerCase()];
     const overrides = { headers, method: spec.method, postData: spec.postData, url: spec.rewriteUrl };
 
+    if (spec.rewriteUrl && new URL(spec.rewriteUrl).protocol !== new URL(request.url()).protocol) {
+      throw new Error(`rewrite_url ${spec.rewriteUrl} has another protocol than ${request.url()}; a rewrite must keep the protocol`);
+    }
     if (spec.mode === "modify") {
       await route.continue(overrides);
       return;
     }
 
     const response = await route.fetch(overrides);
+    if (!isTextualMime(response.headers()["content-type"])) {
+      await route.fulfill({ response });
+      return;
+    }
     let body = await response.text();
     for (const replacement of spec.replacements ?? []) body = body.split(replacement.find).join(replacement.replace);
     await route.fulfill({ response, body });
@@ -166,12 +216,16 @@ function buildHandler(spec: InterceptSpec, rule: { hits: number }) {
 }
 
 export async function addRule(tab: Tab, spec: InterceptSpec) {
+  if (spec.rewriteUrl !== undefined && !/^https?:\/\//i.test(spec.rewriteUrl)) {
+    throw new ToolError(`rewrite_url must be an http or https URL: ${spec.rewriteUrl}`);
+  }
   if (spec.mode === "patch_response" && !spec.replacements?.length) {
     throw new ToolError("patch_response needs at least one entry in replacements.");
   }
-  const id = (tab.rules.at(-1)?.id ?? 0) + 1;
+  tab.ruleCounter += 1;
+  const id = tab.ruleCounter;
   const matcher = buildMatcher(spec);
-  const rule: InterceptRule = { id, summary: summarize(spec), hits: 0, matcher, handler: async () => undefined };
+  const rule: InterceptRule = { id, summary: summarize(spec), hits: 0, errors: 0, matcher, handler: async () => undefined };
   rule.handler = buildHandler(spec, rule);
   await tab.page.route(matcher, rule.handler);
   tab.rules.push(rule);
@@ -197,5 +251,10 @@ export async function clearRules(tab: Tab) {
 
 export function listRules(tab: Tab) {
   if (tab.rules.length === 0) return `Tab ${tab.id} has no intercept rules.`;
-  return tab.rules.map((rule) => `#${rule.id} ${rule.summary} — ${rule.hits} hits`).join("\n");
+  const lines = tab.rules.map((rule) => {
+    const failures = rule.errors ? `, ${rule.errors} failed (the request was let through unchanged or aborted); last: ${rule.lastError}` : "";
+    return `#${rule.id} ${rule.summary} — ${rule.hits} hits${failures}`;
+  });
+  if (tab.rules.length > 1) lines.push("When several rules match one request, only the most recently added one applies.");
+  return lines.join("\n");
 }

@@ -2,7 +2,9 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { BrowserContext, BrowserType, Locator, Page, Request, Response, Route } from "playwright-core";
 import type { Config } from "./config.ts";
+import { TIMED_OUT, withDeadline } from "./async.ts";
 import { ToolError } from "./errors.ts";
+import { isStreamingMime, isTextualMime } from "./mime.ts";
 import { timestampSlug } from "./output.ts";
 import { parseRef } from "./snapshot.ts";
 
@@ -10,8 +12,11 @@ const CONSOLE_LIMIT = 300;
 const NETWORK_LIMIT = 1000;
 const BODY_ENTRY_LIMIT = 1024 * 1024;
 const BODY_TAB_BUDGET = 48 * 1024 * 1024;
-const BODY_MIME = /^(text\/|application\/(json|javascript|xml|x-www-form-urlencoded|graphql|ld\+json|[\w.+-]*\+json))/i;
-const UNCLAIMED = "browser";
+const BODY_GLOBAL_BUDGET = 256 * 1024 * 1024;
+const EVENT_LIMIT = 50;
+const CLOSE_TIMEOUT_MS = 10_000;
+export const UNCLAIMED_OWNER = "browser";
+export const ORPHANED_OWNER = "orphaned";
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -39,6 +44,8 @@ export type InterceptRule = {
   id: number;
   summary: string;
   hits: number;
+  errors: number;
+  lastError?: string;
   matcher: (url: URL) => boolean;
   handler: (route: Route) => Promise<void>;
 };
@@ -50,23 +57,28 @@ export type Tab = {
   createdAt: number;
   console: ConsoleEntry[];
   network: NetworkEntry[];
-  events: string[];
+  events: TabEvent[];
   rules: InterceptRule[];
+  ruleCounter: number;
 };
+
+export type TabEvent = { at: number; text: string };
 
 export type ConsoleHookMode = "local" | "all" | "off";
 
-function retainBody(tab: Tab, entry: NetworkEntry, body: Buffer) {
-  if (body.length > BODY_ENTRY_LIMIT) return;
-  entry.body = body;
+function evictBodies(entries: NetworkEntry[], keep: NetworkEntry, budget: number) {
   let total = 0;
-  for (const candidate of tab.network) total += candidate.body?.length ?? 0;
-  for (const candidate of tab.network) {
-    if (total <= BODY_TAB_BUDGET) break;
-    if (!candidate.body || candidate === entry) continue;
+  for (const candidate of entries) total += candidate.body?.length ?? 0;
+  for (const candidate of entries) {
+    if (total <= budget) break;
+    if (!candidate.body || candidate === keep) continue;
     total -= candidate.body.length;
     candidate.body = undefined;
   }
+}
+
+export function pushEvent(tab: Tab, text: string) {
+  pushBounded(tab.events, { at: Date.now(), text }, EVENT_LIMIT);
 }
 
 function pushBounded<T>(list: T[], entry: T, limit: number) {
@@ -122,6 +134,7 @@ export class BrowserManager {
   private readonly byPage = new WeakMap<Page, Tab>();
   private counter = 0;
   private browserVersion?: string;
+  private closing: Promise<unknown> = Promise.resolve();
 
   constructor(config: Config) {
     this.config = config;
@@ -154,6 +167,9 @@ export class BrowserManager {
     await mkdir(config.profileDir, { recursive: true });
     const chromium = await loadChromium(config.engine);
     const context = await chromium.launchPersistentContext(config.profileDir, {
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
       channel: config.executablePath ? undefined : config.channel,
       executablePath: config.executablePath,
       headless: config.headless,
@@ -191,12 +207,13 @@ export class BrowserManager {
     const tab: Tab = {
       id: `t${this.counter}`,
       page,
-      owner: UNCLAIMED,
+      owner: UNCLAIMED_OWNER,
       createdAt: Date.now(),
       console: [],
       network: [],
       events: [],
       rules: [],
+      ruleCounter: 0,
     };
     this.tabs.set(tab.id, tab);
     this.byPage.set(page, tab);
@@ -207,8 +224,8 @@ export class BrowserManager {
       .then((opener) => {
         const parent = opener ? this.byPage.get(opener) : undefined;
         if (!parent) return;
-        if (tab.owner === UNCLAIMED) tab.owner = parent.owner;
-        parent.events.push(`opened new tab ${tab.id}`);
+        if (tab.owner === UNCLAIMED_OWNER) tab.owner = parent.owner;
+        pushEvent(parent, `opened new tab ${tab.id}`);
       })
       .catch(() => undefined);
 
@@ -220,7 +237,7 @@ export class BrowserManager {
     let networkId = 0;
 
     page.on("close", () => this.tabs.delete(tab.id));
-    page.on("crash", () => tab.events.push("the page crashed; reload it with navigate or close the tab"));
+    page.on("crash", () => pushEvent(tab, "the page crashed; reload it with navigate or close the tab"));
     page.on("console", (message) => {
       pushBounded(tab.console, { level: message.type(), text: message.text().slice(0, 2000), time: new Date().toISOString() }, CONSOLE_LIMIT);
     });
@@ -228,7 +245,7 @@ export class BrowserManager {
       pushBounded(tab.console, { level: "error", text: (error.stack ?? error.message).slice(0, 2000), time: new Date().toISOString() }, CONSOLE_LIMIT);
     });
     page.on("dialog", (dialog) => {
-      tab.events.push(`${dialog.type()} dialog "${dialog.message().slice(0, 300)}" was accepted automatically`);
+      pushEvent(tab, `${dialog.type()} dialog "${dialog.message().slice(0, 300)}" was accepted automatically`);
       void dialog.accept(dialog.type() === "prompt" ? dialog.defaultValue() : undefined).catch(() => undefined);
     });
     page.on("download", (download) => {
@@ -236,8 +253,8 @@ export class BrowserManager {
       const target = path.join(this.config.outputDir, "downloads", fileName);
       void mkdir(path.dirname(target), { recursive: true })
         .then(() => download.saveAs(target))
-        .then(() => tab.events.push(`download saved to ${target}`))
-        .catch((error: Error) => tab.events.push(`download of ${download.suggestedFilename()} failed: ${error.message.split("\n")[0]}`));
+        .then(() => pushEvent(tab, `download saved to ${target}`))
+        .catch((error: Error) => pushEvent(tab, `download of ${download.suggestedFilename()} failed: ${error.message.split("\n")[0]}`));
     });
     page.on("response", (response) => {
       const request = response.request();
@@ -253,10 +270,11 @@ export class BrowserManager {
         response,
       };
       pushBounded(tab.network, entry, NETWORK_LIMIT);
-      if (BODY_MIME.test(response.headers()["content-type"] ?? "")) {
+      const contentType = response.headers()["content-type"];
+      if (isTextualMime(contentType) && !isStreamingMime(contentType)) {
         void response
           .body()
-          .then((body) => retainBody(tab, entry, body))
+          .then((body) => this.retainBody(tab, entry, body))
           .catch(() => undefined);
       }
     });
@@ -276,6 +294,17 @@ export class BrowserManager {
         NETWORK_LIMIT,
       );
     });
+  }
+
+  private retainBody(tab: Tab, entry: NetworkEntry, body: Buffer) {
+    if (body.length > BODY_ENTRY_LIMIT || !tab.network.includes(entry)) return;
+    entry.body = body;
+    evictBodies(tab.network, entry, BODY_TAB_BUDGET);
+    const all = this.listTabs()
+      .flatMap((candidate) => candidate.network)
+      .filter((candidate) => candidate.body)
+      .sort((left, right) => left.time.localeCompare(right.time));
+    evictBodies(all, entry, BODY_GLOBAL_BUDGET);
   }
 
   listTabs() {
@@ -300,17 +329,47 @@ export class BrowserManager {
 
   async openTab(owner: string) {
     const context = await this.ensureContext();
-    const blank = this.listTabs().find((tab) => tab.owner === UNCLAIMED && tab.page.url() === "about:blank");
+    let blank: Tab | undefined;
+    for (const candidate of this.listTabs()) {
+      if (candidate.owner !== UNCLAIMED_OWNER && candidate.owner !== ORPHANED_OWNER) continue;
+      if (candidate.page.isClosed() || candidate.page.url() !== "about:blank") continue;
+      if (await candidate.page.opener().catch(() => null)) continue;
+      blank = candidate;
+      break;
+    }
     const tab = blank ?? this.adopt(await context.newPage());
     tab.owner = owner;
     return tab;
   }
 
-  async closeTab(id: string) {
+  closeTab(id: string) {
+    const run = this.closing.then(() => this.closeNow(id));
+    this.closing = run.catch(() => undefined);
+    return run;
+  }
+
+  private async closeNow(id: string) {
     const tab = this.getTab(id);
     const context = await this.ensureContext();
-    if (context.pages().length <= 1) await context.newPage();
-    await tab.page.close();
+    const open = context.pages().filter((page) => !page.isClosed());
+    if (open.length <= 1 || open.every((page) => page === tab.page)) await context.newPage();
+    const closed = await withDeadline(tab.page.close(), CLOSE_TIMEOUT_MS);
+    if (closed === TIMED_OUT) throw new ToolError(`Tab ${id} did not close within ${CLOSE_TIMEOUT_MS / 1000} s.`, "The page may be busy; try again or check tabs_list.");
+  }
+
+  claimIfOrphaned(id: string, owner: string) {
+    const tab = this.tabs.get(id.trim());
+    if (tab?.owner === ORPHANED_OWNER) tab.owner = owner;
+  }
+
+  orphanTabsOf(owner: string) {
+    let count = 0;
+    for (const tab of this.tabs.values()) {
+      if (tab.owner !== owner) continue;
+      tab.owner = ORPHANED_OWNER;
+      count += 1;
+    }
+    return count;
   }
 
   locate(tab: Tab, target: string): Locator {
@@ -352,8 +411,12 @@ export class BrowserManager {
     return tab.console;
   }
 
-  drainEvents(tab: Tab) {
-    return tab.events.splice(0, tab.events.length);
+  drainEvents(tab: Tab, since?: number) {
+    return tab.events.splice(0, tab.events.length).map((event) =>
+      since === undefined || event.at >= since
+        ? `Event: ${event.text}`
+        : `Earlier event (${new Date(event.at).toISOString().slice(11, 19)}, before this call): ${event.text}`,
+    );
   }
 
   async shutdown() {

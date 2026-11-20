@@ -1,4 +1,30 @@
 const CALL_LOG_LINES = 8;
+const FAULT_LIMIT = 20;
+
+export type Fault = { time: string; source: string; message: string };
+
+const faults: Fault[] = [];
+
+export function recordFault(source: string, error: unknown) {
+  const message = (error instanceof Error ? (error.stack ?? error.message) : String(error)).split("\n").slice(0, 3).join(" | ");
+  faults.push({ time: new Date().toISOString(), source, message: message.slice(0, 500) });
+  if (faults.length > FAULT_LIMIT) faults.splice(0, faults.length - FAULT_LIMIT);
+}
+
+export function recentFaults(limit = 5) {
+  return faults.slice(-limit);
+}
+
+let guardsInstalled = false;
+
+export function installProcessGuards(label: string) {
+  if (guardsInstalled) return;
+  guardsInstalled = true;
+  process.on("unhandledRejection", (reason) => {
+    recordFault("unhandled rejection", reason);
+    console.error(`${label}: unhandled rejection kept the server running:`, reason instanceof Error ? (reason.stack ?? reason.message) : reason);
+  });
+}
 
 export class ToolError extends Error {
   readonly hint?: string;

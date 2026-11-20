@@ -1,10 +1,13 @@
-import type { Locator, Page } from "playwright-core";
+import type { Frame, Page } from "playwright-core";
+import { TIMED_OUT, withDeadline } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
+import { ToolError } from "./errors.ts";
 import { clipHeadTail, type OutputStore } from "./output.ts";
-import { interactiveOnly } from "./snapshot.ts";
+import { cutSubtree, interactiveOnly, limitDepth, parseRef, topLevelRefs } from "./snapshot.ts";
 
 const SETTLE_MS = 150;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
+const PROBE_TIMEOUT_MS = 1500;
 
 export type SnapshotOptions = {
   target?: string;
@@ -20,15 +23,38 @@ export function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+export async function pageTitle(page: Page, ms = PROBE_TIMEOUT_MS) {
+  const title = await withDeadline(page.title(), ms).catch(() => "");
+  return title === TIMED_OUT ? undefined : title;
+}
+
 export async function describePage(page: Page) {
   if (page.isClosed()) return "tab closed";
-  const title = await page.title().catch(() => "");
+  const title = await pageTitle(page);
+  if (title === undefined) return `${page.url()} (title unavailable: the page is not responding)`;
   return title ? `${page.url()} "${title}"` : page.url();
 }
 
+async function scopeRefs(manager: BrowserManager, tab: Tab, target: string) {
+  const ref = parseRef(target);
+  if (ref) return [ref];
+  const locator = await manager.resolve(tab, target);
+  const scoped = await locator.ariaSnapshot({ mode: "ai", timeout: SNAPSHOT_TIMEOUT_MS });
+  const refs = topLevelRefs(scoped);
+  if (refs.length === 0) throw new ToolError(`${target} has no element in the accessibility tree.`, "Target a visible element, or use read_text for its text.");
+  return refs;
+}
+
 export async function rawSnapshot(manager: BrowserManager, tab: Tab, options: Pick<SnapshotOptions, "target" | "depth" | "boxes">) {
-  const source: Page | Locator = options.target ? await manager.resolve(tab, options.target) : tab.page;
-  return source.ariaSnapshot({ mode: "ai", depth: options.depth, boxes: options.boxes, timeout: SNAPSHOT_TIMEOUT_MS });
+  const refs = options.target ? await scopeRefs(manager, tab, options.target) : undefined;
+  const full = await tab.page.ariaSnapshot({ mode: "ai", depth: refs ? undefined : options.depth, boxes: options.boxes, timeout: SNAPSHOT_TIMEOUT_MS });
+  if (!refs || !options.target) return full;
+  const parts = refs.map((ref) => cutSubtree(full, ref)).filter((part): part is string => part !== undefined);
+  if (parts.length === 0) {
+    throw new ToolError(`${options.target} is not in the current snapshot of tab ${tab.id}.`, "Refs are valid until the page changes. Take a new snapshot and use a ref from it.");
+  }
+  const scoped = parts.join("\n");
+  return options.depth ? limitDepth(scoped, options.depth) : scoped;
 }
 
 export function diffSnapshots(before: string, after: string, maxLines: number) {
@@ -93,13 +119,14 @@ function armMutationCounter() {
   const scope = globalThis as unknown as { __webAgentMutations?: { count: number } };
   if (scope.__webAgentMutations) {
     scope.__webAgentMutations.count = 0;
-    return;
+    return true;
   }
   const state = { count: 0 };
   scope.__webAgentMutations = state;
   new MutationObserver((records) => {
     state.count += records.length;
   }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  return true;
 }
 
 function readMutationCounter() {
@@ -107,10 +134,46 @@ function readMutationCounter() {
   return scope.__webAgentMutations?.count ?? -1;
 }
 
+async function probe<T>(frame: Frame, fn: () => T) {
+  const result = await withDeadline(frame.evaluate(fn), PROBE_TIMEOUT_MS).catch(() => TIMED_OUT);
+  return result === TIMED_OUT ? undefined : (result as T);
+}
+
+export type ArmedFrames = { known: Set<Frame>; armed: Set<Frame> };
+
+export async function armFrames(page: Page): Promise<ArmedFrames> {
+  const known = new Set(page.frames());
+  const armed = new Set<Frame>();
+  await Promise.all(
+    [...known].map(async (frame) => {
+      if (!frame.isDetached() && (await probe(frame, armMutationCounter))) armed.add(frame);
+    }),
+  );
+  return { known, armed };
+}
+
+export type MutationVerdict = { state: "changed" | "unchanged" | "unknown"; silent: number; total: number };
+
+export async function readFrames(page: Page, { known, armed }: ArmedFrames): Promise<MutationVerdict> {
+  const frames = page.frames();
+  const total = frames.length;
+  if (frames.some((frame) => !known.has(frame)) || [...known].some((frame) => armed.has(frame) && frame.isDetached())) {
+    return { state: "changed", silent: 0, total };
+  }
+  let silent = frames.filter((frame) => !armed.has(frame)).length;
+  const counts = await Promise.all(frames.filter((frame) => armed.has(frame)).map((frame) => probe(frame, readMutationCounter)));
+  for (const count of counts) {
+    if (count === undefined) silent += 1;
+    else if (count !== 0) return { state: "changed", silent: 0, total };
+  }
+  return { state: silent ? "unknown" : "unchanged", silent, total };
+}
+
 export type ActionOptions = {
   includeSnapshot?: boolean;
   includeDiff?: boolean;
   snapshotMaxChars?: number;
+  noChangeText?: string;
 };
 
 const DIFF_MAX_LINES = 60;
@@ -130,7 +193,8 @@ export async function runAction(
   };
 
   const snapshotBefore = options.includeDiff ? await rawSnapshot(manager, tab, {}).catch(() => undefined) : undefined;
-  await page.evaluate(armMutationCounter).catch(() => undefined);
+  const armed = await armFrames(page);
+  const startedAt = Date.now();
   page.on("framenavigated", onNavigation);
   let summary: string;
   try {
@@ -147,12 +211,16 @@ export async function runAction(
   if (page.isClosed()) {
     lines.push("The tab closed.");
   } else {
-    const mutations = await page.evaluate(readMutationCounter).catch(() => -1);
     if (navigated || page.url() !== urlBefore) lines.push(`Navigated to ${await describePage(page)}`);
-    else if (mutations > 0) lines.push("The page changed.");
-    else lines.push("No change detected on the page.");
+    else {
+      const verdict = await readFrames(page, armed);
+      if (verdict.state === "changed") lines.push("The page changed.");
+      else if (verdict.state === "unknown") {
+        lines.push(`Could not tell whether the page changed: ${verdict.silent} of ${verdict.total} frames did not answer. Take a snapshot to check.`);
+      } else if (options.noChangeText !== "") lines.push(options.noChangeText ?? "No change detected on the page.");
+    }
   }
-  lines.push(...manager.drainEvents(tab).map((event) => `Event: ${event}`));
+  lines.push(...manager.drainEvents(tab, startedAt));
 
   if (options.includeSnapshot && !page.isClosed()) {
     lines.push("", await renderSnapshot(manager, store, tab, { maxChars: options.snapshotMaxChars ?? 12_000 }));

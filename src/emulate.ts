@@ -1,4 +1,4 @@
-import type { CDPSession, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Page } from "playwright-core";
 
 export const VIEWPORT_PRESETS = {
   mobile: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true },
@@ -24,7 +24,84 @@ export type EmulateInput = {
   userAgent?: string;
 };
 
+type Brand = { brand: string; version: string };
+
+export type UserAgentMetadata = {
+  brands: Brand[];
+  fullVersionList?: Brand[];
+  fullVersion?: string;
+  platform: string;
+  platformVersion: string;
+  architecture: string;
+  model: string;
+  mobile: boolean;
+  bitness?: string;
+  wow64?: boolean;
+};
+
+export type RealUserAgent = { userAgent: string; metadata: UserAgentMetadata; observed: boolean };
+
+const realAgents = new WeakMap<BrowserContext, RealUserAgent>();
+
+async function readHints(page: Page) {
+  return page
+    .evaluate(async () => {
+      const data = (navigator as unknown as { userAgentData?: { getHighEntropyValues(hints: string[]): Promise<Record<string, unknown>> } }).userAgentData;
+      if (!data) return undefined;
+      return data.getHighEntropyValues(["architecture", "bitness", "brands", "fullVersionList", "mobile", "model", "platform", "platformVersion", "wow64", "uaFullVersion"]);
+    })
+    .catch(() => undefined);
+}
+
+export function synthesizeMetadata(userAgent: string, product: string): UserAgentMetadata {
+  const version = /Chrome\/([\d.]+)/.exec(product)?.[1] ?? /Chrome\/([\d.]+)/.exec(userAgent)?.[1] ?? "0.0.0.0";
+  const major = version.split(".")[0] ?? "0";
+  const brand = /Headless/i.test(product) ? "HeadlessChrome" : "Google Chrome";
+  const platform = /Windows/.test(userAgent) ? "Windows" : /Mac OS X/.test(userAgent) ? "macOS" : /Android/.test(userAgent) ? "Android" : "Linux";
+  return {
+    brands: [{ brand: "Not_A Brand", version: "99" }, { brand: "Chromium", version: major }, { brand, version: major }],
+    fullVersionList: [{ brand: "Not_A Brand", version: "99.0.0.0" }, { brand: "Chromium", version }, { brand, version }],
+    fullVersion: version,
+    platform,
+    platformVersion: "",
+    architecture: /arm|aarch64/i.test(userAgent) ? "arm" : "x86",
+    model: "",
+    mobile: /Mobile|Android/.test(userAgent),
+  };
+}
+
+export async function realUserAgent(page: Page, session: CDPSession): Promise<RealUserAgent> {
+  const context = page.context();
+  const cached = realAgents.get(context);
+  if (cached?.observed) return cached;
+  const version = (await session.send("Browser.getVersion")) as { userAgent: string; product: string };
+  const userAgent = (await page.evaluate(() => navigator.userAgent).catch(() => undefined)) ?? version.userAgent;
+  const hints = await readHints(page);
+  const brands = hints?.brands as Brand[] | undefined;
+  const real: RealUserAgent = brands?.length
+    ? {
+        userAgent,
+        observed: true,
+        metadata: {
+          brands,
+          fullVersionList: hints?.fullVersionList as Brand[] | undefined,
+          fullVersion: hints?.uaFullVersion as string | undefined,
+          platform: String(hints?.platform ?? ""),
+          platformVersion: String(hints?.platformVersion ?? ""),
+          architecture: String(hints?.architecture ?? ""),
+          model: String(hints?.model ?? ""),
+          mobile: Boolean(hints?.mobile),
+          bitness: hints?.bitness as string | undefined,
+          wow64: hints?.wow64 as boolean | undefined,
+        },
+      }
+    : (cached ?? { userAgent, observed: false, metadata: synthesizeMetadata(userAgent, version.product) });
+  realAgents.set(context, real);
+  return real;
+}
+
 type EmulationState = {
+  real: RealUserAgent;
   session: CDPSession;
   settings: Map<string, string>;
   media: Map<string, string>;
@@ -41,7 +118,8 @@ async function stateFor(page: Page) {
   const existing = states.get(page);
   if (existing) return existing;
   const session = await page.context().newCDPSession(page);
-  const state: EmulationState = { session, settings: new Map(), media: new Map(), offline: false, network: "none" };
+  const real = await realUserAgent(page, session);
+  const state: EmulationState = { real, session, settings: new Map(), media: new Map(), offline: false, network: "none" };
   states.set(page, state);
   page.once("close", () => states.delete(page));
   return state;
@@ -63,9 +141,16 @@ async function applyNetwork(state: EmulationState) {
   await state.session.send("Network.overrideNetworkState", { offline: state.offline, ...conditions });
 }
 
-async function applyUserAgent(page: Page, state: EmulationState) {
-  const current = state.userAgent ?? (await page.evaluate(() => navigator.userAgent));
-  await state.session.send("Emulation.setUserAgentOverride", { userAgent: current, acceptLanguage: state.locale });
+async function applyUserAgent(state: EmulationState) {
+  if (!state.userAgent && !state.locale) {
+    await state.session.send("Emulation.setUserAgentOverride", { userAgent: "" });
+    return;
+  }
+  await state.session.send("Emulation.setUserAgentOverride", {
+    userAgent: state.userAgent ?? state.real.userAgent,
+    acceptLanguage: state.locale,
+    userAgentMetadata: state.real.metadata,
+  });
 }
 
 export async function emulate(page: Page, input: EmulateInput) {
@@ -117,7 +202,7 @@ export async function emulate(page: Page, input: EmulateInput) {
       if (input.userAgent) settings.set("user agent", input.userAgent);
       else settings.delete("user agent");
     }
-    await applyUserAgent(page, state);
+    await applyUserAgent(state);
   }
   if (input.offline !== undefined || input.network !== undefined) {
     if (input.offline !== undefined) state.offline = input.offline;
@@ -136,6 +221,7 @@ export async function resetEmulation(page: Page) {
   if (!state) return [];
   states.delete(page);
   const cleared = [...state.settings.keys()];
+  if (state.userAgent || state.locale) await state.session.send("Emulation.setUserAgentOverride", { userAgent: "" }).catch(() => undefined);
   await state.session.detach().catch(() => undefined);
   if (state.geolocationOrigin) await page.context().clearPermissions().catch(() => undefined);
   return cleared;

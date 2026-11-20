@@ -1,13 +1,23 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
+import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
 import { normalizeUrl } from "./collect.ts";
 import { loadConfig, parseLaunchArgs } from "./config.ts";
-import { isAllowedHost, isAllowedOrigin } from "./daemon.ts";
+import { isAllowedHost, isAllowedOrigin, isDaemonProcess } from "./daemon.ts";
+import { synthesizeMetadata } from "./emulate.ts";
 import { describeError, ToolError } from "./errors.ts";
-import { clipHeadTail, clipWindow, Redactor, slugify } from "./output.ts";
+import { isStreamingMime, isTextualMime } from "./mime.ts";
+import { clipHeadTail, clipWindow, OutputStore, Redactor, slugify } from "./output.ts";
+import { registerSecret } from "./script.ts";
 import { GopassStore, parseEntry } from "./secrets.ts";
 import { countNoteLines, siteHost } from "./sites.ts";
-import { buildMatcher, findInSnapshot, interactiveOnly, parseRef } from "./snapshot.ts";
+import { buildMatcher, cutSubtree, findInSnapshot, interactiveOnly, limitDepth, parseRef, topLevelRefs } from "./snapshot.ts";
+import { cookieDomainMatches, evaluationSource } from "./tools.ts";
+import { PACKAGE_DIR, SERVER_VERSION } from "./version.ts";
 
 const SNAPSHOT = [
   '- generic [ref=e1]:',
@@ -75,6 +85,60 @@ test("Redactor masks registered values and ignores trivial ones", () => {
   assert.equal(redactor.redact("value=hunter2-long and 12"), "value=<secret:site:password> and 12");
 });
 
+test("Redactor masks JSON-escaped and URL-encoded forms", () => {
+  const redactor = new Redactor();
+  const value = 'p@ss "word"/ä &x';
+  redactor.register("site:password", value);
+  assert.equal(redactor.redact(JSON.stringify({ password: value })), '{"password":"<secret:site:password>"}');
+  assert.equal(redactor.redact(`a=${encodeURIComponent(value)}&b=1`), "a=<secret:site:password>&b=1");
+  assert.equal(redactor.redact(`a=${encodeURIComponent(value).replace(/%20/g, "+")}`), "a=<secret:site:password>");
+});
+
+test("Redactor drops values once their time to live has passed", () => {
+  let now = 1000;
+  const redactor = new Redactor(() => now);
+  redactor.register("site:otp", "123456", 120_000);
+  assert.equal(redactor.redact("code 123456"), "code <secret:site:otp>");
+  now += 120_001;
+  assert.equal(redactor.redact("order 123456"), "order 123456");
+});
+
+test("registerSecret masks passwords and custom fields, OTPs briefly, usernames never", () => {
+  let now = 0;
+  const redactor = new Redactor(() => now);
+  registerSecret(redactor, "site", "password", "pw-secret-1");
+  registerSecret(redactor, "site", "username", "person@example.test");
+  registerSecret(redactor, "site", "api_key", "key-secret-2");
+  registerSecret(redactor, "site", "otp", "654321");
+  assert.equal(redactor.redact("pw-secret-1 person@example.test key-secret-2 654321"), "<secret:site:password> person@example.test <secret:site:api_key> <secret:site:otp>");
+  now += 3 * 60 * 1000;
+  assert.match(redactor.redact("654321 pw-secret-1"), /^654321 <secret:site:password>$/);
+});
+
+test("OutputStore redacts text files unless raw, and prune keeps durable kinds", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "web-agent-store-"));
+  try {
+    const redactor = new Redactor();
+    redactor.register("site:password", "pw-secret-9");
+    const store = new OutputStore(root, redactor);
+    assert.equal(await readFile(await store.write("evaluate", "a.txt", "x pw-secret-9 y"), "utf8"), "x <secret:site:password> y");
+    assert.equal(await readFile(await store.write("har", "a.har", "pw-secret-9", { raw: true }), "utf8"), "pw-secret-9");
+    assert.equal((await readFile(await store.write("screenshots", "a.bin", Buffer.from("pw-secret-9")))).toString(), "pw-secret-9");
+    for (const kind of ["pages", "downloads", "cookies", "har", "extract", "snapshots", "collect"]) {
+      await mkdir(path.join(root, kind), { recursive: true });
+      const file = path.join(root, kind, "old.txt");
+      await writeFile(file, "old");
+      const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      await utimes(file, old, old);
+    }
+    await store.prune();
+    for (const kind of ["pages", "downloads", "cookies", "har", "extract"]) assert.deepEqual(await readdir(path.join(root, kind)).then((names) => names.includes("old.txt")), true, kind);
+    for (const kind of ["snapshots", "collect"]) assert.deepEqual(await readdir(path.join(root, kind)), [], kind);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("slugify makes file-safe names", () => {
   assert.equal(slugify("https://Example.com/a/b?c=1"), "example-com-a-b-c-1");
   assert.equal(slugify("???"), "page");
@@ -84,6 +148,99 @@ test("normalizeUrl adds a scheme only when missing", () => {
   assert.equal(normalizeUrl("example.com/x"), "https://example.com/x");
   assert.equal(normalizeUrl(" http://localhost:3000 "), "http://localhost:3000");
   assert.equal(normalizeUrl("about:blank"), "about:blank");
+  assert.equal(normalizeUrl("mailto:a@example.com"), "mailto:a@example.com");
+});
+
+test("normalizeUrl treats host:port as a URL, http for local hosts", () => {
+  assert.equal(normalizeUrl("localhost:3000"), "http://localhost:3000");
+  assert.equal(normalizeUrl("localhost:3000/a?b=1"), "http://localhost:3000/a?b=1");
+  assert.equal(normalizeUrl("127.0.0.1:8080/x"), "http://127.0.0.1:8080/x");
+  assert.equal(normalizeUrl("[::1]:3000"), "http://[::1]:3000");
+  assert.equal(normalizeUrl("app.localhost:5173"), "http://app.localhost:5173");
+  assert.equal(normalizeUrl("192.168.1.10:9000"), "http://192.168.1.10:9000");
+  assert.equal(normalizeUrl("10.0.0.2"), "http://10.0.0.2");
+  assert.equal(normalizeUrl("example.com:8443/api"), "https://example.com:8443/api");
+  assert.equal(normalizeUrl("172.32.0.1:80"), "https://172.32.0.1:80");
+});
+
+test("scoped snapshot helpers cut a subtree and keep its refs", () => {
+  assert.equal(cutSubtree(SNAPSHOT, "e5"), ['- main [ref=e5]:', '  - textbox "Search" [ref=e6]', '  - button "Add to cart" [ref=e7]', '  - iframe [ref=e8]:', '    - button "Pay" [ref=f1e2]'].join("\n"));
+  assert.equal(cutSubtree(SNAPSHOT, "e4"), ['- link "Cart" [ref=e4] [cursor=pointer]:', '  - /url: /cart'].join("\n"));
+  assert.equal(cutSubtree(SNAPSHOT, "e99"), undefined);
+  assert.equal(limitDepth(cutSubtree(SNAPSHOT, "e5") ?? "", 1), "- main [ref=e5]:");
+  assert.deepEqual(topLevelRefs(['  - textbox "A" [ref=e3]', '    - text: x', '  - button "B" [ref=e9]'].join("\n")), ["e3", "e9"]);
+});
+
+test("cookie delete matches a domain exactly or by subdomain", () => {
+  assert.equal(cookieDomainMatches(".x.com", "x.com"), true);
+  assert.equal(cookieDomainMatches("x.com", ".x.com"), true);
+  assert.equal(cookieDomainMatches("api.x.com", "x.com"), true);
+  assert.equal(cookieDomainMatches(".netflix.com", "x.com"), false);
+  assert.equal(cookieDomainMatches("box.com", "x.com"), false);
+});
+
+test("evaluationSource picks expression or statements by parsing, not by running", () => {
+  assert.match(evaluationSource("document.title"), /const value = \(document\.title/);
+  assert.match(evaluationSource("() => 1"), /const value = \(\(\) => 1/);
+  assert.match(evaluationSource("const n = 1; return n;"), /^\(async \(\) => \{\nconst n = 1; return n;\n\}\)\(\)$/);
+  assert.match(evaluationSource("JSON.parse('{')"), /const value = /);
+  assert.throws(() => evaluationSource("return ("), /does not parse/);
+});
+
+test("textual and streaming MIME detection", () => {
+  for (const type of ["text/html; charset=utf-8", "application/json", "application/ld+json", "application/vnd.api+json", "application/xml", "image/svg+xml", "application/javascript"]) {
+    assert.equal(isTextualMime(type), true, type);
+  }
+  for (const type of ["image/png", "application/octet-stream", "application/pdf", "", undefined]) assert.equal(isTextualMime(type), false, String(type));
+  assert.equal(isStreamingMime("text/event-stream; charset=utf-8"), true);
+  assert.equal(isStreamingMime("text/plain"), false);
+});
+
+test("deadline, abort and pool helpers", async () => {
+  assert.equal(await withDeadline(new Promise(() => undefined), 20), TIMED_OUT);
+  assert.equal(await withDeadline(Promise.resolve(5), 20), 5);
+  const controller = new AbortController();
+  const waiting = untilAborted(new Promise(() => undefined), controller.signal, () => new Error("stopped"));
+  controller.abort();
+  await assert.rejects(waiting, /stopped/);
+  let active = 0;
+  let peak = 0;
+  const results = await runPool([1, 2, 3, 4, 5], 2, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return value * 2;
+  });
+  assert.deepEqual(results, [2, 4, 6, 8, 10]);
+  assert.equal(peak, 2);
+});
+
+test("synthesized client hints keep three brands", () => {
+  const metadata = synthesizeMetadata("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140.0.1.2 Safari/537.36", "Chrome/140.0.1.2");
+  assert.equal(metadata.brands.length, 3);
+  assert.equal(metadata.platform, "Linux");
+  assert.ok(metadata.brands.some((brand) => brand.brand === "Google Chrome" && brand.version === "140"));
+});
+
+test("isDaemonProcess requires this package's server.ts and --daemon", async () => {
+  assert.equal(isDaemonProcess(process.pid), false);
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)", "src/server.ts", "--daemon"], { cwd: PACKAGE_DIR, stdio: "ignore" });
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)", "/elsewhere/server.ts", "--daemon"], { cwd: tmpdir(), stdio: "ignore" });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(isDaemonProcess(child.pid), true);
+    assert.equal(isDaemonProcess(other.pid), false);
+  } finally {
+    child.kill();
+    other.kill();
+  }
+});
+
+test("server version comes from package.json", async () => {
+  const pkg = JSON.parse(await readFile(path.join(PACKAGE_DIR, "package.json"), "utf8")) as { version: string };
+  assert.equal(SERVER_VERSION, pkg.version);
+  assert.equal(loadConfig({}).serverVersion, pkg.version);
 });
 
 test("host and origin validation only accepts the loopback endpoint", () => {

@@ -93,7 +93,6 @@ after(async () => {
   await fixture?.close();
   await rm(workDir, { recursive: true, force: true });
 });
-
 test("every tool and parameter is described", async () => {
   const { tools } = await client.listTools();
   assert.equal(tools.length, 37);
@@ -220,10 +219,11 @@ test("browser flow", async (t) => {
   });
 
   await t.test("intercept modifies, mocks and blocks requests", async () => {
-    assert.match(await ok("intercept", { tab, action: "add", url: "/api/echo", mode: "modify", set_headers: { "x-agent-test": "yes" } }), /Added rule #1/);
+    const firstRule = Number(/Added rule #(\d+)/.exec(await ok("intercept", { tab, action: "add", url: "/api/echo", mode: "modify", set_headers: { "x-agent-test": "yes" } }))?.[1]);
+    assert.ok(firstRule >= 1);
     await ok("click", { tab, target: "#echo" });
     await ok("wait_for", { tab, text: "x-agent-test" });
-    assert.match(await ok("intercept", { tab, action: "list" }), /#1 .* 1 hits/);
+    assert.match(await ok("intercept", { tab, action: "list" }), new RegExp(`#${firstRule} .* 1 hits`));
 
     await ok("intercept", { tab, action: "add", url: "/api/data", mode: "mock", mock_body: JSON.stringify({ message: "mocked reply" }) });
     await ok("click", { tab, target: "#load" });
@@ -234,7 +234,8 @@ test("browser flow", async (t) => {
     await ok("click", { tab, target: "#load" });
     await ok("wait_for", { tab, text: "loaded from api" });
 
-    await ok("intercept", { tab, action: "add", url: "/api/data", mode: "block" });
+    const blockRule = Number(/Added rule #(\d+)/.exec(await ok("intercept", { tab, action: "add", url: "/api/data", mode: "block" }))?.[1]);
+    assert.ok(blockRule > firstRule + 2, `rule ids were reused: ${firstRule} then ${blockRule}`);
     await ok("click", { tab, target: "#load" });
     assert.match(await ok("network_requests", { tab, failed_only: true }), /FAILED/);
     await ok("intercept", { tab, action: "clear" });
@@ -557,7 +558,7 @@ test("browser flow", async (t) => {
 
   await t.test("dismiss_overlays rejects cookie banners, closes modals and handles iframes", async () => {
     await ok("navigate", { tab, url: `${fixture.url}/consent` });
-    const text = await ok("dismiss_overlays", { tab });
+    const text = await ok("dismiss_overlays", { tab, allow_accept: true });
     assert.match(text, /Clicked "reject all" \(reject\) in #cookie-banner, main frame/);
     assert.match(text, /Clicked "kapat" \(close\)/);
     assert.match(text, /Clicked "alle ablehnen" \(reject\) in #consent, frame/);
@@ -632,7 +633,10 @@ test("browser flow", async (t) => {
     assert.match(text, /Adapter: fixture adapter, model haiku, 2 call\(s\)/);
     assert.match(text, /input tokens 2000, output tokens 40/);
     assert.ok(!text.includes("Paragraph 8 of"), "page content leaked into the result");
-    assert.match(askPrompts.at(-2) ?? askPrompts.at(-1) ?? "", /<question>\nWhich page mentions paragraph 7\?\n<\/question>$/);
+    const prompt = askPrompts.at(-2) ?? askPrompts.at(-1) ?? "";
+    const questionAt = prompt.indexOf("<question>\nWhich page mentions paragraph 7?\n</question>");
+    assert.ok(questionAt !== -1, `no question block in:\n${prompt}`);
+    assert.ok(questionAt > prompt.lastIndexOf("</document>"), "the question block comes before the last document");
     const file = /Full answers: (\S+\.md)/.exec(text)?.[1] ?? "";
     assert.match(await readFile(file, "utf8"), /Paragraph 7 is in the article/);
 
@@ -645,5 +649,225 @@ test("browser flow", async (t) => {
 
   await t.test("secrets_list returns names only", async () => {
     assert.equal(await ok("secrets_list"), "fixture/site");
+  });
+});
+
+function openedTab(text: string) {
+  const id = /Opened (t\d+)/.exec(text)?.[1];
+  assert.ok(id, text);
+  return id;
+}
+
+async function counter(tab: string) {
+  return Number(/(\d+)\s*$/.exec(await ok("evaluate", { tab, expression: "window.clicks || 0" }))?.[1]);
+}
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("review regressions", async (t) => {
+  await t.test("cancelling a background job stops it clicking in its bound tab", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/counter` }));
+    const started = await ok("run_script", { tab, background: true, code: "for (;;) { await page.click('#count'); }" });
+    const id = /job (j\d+)/.exec(started)?.[1] ?? "";
+    await pause(600);
+    assert.ok((await counter(tab)) > 0);
+    assert.match(await ok("jobs", { action: "cancel", id }), / cancelled /);
+    await pause(200);
+    const afterCancel = await counter(tab);
+    await pause(800);
+    assert.equal(await counter(tab), afterCancel);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("a foreground timeout stops the script clicking", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/counter` }));
+    const result = await call("run_script", { tab, timeout_ms: 1000, code: "for (;;) { try { await page.click('#count'); } catch {} }" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /timed out after 1000 ms/);
+    await pause(200);
+    const afterTimeout = await counter(tab);
+    assert.ok(afterTimeout > 0);
+    await pause(800);
+    assert.equal(await counter(tab), afterTimeout);
+    assert.match(await ok("tabs_list"), new RegExp(`${tab} \\[yours\\]`));
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("run_script save() defaults to .txt", async () => {
+    const text = await ok("run_script", { code: "return await save('report', 'plain text');" });
+    assert.match(text, /-report\.txt$/m);
+  });
+
+  await t.test("dismiss_overlays never clicks commit buttons", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/checkout` }));
+    const text = await ok("dismiss_overlays", { tab, allow_accept: true });
+    assert.match(text, /Clicked "vazgeç" \(cancel\)/);
+    assert.doesNotMatch(text, /onayla|payment/i);
+    assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
+    const again = await ok("dismiss_overlays", { tab, allow_accept: true });
+    assert.doesNotMatch(again, /Clicked/);
+    assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
+    await ok("navigate", { tab, url: `${fixture.url}/consent` });
+    const defaults = await ok("dismiss_overlays", { tab });
+    assert.match(defaults, /Clicked "reject all"/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("a click that only changes an iframe reports a change", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/frames` }));
+    const snapshot = await ok("snapshot", { tab });
+    const text = await ok("click", { tab, target: refOf(snapshot, 'button "Inner only"') });
+    assert.match(text, /The page changed/);
+    assert.match(await ok("scroll", { tab, direction: "down", amount: 10 }), /No DOM change after the action|The page changed/);
+    await ok("navigate", { tab, url: fixture.url });
+    const filled = await ok("fill", { tab, target: "#email", text: "quiet@example.test" });
+    assert.doesNotMatch(filled, /No change detected|No DOM change/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("secrets stay masked in overflow files and usernames are not masked", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("fill", { tab, target: "#password", secret: "fixture/site" });
+    await ok("fill", { tab, target: "#email", secret: "fixture/site", secret_field: "username" });
+    const text = await ok("evaluate", {
+      tab,
+      max_chars: 200,
+      expression: "({ pad: 'x'.repeat(400), raw: document.querySelector('#password').value, json: JSON.stringify({ p: document.querySelector('#password').value + '\"' }), url: encodeURIComponent(document.querySelector('#password').value + ' &'), user: document.querySelector('#email').value })",
+    });
+    const file = /saved to (\S+)\.\]/.exec(text)?.[1] ?? "";
+    const saved = await readFile(file, "utf8");
+    assert.ok(!saved.includes(TEST_SECRET), "secret leaked into an overflow file");
+    assert.ok(!saved.includes(encodeURIComponent(TEST_SECRET)), "url-encoded secret leaked");
+    assert.match(saved, /fixture-user/);
+    assert.match(saved, /<secret:fixture\/site:password>/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("evaluate runs code once and reports runtime errors", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const before = fixture.hits();
+    const result = await call("evaluate", { tab, expression: "fetch('/api/hit', { method: 'POST' }).then(() => JSON.parse('{'))" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /SyntaxError|JSON/);
+    assert.equal(fixture.hits(), before + 1);
+    const local = await call("evaluate", { tab, expression: "(window.__runs = (window.__runs || 0) + 1, JSON.parse('{'))" });
+    assert.equal(local.isError, true);
+    assert.match(await ok("evaluate", { tab, expression: "window.__runs" }), /\b1\s*$/);
+    const syntax = await call("evaluate", { tab, expression: "return (" });
+    assert.equal(syntax.isError, true);
+    assert.match(syntax.text, /does not parse/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("a hung tab does not block tabs_list or collect_pages", async () => {
+    const tab = openedTab(await ok("tab_open", {}));
+    await ok("evaluate", { tab, expression: "setTimeout(() => { for (;;) {} }, 50); 'armed'" });
+    await pause(300);
+    const started = Date.now();
+    assert.match(await ok("tabs_list"), new RegExp(`${tab} \\[yours\\] about:blank \\(unresponsive\\)`));
+    assert.ok(Date.now() - started < 5000);
+    await ok("tab_close", { tab });
+    const before = deps.manager.listTabs().length;
+    const collectStart = Date.now();
+    const collected = await ok("collect_pages", { urls: [`${fixture.url}/hang`], include: ["text"], settle_ms: 600, timeout_ms: 1500 });
+    assert.match(collected, /01 FAILED .*timed out/);
+    assert.ok(Date.now() - collectStart < 15_000);
+    await pause(300);
+    assert.equal(deps.manager.listTabs().length, before);
+  });
+
+  await t.test("streaming responses do not hang network tools", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/sse` }));
+    await ok("wait_for", { tab, text: "streamed hello" });
+    const list = await ok("network_requests", { tab, pattern: "/events" });
+    const id = Number(/#(\d+) GET 200/.exec(list)?.[1]);
+    const started = Date.now();
+    assert.match(await ok("network_requests", { tab, id }), /streaming response/);
+    assert.match(await ok("network_export", { tab }), /Exported/);
+    assert.ok(Date.now() - started < 10_000);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("a scoped snapshot keeps refs outside the subtree valid", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const full = await ok("snapshot", { tab });
+    const outside = refOf(full, 'button "Change status"');
+    const scoped = await ok("snapshot", { tab, target: "#signup2" });
+    assert.match(scoped, /textbox "Name"/);
+    assert.doesNotMatch(scoped, /Change status/);
+    const byRef = await ok("snapshot", { tab, target: refOf(full, 'button "Register"') });
+    assert.match(byRef, /button "Register"/);
+    assert.match(await ok("click", { tab, target: outside }), /The page changed/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("patch_response patches JSON and leaves images intact", async () => {
+    const tab = openedTab(await ok("tab_open", {}));
+    await ok("intercept", { tab, action: "add", url: fixture.url, mode: "patch_response", replacements: [{ find: "loaded from api", replace: "patched by rule" }] });
+    await ok("navigate", { tab, url: `${fixture.url}/media`, wait_until: "load" });
+    assert.match(await ok("evaluate", { tab, expression: "document.getElementById('pixel').naturalWidth" }), /\b1\s*$/);
+    await ok("click", { tab, target: "#media-load" });
+    await ok("wait_for", { tab, text: "patched by rule" });
+    assert.doesNotMatch(await ok("intercept", { tab, action: "list" }), /failed/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("emulate keeps client-hint brands for locale-only overrides", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const brands = async () => (await ok("evaluate", { tab, expression: "JSON.stringify(navigator.userAgentData.brands)" })).split("\n").slice(1).join("\n");
+    const before = await brands();
+    assert.ok(JSON.parse(before).length > 0, before);
+    await ok("emulate", { tab, locale: "de-DE" });
+    assert.equal(await brands(), before);
+    await ok("emulate", { tab, user_agent: "FixtureAgent/2.0" });
+    assert.equal(JSON.parse(await brands()).length, JSON.parse(before).length);
+    await ok("emulate", { tab, user_agent: "", locale: "" });
+    assert.equal(await brands(), before);
+    await ok("emulate", { tab, reset: true });
+    assert.equal(await brands(), before);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("cookie delete matches the domain exactly or by subdomain", async () => {
+    await ok("cookies", { action: "set", domain: ".netflix.com", name: "keep_me", value: "1" });
+    await ok("cookies", { action: "set", domain: ".x.com", name: "drop_me", value: "1" });
+    assert.match(await ok("cookies", { action: "delete", domain: "x.com" }), /Deleted 1 cookies/);
+    assert.match(await ok("cookies", { action: "list", domain: "netflix" }), /keep_me/);
+    assert.match(await ok("cookies", { action: "delete", domain: "netflix.com" }), /Deleted 1 cookies/);
+  });
+
+  await t.test("events from before an action are reported as earlier", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("evaluate", { tab, expression: "setTimeout(() => alert('from before'), 0); 1" });
+    await pause(300);
+    const text = await ok("click", { tab, target: "#noop" });
+    assert.match(text, /Earlier event .*"from before"/);
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("tab_open does not take over an unclaimed popup", async () => {
+    const context = await deps.manager.ensureContext();
+    const parent = await context.newPage();
+    await parent.goto(fixture.url);
+    const [popup] = await Promise.all([context.waitForEvent("page"), parent.evaluate(() => void window.open("about:blank"))]);
+    await pause(200);
+    const popupTab = deps.manager.tabOf(popup);
+    assert.ok(popupTab);
+    const opened = openedTab(await ok("tab_open", {}));
+    assert.notEqual(opened, popupTab.id);
+    await ok("tab_close", { tab: opened });
+    await popup.close();
+    await parent.close();
+  });
+
+  await t.test("concurrent closes never leave the browser without a page", async () => {
+    for (let index = 0; index < 3; index += 1) await ok("tab_open", {});
+    const ids = deps.manager.listTabs().map((tab) => tab.id);
+    const results = await Promise.all(ids.map((id) => call("tab_close", { tab: id })));
+    assert.ok(results.every((result) => !result.isError), results.map((result) => result.text).join("\n"));
+    const context = await deps.manager.ensureContext();
+    assert.ok(context.pages().length >= 1);
+    assert.match(await ok("tabs_list"), /Browser running/);
+    openedTab(await ok("tab_open", { url: fixture.url }));
   });
 });

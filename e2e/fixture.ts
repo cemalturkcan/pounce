@@ -95,15 +95,73 @@ Bültenimize abone olun
 <p id="frame-state">frame open</p>
 </body></html>`;
 
+const COUNTER = `<!doctype html>
+<html><head><title>Fixture Counter</title></head><body>
+<button id="count" onclick="window.clicks = (window.clicks || 0) + 1; document.getElementById('count-out').textContent = String(window.clicks)">Count</button>
+<p id="count-out">0</p>
+</body></html>`;
+
+const FRAMES = `<!doctype html>
+<html><head><title>Fixture Frames</title></head><body>
+<p id="outer">outer unchanged</p>
+<iframe title="Inner" srcdoc="<button id=&quot;inner&quot; onclick=&quot;this.textContent='inner clicked'&quot;>Inner only</button>"></iframe>
+</body></html>`;
+
+const CHECKOUT = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Fixture Checkout</title></head><body>
+<main><h1>Checkout</h1><p id="order-state">pending</p></main>
+<div class="order-modal" role="dialog" aria-modal="true" style="position:fixed;top:20%;left:20%;z-index:10;background:white;padding:20px">
+Siparişinizi onaylıyor musunuz? Gizlilik politikası ve KVKK metnini okudum.
+<button onclick="document.getElementById('order-state').textContent = 'dialog dismissed'; this.parentElement.remove()">Vazgeç</button>
+<button onclick="document.getElementById('order-state').textContent = 'ORDER PLACED'">Siparişi Onayla</button>
+</div>
+<div class="checkout-overlay" style="position:sticky;bottom:0;background:#ddd;padding:10px">
+<button onclick="document.getElementById('order-state').textContent = 'PAYMENT STARTED'">Continue to payment</button>
+</div>
+</body></html>`;
+
+const MEDIA = `<!doctype html>
+<html><head><title>Fixture Media</title></head><body>
+<img id="pixel" src="/pixel.png" alt="pixel">
+<p id="media-status">-</p>
+<button id="media-load" onclick="fetch('/api/data').then(r => r.json()).then(d => document.getElementById('media-status').textContent = d.message)">Load media data</button>
+</body></html>`;
+
+const SSE = `<!doctype html>
+<html><head><title>Fixture Stream</title></head><body>
+<p id="sse-status">waiting</p>
+<script>const source = new EventSource("/events"); source.onmessage = (event) => { document.getElementById("sse-status").textContent = event.data; };</script>
+</body></html>`;
+
+const HANG = `<!doctype html>
+<html><head><title>Fixture Hang</title></head><body><p>about to hang</p>
+<script>setTimeout(() => { for (;;) {} }, 300);</script>
+</body></html>`;
+
+const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+
 export type Fixture = {
   url: string;
+  hits: () => number;
   close: () => Promise<void>;
 };
 
 export async function startFixture(): Promise<Fixture> {
+  let hits = 0;
+  const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
   const server = http.createServer((request, response) => {
-    const pathname = (request.url ?? "/").split("?")[0];
-    if (pathname === "/") {
+    const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+    if (pages[pathname]) {
+      response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
+    } else if (pathname === "/pixel.png") {
+      response.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" }).end(PIXEL);
+    } else if (pathname === "/api/hit") {
+      if (request.method === "POST") hits += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ hits }));
+    } else if (pathname === "/events") {
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      response.write("data: streamed hello\n\n");
+    } else if (pathname === "/") {
       response.writeHead(200, { "content-type": "text/html" }).end(HOME);
     } else if (pathname === "/article") {
       response.writeHead(200, { "content-type": "text/html" }).end(ARTICLE);
@@ -128,6 +186,7 @@ export async function startFixture(): Promise<Fixture> {
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
+    hits: () => hits,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

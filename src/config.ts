@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import path from "node:path";
+import { SERVER_VERSION } from "./version.ts";
 
 export type Engine = "patchright" | "playwright";
 
@@ -66,7 +67,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     serverName: "web-agent-mcp",
-    serverVersion: "0.2.0",
+    serverVersion: SERVER_VERSION,
     host: "127.0.0.1",
     port,
     endpoint: `http://127.0.0.1:${port}/mcp`,

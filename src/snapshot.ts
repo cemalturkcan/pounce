@@ -44,6 +44,43 @@ export function interactiveOnly(snapshot: string) {
     .join("\n");
 }
 
+function refOfLine(line: string) {
+  return /\[ref=([^\]\s]+)\]/.exec(line)?.[1];
+}
+
+export function topLevelRefs(snapshot: string) {
+  const lines = snapshot.split("\n").filter((line) => line.trim());
+  const minIndent = Math.min(...lines.map(indentOf));
+  const refs: string[] = [];
+  for (const line of lines) {
+    if (indentOf(line) !== minIndent) continue;
+    const ref = refOfLine(line);
+    if (ref) refs.push(ref);
+  }
+  return refs;
+}
+
+export function cutSubtree(snapshot: string, ref: string) {
+  const lines = snapshot.split("\n");
+  const start = lines.findIndex((line) => refOfLine(line) === ref);
+  if (start === -1) return undefined;
+  const base = indentOf(lines[start] ?? "");
+  const picked = [lines[start] ?? ""];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.trim() && indentOf(line) <= base) break;
+    picked.push(line);
+  }
+  return picked.map((line) => line.slice(Math.min(base, indentOf(line)))).join("\n").trimEnd();
+}
+
+export function limitDepth(snapshot: string, depth: number) {
+  return snapshot
+    .split("\n")
+    .filter((line) => indentOf(line) / 2 < depth)
+    .join("\n");
+}
+
 export function buildMatcher(query: string, useRegex: boolean) {
   if (useRegex) {
     const expression = new RegExp(query, "i");
