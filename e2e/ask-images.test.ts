@@ -138,6 +138,22 @@ test("ask_pages images", async (t) => {
     assert.ok(!/downscaled/.test(text));
   });
 
+  await t.test("review mode sends whole-page tiles by default with the review prompt", async () => {
+    const { REVIEW_SYSTEM } = await import("../src/ask.ts");
+    const text = await ok("ask_pages", { question: "Check for broken layouts", urls: [`${base}/tall`, `${base}/text`], mode: "review" });
+    const call = lastCall();
+    assert.equal(call.system, REVIEW_SYSTEM);
+    assert.ok((call.images ?? []).filter((image) => /tall\.md tile \d\/4$/.test(image.label ?? "")).length === 4, JSON.stringify(call.images?.map((image) => image.label)));
+    assert.ok((call.images ?? []).some((image) => /text\.md tile 1\/\d$/.test(image.label ?? "")));
+    assert.match(call.prompt, /<request>\nCheck for broken layouts\n<\/request>/);
+    assert.match(text, /^Review: Check for broken layouts$/m);
+  });
+
+  await t.test("review mode keeps an explicit images choice", async () => {
+    await ok("ask_pages", { question: "Check for broken layouts", urls: [`${base}/canvas`], mode: "review", images: "none" });
+    assert.equal(lastCall().images, undefined);
+  });
+
   await t.test("files ignore image options and say so", async () => {
     const file = path.join(workDir, "plain.md");
     await writeFile(file, "Plain text page");

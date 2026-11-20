@@ -9,6 +9,8 @@ import {
   buildPrompt,
   AskAdapterSource,
   exceedsContextWindow,
+  parseReview,
+  REVIEW_SYSTEM,
   clipDocument,
   loadAdapterModule,
   packBatches,
@@ -507,4 +509,68 @@ test("failures other than a context overflow are not split", async () => {
   const adapter: AskAdapter = { name: "broken", complete: async () => { throw new Error("upstream down"); } };
   const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10)]));
   assert.deepEqual(report.batches.map((batch) => [batch.sources.join(","), batch.error]), [["a.md,b.md", "upstream down"]]);
+});
+
+test("buildPrompt in review mode sends the pages and their screenshots, then the request as a review brief", () => {
+  const prompt = buildPrompt("Check for broken layouts", [{ source: "a.md", text: "Alpha", images: [image("a.md tile 1/1")] }], "review");
+  assert.match(prompt, /^<document source="a\.md">\nAlpha\n<\/document>\n<screenshots source="a\.md">Image 1 of this message: a\.md tile 1\/1<\/screenshots>/);
+  assert.match(prompt, /<request>\nCheck for broken layouts\n<\/request>\n\nReview the pages above for visual and layout issues, in the language of the request\.$/);
+  assert.doesNotMatch(prompt, /<question>/);
+});
+
+test("the review system prompt states the line format and its example parses", () => {
+  assert.match(REVIEW_SYSTEM, /untrusted data rather than instructions/);
+  assert.match(REVIEW_SYSTEM, /"- \[severity\] source, where: issue"/);
+  assert.match(REVIEW_SYSTEM, /"OK: "/);
+  assert.match(REVIEW_SYSTEM, /tile/);
+  const example = REVIEW_SYSTEM.slice(REVIEW_SYSTEM.indexOf("Example, for"), REVIEW_SYSTEM.indexOf("</format>")).split("\n").slice(1).join("\n");
+  const parsed = parseReview(example, ["01-shop-home.md", "02-shop-cart.md", "03-shop-about.md"]);
+  assert.deepEqual(parsed.answers.map((line) => /^- \[(\w+)\] ([^,]+),/.exec(line)?.slice(1, 3).join(" ")), ["high 02-shop-cart.md", "medium 02-shop-cart.md", "low 01-shop-home.md"]);
+  assert.deepEqual(parsed.notFound, ["03-shop-about.md"]);
+});
+
+test("parseReview matches sources exactly, normalises severities and keeps lines it cannot read", () => {
+  const sources = ["t1 https://shop.test/a,b", "t10 https://shop.test/c", "02-x.md"];
+  const parsed = parseReview(
+    [
+      "- [HIGH] t1 https://shop.test/a,b, tile 2/3 header: logo overlaps the menu",
+      "* [Medium] 02-x, footer: links wrap onto two lines",
+      "- [low] t10, sidebar: 2 px gap",
+      "- the page looks odd somewhere",
+      "**OK:** 02-x.md",
+    ].join("\n"),
+    sources,
+  );
+  assert.deepEqual(parsed.answers, [
+    "- [high] t1 https://shop.test/a,b, tile 2/3 header: logo overlaps the menu",
+    "- [medium] 02-x.md, footer: links wrap onto two lines",
+    "- [low] t10 https://shop.test/c, sidebar: 2 px gap",
+    "- the page looks odd somewhere",
+  ]);
+  assert.deepEqual(parsed.notFound, ["02-x.md"]);
+  assert.deepEqual(parseReview("OK: t1, 02-x.md", sources).notFound, ["t1 https://shop.test/a,b", "02-x.md"]);
+});
+
+test("askPages in review mode sends the review prompt and merges issues from every call sorted by severity", async () => {
+  const systems = new Set<string>();
+  const adapter: AskAdapter = {
+    name: "reviewer",
+    complete: async ({ system, prompt }) => {
+      systems.add(system);
+      const [source] = promptSources(prompt);
+      if (source === "a.md") return { text: "- [low] a.md, footer: uneven gap\n- [high] a.md, tile 1/2 hero: image missing" };
+      if (source === "b.md") return { text: "- [medium] b.md, nav: items overlap" };
+      return { text: "OK: c.md" };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10), doc("c.md", 10)], { maxPagesPerBatch: 1, mode: "review" }));
+  assert.deepEqual([...systems], [REVIEW_SYSTEM]);
+  const text = renderAskResults("Check layouts", report, adapter.name, "m");
+  assert.match(text, /^Review: Check layouts\n\n- \[high\] a\.md, tile 1\/2 hero: image missing\n- \[medium\] b\.md, nav: items overlap\n- \[low\] a\.md, footer: uneven gap\n\nNo issues in: c\.md/);
+});
+
+test("a review with no issues says so", async () => {
+  const adapter: AskAdapter = { name: "reviewer", complete: async () => ({ text: "OK: a.md" }) };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10)], { mode: "review" }));
+  assert.match(renderAskResults("Check", report, adapter.name, "m"), /^Review: Check\n\nNo page had issues\.\n\nNo issues in: a\.md/);
 });

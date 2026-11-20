@@ -47,6 +47,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       "Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix.",
     ].join("\n"),
     input: {
+      mode: z.enum(["answer", "review"]).optional().describe("answer (default) returns facts with their source page. review checks the pages for visual and layout problems and returns one line per issue, \"- [high|medium|low] <page>, <where>: <issue>\", sorted by severity, plus the pages with no issues; question is then the review brief, and images default to full."),
       question: z.string().min(3).max(4000).describe("The question, phrased so it can be answered from each page on its own, for example: What is the price and battery life of the laptop on this page?"),
       files: z.array(z.string().min(1)).max(500).optional().describe("Absolute paths of text or Markdown files to read."),
       dir: z.string().optional().describe("A collect_pages output folder; its .md files are used, or .txt where a page has no .md."),
@@ -67,7 +68,8 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
       const adapter = await deps.ask.get();
       const documents: AskDocument[] = [];
-      const imageMode = input.images ?? "auto";
+      const mode = input.mode ?? "answer";
+      const imageMode = input.images ?? (mode === "review" ? "full" : "auto");
       const regions = input.regions ?? [];
       const wantsImages = imageMode !== "none" || regions.length > 0;
       const shots = new Map<string, PageImages>();
@@ -126,7 +128,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
           documents.push({ source, text, images: images?.images });
         }
       }
-      if ((input.files || input.dir) && (input.images === "viewport" || input.images === "full" || regions.length)) imageLines.push("images and regions apply to tabs and urls only, so no screenshots were sent.");
+      if ((input.files || input.dir) && (input.images === "viewport" || input.images === "full" || regions.length || mode === "review")) imageLines.push("images and regions apply to tabs and urls only, so no screenshots were sent.");
       for (const [source, captured] of shots) imageLines.push(...describePageImages(source, captured));
       if (documents.every((document) => !document.text.trim() && !document.images?.length)) throw new ToolError(`All pages are empty: ${documents.map((document) => document.source).join(", ")}.`);
 
@@ -142,6 +144,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         maxTokens: input.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         timeoutMs: input.timeout_ms,
         signal,
+        mode,
       });
       const prepared = [...shots.values()].flatMap((captured) => captured.prepared);
       const sentLine = prepared.length ? `\n${describeSent(prepared)}` : "";
