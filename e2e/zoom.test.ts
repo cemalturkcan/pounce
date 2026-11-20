@@ -197,9 +197,9 @@ for (const zoom of ZOOMS) {
     await t.test("ask_pages full tiles cover the page down to its bottom", async () => {
       await call("ask_pages", { question: "What is on the page?", tabs: [tab], images: "full" });
       const images = calls.at(-1)?.images ?? [];
-      assert.equal(images.length, 2);
+      assert.equal(images.length, 1 + Math.ceil((PAGE_HEIGHT - height) / (height - 80)));
       const first = await decode(Buffer.from(images[0]?.data ?? "", "base64"));
-      assert.deepEqual([first.width, first.height], [width, 1600]);
+      assert.deepEqual([first.width, first.height], [width, height]);
       assertColor(first, 150, 145, MAGENTA, "box in the first tile");
       const last = await decode(Buffer.from(images.at(-1)?.data ?? "", "base64"));
       assert.equal(last.width, width);
