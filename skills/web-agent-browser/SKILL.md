@@ -42,7 +42,7 @@ Working out a site takes effort: which selector survives a re-render, which JSON
 
 # Reading many pages
 
-`collect_pages` keeps pages out of the conversation by writing them to files. When the answer is spread over dozens of them (a comparison, a price or spec table, which pages mention something), reading them yourself puts all of that text back in your context. `ask_pages` avoids that: it sends the pages in a few large batches to a small model (Haiku by default), each batch answers your question with the file name behind every fact, and you get back only the merged answer lines, the pages where nothing relevant was found, and the path of a file with the full answers. Give it the collect folder as `dir`, a list of `files`, `urls` to collect first, or open `tabs`.
+`collect_pages` keeps pages out of the conversation by writing them to files. When the answer is spread over dozens of them (a comparison, a price or spec table, which pages mention something), reading them yourself puts all of that text back in your context. `ask_pages` avoids that: it sends the pages in a few large batches to a small model (Haiku by default, through the configured model adapter), each batch answers your question with the file name behind every fact, and you get back only the merged answer lines, the pages where nothing relevant was found, and the path of a file with the full answers. Give it the collect folder as `dir`, a list of `files`, `urls` to collect first, or open `tabs`.
 
 Ask questions that each page can answer on its own ("What is the price, screen size and battery life of the laptop on this page?"), then do the comparing yourself on the short answers. A fast model reading quickly can misread; check the facts a decision rests on against the page itself.
 
@@ -90,6 +90,10 @@ Signing up, filling in their details, adding to a cart, checking out and paying 
 - `permissions` grants an origin geolocation, notifications, camera, microphone, clipboard access and the like for the whole profile. Native permission bubbles are not in the page, so this is the way to answer them.
 - `emulate` changes one tab's viewport and mobile mode, color scheme, reduced motion, time zone, locale, user agent, geolocation, offline mode and throttling. Settings stay until `reset: true` or the tab closes. Geolocation also grants the permission to the origin for the whole profile. Reload after changing locale, time zone or user agent so the site starts with them.
 
+# Checking a page against its design
+
+`compare_design` compares a tab with a design export (a Figma frame as PNG or JPEG) or with an earlier screenshot kept as a baseline, and returns only a list of differing regions: a box in reference pixels per region, and with a model, the element, property, design value against page value and severity, plus design elements missing on the page. The images never reach the conversation; the diff image, the screenshot, per-region crops and `report.json` are written to files whose paths are in the result. It sets the viewport from the reference size, so pass `device_scale_factor: 2` for an @2x export, and it restores the viewport afterwards. `model: "none"` gives the pixel layer alone, which suits regression checks against a baseline; small spacing or shade differences need `model: "sonnet"` or `"opus"`. Open a crop file with Read when one region needs a closer look.
+
 # `run_script` patterns
 
 These are illustrations of shape, not templates to copy.
@@ -128,6 +132,21 @@ const prices = await Promise.all(urls.map(async (url) => {
 return prices;
 ```
 
+Check many routes against a folder of baselines (`compareDesign` returns the same report as `compare_design`, with `summary` holding its text):
+
+```js
+const routes = ["/", "/pricing", "/login"];
+const results = [];
+for (const route of routes) {
+  await page.goto(`http://localhost:3000${route}`, { waitUntil: "networkidle" });
+  const name = route === "/" ? "home" : route.slice(1);
+  const report = await compareDesign(page, `/home/me/baselines/${name}.png`, { model: "none" });
+  results.push({ route, regions: report.regions.length, diff: report.files.diff });
+  log(route, report.regions.length);
+}
+return results;
+```
+
 A run that takes minutes goes in the background with `background: true` and a `label`; the call returns a job id at once. `jobs` with `status` shows its state and latest log lines, and the result file appears when it ends. Use `log()` generously in such scripts, because the log is all you see while it runs, and check `signal.aborted` in long loops so `jobs` `cancel` stops it cleanly.
 
 # Operating the daemon
@@ -136,6 +155,6 @@ The daemon is the systemd user unit `claude-code-pair-web-agent.service`, listen
 
 When a tool fails unexpectedly or behaves oddly, call `server_log` before retrying or asking the user. A failed result ends with `[req <id>]`; `server_log` with that `request_id` shows the call as the daemon recorded it, and filters by `level`, `tool`, `since_minutes` and `contains` show what happened around it, such as a browser crash, a relaunch or an internal fault. It shows only the daemon's own events, not the page's console or network. Mention the request id when you report a failure to the user.
 
-`ask_pages` sends batches directly to Anthropic's Messages API using the local Claude Code sign-in and defaults to Haiku. To override the built-in adapter, set `WEB_AGENT_ASK_ADAPTER` in the daemon's environment to the absolute path of an ES module that default-exports `{ name, complete({ system, prompt, model, maxTokens, signal }) }` or a function returning one. See `examples/ask-adapter.example.mjs` for the adapter shape. `tabs_list` names the active adapter.
+`ask_pages` and the model layer of `compare_design` send requests to Anthropic's Messages API through the built-in adapter, using the local Claude Code sign-in. An adapter module replaces it: an ES module that default-exports `{ name, complete({ system, prompt, model, maxTokens, images, signal }) }` (or a function returning one), loaded from `WEB_AGENT_ASK_ADAPTER` in the daemon's environment when set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists (no restart needed). `tabs_list` names the active adapter, and `examples/ask-adapter.example.mjs` in the server directory shows the shape. Adapters return the API's `stop_reason` as `stopReason`: `max_tokens` marks a call as cut off (its partial answers are kept), `refusal` marks it failed. There are no default limits: pages are not clipped, a call takes about 3 million characters of pages, and the output limit is the model maximum of 128000 tokens; very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher), so lower `batch_chars`, `max_chars_per_page` or `max_output_tokens` when speed or cost matters. `model` values `haiku`, `sonnet` and `opus` reach the adapter as `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`; other strings pass unchanged.
 
 `npm run import-profile` in the daemon directory copies cookies, saved passwords, history and site storage from the user's Chrome profile into the agent profile, after moving the previous agent profile aside as a backup. The daemon must be stopped first, and the user should run it or ask for it; it replaces the agent's sessions.

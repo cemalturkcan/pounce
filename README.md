@@ -5,13 +5,13 @@ An MCP server that lets coding agents work in a real Google Chrome with a persis
 - Drives the system Chrome through [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (a Playwright fork without the usual automation leaks); `WEB_AGENT_ENGINE=playwright` switches to plain Playwright.
 - Elements are addressed by refs from accessibility snapshots; every action reports whether the page navigated, changed, or did not react.
 - Bulky output (snapshots, collected pages, screenshots, HAR files, downloads) is written to files and only paths and short indexes are returned.
-- Tools cover tabs, navigation, snapshots and search, text and Markdown reading, screenshots, clicks and form filling (including credentials from gopass without exposing them), uploads, server-side Playwright scripts and background jobs, bulk page collection, questions over many pages answered by a small model (`ask_pages`), structured data extraction, network inspection, HAR export, request interception, direct requests with the browser session, cookies, storage, emulation, overlay dismissal, page saving, per-site notes, and human handoff.
+- Tools cover tabs, navigation, snapshots and search, text and Markdown reading, screenshots, clicks and form filling (including credentials from gopass without exposing them), uploads, server-side Playwright scripts and background jobs, bulk page collection, questions over many pages answered by a small model (`ask_pages`), comparison of a page with a design export or baseline screenshot (`compare_design`), structured data extraction, network inspection, HAR export, request interception, direct requests with the browser session, cookies, storage, emulation, overlay dismissal, page saving, per-site notes, and human handoff.
 
 The agent-facing guide is [`skills/web-agent-browser/SKILL.md`](skills/web-agent-browser/SKILL.md).
 
 ## Requirements
 
-Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, a local Claude Code sign-in for the default `ask_pages` adapter.
+Node.js 22.18 or newer (TypeScript runs through type stripping, no build step) and Google Chrome. Optional: `gopass` for stored credentials, a local Claude Code sign-in for the built-in model adapter used by `ask_pages` and the model layer of `compare_design`.
 
 ## Run
 
@@ -33,7 +33,15 @@ The daemon only accepts requests whose `Host` and `Origin` point at its loopback
 
 ## Ask Pages
 
-The built-in `ask_pages` adapter sends selected page text directly to the Anthropic Messages API. It defaults to Claude Haiku 5.5 and uses the Claude account session saved by `claude auth login` in `~/.claude/.credentials.json` or in the directory set by `CLAUDE_CONFIG_DIR`. Run the MCP server as the signed-in OS user. Claude Code manages the session, and the adapter rereads the file for each call.
+The built-in adapter sends requests directly to the Anthropic Messages API. It uses the Claude account session saved by `claude auth login` in `~/.claude/.credentials.json` or in the directory set by `CLAUDE_CONFIG_DIR`. Run the MCP server as the signed-in OS user. Claude Code manages the session, and the adapter rereads the file for each call.
+
+Another adapter can replace it: an ES module that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `~/.config/web-agent-mcp/ask-adapter.mjs` when that file exists (picked up without a restart), otherwise it uses the built-in adapter; `tabs_list` names the active one. Adapter files can `import type { AskAdapter } from "./src/ask-adapter.ts"` for the contract: `complete({ system, prompt, model, maxTokens, images?, signal })` resolves to `{ text, usage?, stopReason? }`, and `images` (`{ mediaType, data, label? }`, base64 without a `data:` prefix) are in order. `examples/ask-adapter.example.mjs` shows the shape, including image blocks. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
+
+Adapters pass the API's `stop_reason` through as `stopReason`, so a call cut off at the output limit (`max_tokens`) is reported as cut off with its partial answers and a `refusal` is reported as a failed call. With `max_tokens` up to 128000, an adapter should use the streaming API to avoid HTTP timeouts.
+
+There are no default limits: pages are not clipped, one call takes as many pages as fit about 3 million characters (under the 1M-token context), and the output limit is the model maximum (128000 tokens). Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens` lower them.
+
+The `model` parameter is passed to the adapter: `haiku` (default), `sonnet` and `opus` become `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, and any other string is passed unchanged.
 
 Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question.
 
@@ -58,7 +66,7 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_DEFAULT_LAUNCH_ARGS` | | Extra Chrome flags, space-separated |
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
-| `WEB_AGENT_ASK_ADAPTER` | built-in Anthropic adapter | Absolute path to an ES module that overrides the `ask_pages` adapter. See `examples/ask-adapter.example.mjs`. |
+| `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` when it exists, else the built-in Anthropic adapter | Absolute path of an ES module that replaces the model adapter of `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
 | `WEB_AGENT_LOG_DIR` | `<data dir>/logs` | Where the daemon writes its JSON Lines log (config key `logDir`) |
 | `WEB_AGENT_LOG_LEVEL` | `info` | Lowest level written: `debug`, `info`, `warn` or `error`. `debug` adds the first 500 characters of every tool result. |
 

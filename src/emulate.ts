@@ -110,6 +110,7 @@ type EmulationState = {
   userAgent?: string;
   locale?: string;
   geolocationOrigin?: string;
+  viewport?: { width: number; height: number; deviceScaleFactor: number; mobile: boolean };
 };
 
 const states = new WeakMap<Page, EmulationState>();
@@ -163,7 +164,8 @@ export async function emulate(page: Page, input: EmulateInput) {
     const height = input.viewport.height ?? preset?.height ?? 800;
     const mobile = input.viewport.mobile ?? preset?.mobile ?? false;
     const deviceScaleFactor = input.viewport.scale ?? preset?.deviceScaleFactor ?? 1;
-    await session.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor, mobile });
+    state.viewport = { width, height, deviceScaleFactor, mobile };
+    await session.send("Emulation.setDeviceMetricsOverride", state.viewport);
     await session.send("Emulation.setTouchEmulationEnabled", { enabled: mobile, maxTouchPoints: mobile ? 5 : undefined });
     settings.set("viewport", `${width}x${height} @${deviceScaleFactor}x${mobile ? " mobile+touch" : ""}`);
   }
@@ -225,6 +227,14 @@ export async function resetEmulation(page: Page) {
   await state.session.detach().catch(() => undefined);
   if (state.geolocationOrigin) await page.context().clearPermissions().catch(() => undefined);
   return cleared;
+}
+
+export async function reapplyEmulatedViewport(page: Page) {
+  const state = states.get(page);
+  if (!state?.viewport) return false;
+  await state.session.send("Emulation.setDeviceMetricsOverride", { ...state.viewport, width: state.viewport.width + 1 });
+  await state.session.send("Emulation.setDeviceMetricsOverride", state.viewport);
+  return true;
 }
 
 export function describeEmulation(settings: Map<string, string>) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -7,17 +7,17 @@ import {
   ASK_SYSTEM,
   askPages,
   buildPrompt,
-  claudeCliAdapter,
-  cliArgs,
-  cliEnv,
+  AskAdapterSource,
   clipDocument,
   loadAdapterModule,
   packBatches,
-  parseCliOutput,
+  IMAGE_CHARS,
+  modelId,
   parseReply,
   renderAskResults,
   sourceNames,
   type AskAdapter,
+  type AskDocument,
 } from "./ask.ts";
 import { describeError, ToolError } from "./errors.ts";
 
@@ -139,88 +139,6 @@ test("askPages reports a timed out call", async () => {
   assert.equal(result?.error, "no answer within 50 ms");
 });
 
-test("claude CLI arguments disable tools, MCP, settings and persistence", () => {
-  const args = cliArgs("haiku", "SYSTEM");
-  assert.deepEqual(args.slice(0, 7), ["-p", "--model", "haiku", "--output-format", "json", "--system-prompt", "SYSTEM"]);
-  assert.equal(args[args.indexOf("--tools") + 1], "");
-  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
-  assert.ok(args.includes("--strict-mcp-config"));
-  assert.ok(args.includes("--no-session-persistence"));
-  const parsed = parseCliOutput(JSON.stringify({ type: "result", is_error: false, result: "- a [x]", total_cost_usd: 0.002, usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0, server_tool_use: {} } }));
-  assert.deepEqual(parsed, { text: "- a [x]", usage: { input_tokens: 5, cache_read_input_tokens: 0, output_tokens: 3, cost_usd: 0.002 } });
-  assert.throws(() => parseCliOutput(JSON.stringify({ is_error: true, subtype: "error_during_execution", result: "boom" })), /claude -p failed/);
-  assert.throws(() => parseCliOutput("not json"), /not JSON/);
-});
-
-const accountOverrides = {
-  ANTHROPIC_API_KEY: "sk-test",
-  ANTHROPIC_AUTH_TOKEN: "token",
-  ANTHROPIC_BASE_URL: "https://proxy.example",
-  ANTHROPIC_MODEL: "opus",
-  CLAUDE_CODE_USE_BEDROCK: "1",
-  CLAUDE_CODE_USE_VERTEX: "1",
-  CLAUDE_CODE_OAUTH_TOKEN: "oauth",
-  CLAUDE_CODE_API_KEY_FILE: "/tmp/key",
-};
-
-const keptVariables = {
-  CLAUDE_CONFIG_DIR: "/home/user/.claude",
-  PATH: "/usr/bin",
-  HOME: "/home/user",
-  HTTPS_PROXY: "http://proxy:3128",
-  CLAUDE_CODE_SOMETHING_ELSE: "kept",
-  CLAUDE_CODE_USE: "kept",
-  MY_ANTHROPIC_KEY: "kept",
-  XANTHROPIC_API_KEY: "kept",
-  anthropic_api_key: "kept",
-};
-
-test("cliEnv drops variables that would override the signed-in CLI account and keeps the rest", () => {
-  const source = { ...accountOverrides, ...keptVariables };
-  const snapshot = { ...source };
-  assert.deepEqual(cliEnv(source), keptVariables);
-  assert.deepEqual(source, snapshot);
-  assert.deepEqual(cliEnv({}), {});
-});
-
-test("claudeCliAdapter spawns the CLI with the filtered environment", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
-  const saved = Object.fromEntries(Object.keys({ ...accountOverrides, ...keptVariables }).map((name) => [name, process.env[name]]));
-  try {
-    const fake = path.join(dir, "fake-claude");
-    await writeFile(
-      fake,
-      [
-        `#!${process.execPath}`,
-        "let input = '';",
-        "process.stdin.on('data', (chunk) => { input += chunk; });",
-        "process.stdin.on('end', () => {",
-        "  const result = JSON.stringify({ env: process.env, args: process.argv.slice(2), input });",
-        "  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } }));",
-        "});",
-      ].join("\n"),
-    );
-    await chmod(fake, 0o755);
-    Object.assign(process.env, accountOverrides, { CLAUDE_CONFIG_DIR: keptVariables.CLAUDE_CONFIG_DIR, CLAUDE_CODE_SOMETHING_ELSE: "kept", MY_ANTHROPIC_KEY: "kept" });
-    const reply = await claudeCliAdapter(fake).complete({ system: "SYSTEM", prompt: "PROMPT", model: "haiku", maxTokens: 100, signal: new AbortController().signal });
-    const seen = JSON.parse(reply.text) as { env: Record<string, string>; args: string[]; input: string };
-    for (const name of Object.keys(accountOverrides)) assert.equal(seen.env[name], undefined, name);
-    assert.equal(seen.env.CLAUDE_CONFIG_DIR, keptVariables.CLAUDE_CONFIG_DIR);
-    assert.equal(seen.env.CLAUDE_CODE_SOMETHING_ELSE, "kept");
-    assert.equal(seen.env.MY_ANTHROPIC_KEY, "kept");
-    assert.equal(seen.env.PATH, process.env.PATH);
-    assert.deepEqual(seen.args, cliArgs("haiku", "SYSTEM"));
-    assert.equal(seen.input, "PROMPT");
-    assert.equal(process.env.ANTHROPIC_API_KEY, "sk-test");
-  } finally {
-    for (const [name, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("loadAdapterModule accepts an adapter or a factory and rejects other shapes", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ask-adapter-"));
   try {
@@ -243,7 +161,7 @@ test("loadAdapterModule accepts an adapter or a factory and rejects other shapes
   }
 });
 
-const askOptions = (documents: { source: string; text: string }[], overrides: Partial<Parameters<typeof askPages>[1]> = {}) => ({
+const askOptions = (documents: AskDocument[], overrides: Partial<Parameters<typeof askPages>[1]> = {}) => ({
   question: "What is listed?",
   documents,
   batchChars: 100_000,
@@ -331,80 +249,170 @@ test("sourceNames uses paths relative to the common folder when base names colli
   assert.deepEqual(sourceNames([path.join("/out/collect", left, name), path.join("/out/collect", right, name)]), [path.join(left, name), path.join(right, name)]);
 });
 
-async function fakeCli(dir: string, body: string[]) {
-  const file = path.join(dir, "fake-claude");
-  await writeFile(file, [`#!${process.execPath}`, ...body].join("\n"));
-  await chmod(file, 0o755);
-  return file;
-}
+const writeAdapter = (file: string, name: string) => writeFile(file, `export default { name: ${JSON.stringify(name)}, complete: async () => ({ text: "ok" }) };`);
 
-test("a missing claude CLI is a ToolError naming WEB_AGENT_ASK_CLAUDE_COMMAND", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
-    assert.ok(error instanceof ToolError);
-    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
-    return true;
-  });
-});
-
-test("a missing claude CLI error says how to check the sign-in", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(claudeCliAdapter(missing).complete({ system: "", prompt: "", model: "haiku", maxTokens: 1, signal: new AbortController().signal }), (error: Error) => {
-    assert.match(describeError(error), /claude auth status/);
-    return true;
-  });
-});
-
-test("askPages stops with the setup error when the claude CLI is missing", async () => {
-  const missing = path.join(tmpdir(), `no-claude-${token()}`);
-  await assert.rejects(askPages(claudeCliAdapter(missing), askOptions([doc("a.md", 10), doc("b.md", 10)], { maxPagesPerBatch: 1 })), (error: Error) => {
-    assert.match(describeError(error), /WEB_AGENT_ASK_CLAUDE_COMMAND/);
-    return true;
-  });
-});
-
-const brokenCli = [
-  "let input = '';",
-  "process.stdin.on('data', (chunk) => { input += chunk; });",
-  "process.stdin.on('end', () => {",
-  "  if (input.includes('BROKEN')) { process.stdout.write('<html>gateway error</html>'); return; }",
-  "  const source = /source=\"([^\"]+)\"/.exec(input)[1];",
-  "  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '- ok [' + source + ']' }));",
-  "});",
-];
-
-test("a batch with malformed CLI output is listed as failed with a short reason", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+test("resolution order is modulePath, then the default file when it exists, then the code adapter", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-order-"));
   try {
-    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
-    const failed = report.batches.find((batch) => batch.sources.includes("bad.md"));
-    assert.match(failed?.error ?? "", /not JSON/);
+    const modulePath = path.join(dir, "env.mjs");
+    const defaultPath = path.join(dir, "ask-adapter.mjs");
+    await writeAdapter(modulePath, "from env");
+    const code: AskAdapter = { name: "from code", complete: async () => ({ text: "" }) };
+    assert.equal((await new AskAdapterSource({ modulePath, defaultPath, adapter: code }).get()).name, "from env");
+    const source = new AskAdapterSource({ defaultPath, adapter: code });
+    assert.equal((await source.get()).name, "from code");
+    assert.equal(source.label, "from code");
+    await writeAdapter(defaultPath, "owner default");
+    assert.equal((await source.get()).name, "owner default");
+    assert.equal(source.label, `owner default (${defaultPath})`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("other batches still answer when one batch gets malformed CLI output", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
+test("a modulePath that does not exist is a load error, not a silent fallback", async () => {
+  const missing = path.join(tmpdir(), `no-adapter-${token()}.mjs`);
+  const source = new AskAdapterSource({ modulePath: missing, adapter: { name: "from code", complete: async () => ({ text: "" }) } });
+  await assert.rejects(source.get(), /Could not load the ask adapter/);
+});
+
+test("the label names a module by path until it has loaded", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ask-adapter-"));
   try {
-    const report = await askPages(claudeCliAdapter(await fakeCli(dir, brokenCli)), askOptions([{ source: "bad.md", text: "BROKEN" }, doc("good.md", 10)], { maxPagesPerBatch: 1 }));
-    assert.deepEqual(report.batches.find((batch) => batch.sources.includes("good.md"))?.answers, ["- ok [good.md]"]);
+    const file = path.join(dir, "named.mjs");
+    await writeAdapter(file, "named module");
+    const fromModule = new AskAdapterSource({ modulePath: file, adapter: { name: "from code", complete: async () => ({ text: "" }) } });
+    assert.equal(fromModule.label, `module ${file}`);
+    await fromModule.get();
+    assert.equal(fromModule.label, `named module (${file})`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("a CLI call that runs past the timeout is failed and its process is killed", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ask-cli-"));
-  const pidFile = path.join(dir, "pid");
+test("modelId maps the short names and passes any other id through", () => {
+  assert.equal(modelId("haiku"), "claude-haiku-5-5");
+  assert.equal(modelId("sonnet"), "claude-sonnet-5-5");
+  assert.equal(modelId("opus"), "claude-opus-5-5");
+  assert.equal(modelId("Opus"), "claude-opus-5-5");
+  assert.equal(modelId("my-local-model"), "my-local-model");
+});
+
+test("the example adapter sends images as base64 image blocks before the text block", async () => {
+  const example = await loadAdapterModule(path.resolve(import.meta.dirname, "..", "examples", "ask-adapter.example.mjs"));
+  const saved = globalThis.fetch;
+  let body: { model: string; system: string; messages: { role: string; content: Record<string, unknown>[] }[] } | undefined;
+  globalThis.fetch = (async (_url: string, init: { body: string }) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "- ok" }], usage: { input_tokens: 7, output_tokens: 2 } }));
+  }) as unknown as typeof fetch;
   try {
-    const cli = await fakeCli(dir, [`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`, "setTimeout(() => undefined, 60000);"]);
-    const report = await askPages(claudeCliAdapter(cli), askOptions([doc("a.md", 10)], { timeoutMs: 1500 }));
-    assert.equal(report.batches[0]?.error, "no answer within 1500 ms");
-    const pid = Number(await readFile(pidFile, "utf8"));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    const reply = await example.complete({
+      system: "SYS",
+      prompt: "PROMPT",
+      model: modelId("haiku"),
+      maxTokens: 10,
+      signal: new AbortController().signal,
+      images: [{ mediaType: "image/png", data: "AAAA" }, { mediaType: "image/jpeg", data: "BBBB" }],
+    });
+    assert.equal(reply.text, "- ok");
+    assert.equal(body?.model, "claude-haiku-5-5");
+    assert.deepEqual(body?.messages[0]?.content, [
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BBBB" } },
+      { type: "text", text: "PROMPT" },
+    ]);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    globalThis.fetch = saved;
   }
+});
+
+test("a batch cut off at the output limit keeps its partial lines and is marked truncated", async () => {
+  const adapter: AskAdapter = {
+    name: "limited",
+    complete: async ({ prompt }) => {
+      const [source] = promptSources(prompt);
+      return source === "long.md" ? { text: "- first fact [long.md]\n- second fa", stopReason: "max_tokens" } : { text: `- ok [${source}]`, stopReason: "end_turn" };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("long.md", 10), doc("short.md", 10)], { maxPagesPerBatch: 1 }));
+  const cut = report.batches.find((batch) => batch.sources.includes("long.md"));
+  assert.equal(cut?.truncated, true);
+  assert.equal(cut?.error, undefined);
+  assert.ok(cut?.answers.includes("- first fact [long.md]"));
+  assert.equal(report.batches.find((batch) => batch.sources.includes("short.md"))?.truncated, undefined);
+  const text = renderAskResults("q", report, "limited", "m");
+  assert.match(text, /^- first fact \[long\.md\]$/m);
+  assert.match(text, /call 1 \[long\.md\]: answer cut off at the output limit; raise max_output_tokens or lower batch_chars/);
+});
+
+test("a refused batch is failed with the refusal as its reason", async () => {
+  const adapter: AskAdapter = {
+    name: "refusing",
+    complete: async ({ prompt }) => {
+      const [source] = promptSources(prompt);
+      return source === "bad.md" ? { text: "- partial [bad.md]", stopReason: "refusal" } : { text: `- ok [${source}]` };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("bad.md", 10), doc("good.md", 10)], { maxPagesPerBatch: 1 }));
+  const refused = report.batches.find((batch) => batch.sources.includes("bad.md"));
+  assert.match(refused?.error ?? "", /refused/);
+  assert.deepEqual(refused?.answers, []);
+  assert.deepEqual(report.batches.find((batch) => batch.sources.includes("good.md"))?.answers, ["- ok [good.md]"]);
+});
+
+test("askPages passes maxTokens to the adapter", async () => {
+  const seen: number[] = [];
+  const adapter: AskAdapter = { name: "budget", complete: async ({ maxTokens }) => (seen.push(maxTokens), { text: "NOT FOUND" }) };
+  await askPages(adapter, askOptions([doc("a.md", 10)], { maxTokens: 16_000 }));
+  assert.deepEqual(seen, [16_000]);
+});
+
+const image = (label: string) => ({ mediaType: "image/jpeg" as const, data: Buffer.from(label).toString("base64"), label });
+
+test("buildPrompt announces each page's screenshots right after its document, numbered in send order", () => {
+  const prompt = buildPrompt("What is shown?", [
+    { source: "a.md", text: "Alpha", images: [image("a.md tile 1/2"), image("a.md tile 2/2")] },
+    { source: "b.md", text: "Beta" },
+    { source: "c.md", text: "Gamma", images: [image("c.md region #chart")] },
+  ]);
+  assert.match(prompt, /<\/document>\n<screenshots source="a\.md">Images 1-2 of this message: a\.md tile 1\/2, a\.md tile 2\/2<\/screenshots>\n\n<document source="b\.md">/);
+  assert.match(prompt, /<document source="c\.md">\nGamma\n<\/document>\n<screenshots source="c\.md">Image 3 of this message: c\.md region #chart<\/screenshots>/);
+  assert.match(ASK_SYSTEM, /screenshots/i);
+  assert.match(ASK_SYSTEM, /cite that page's source/);
+});
+
+test("askPages sends each batch's images in page order with the batch's prompt", async () => {
+  const seen: { sources: string[]; labels: string[] }[] = [];
+  const adapter: AskAdapter = {
+    name: "images",
+    complete: async ({ prompt, images }) => {
+      seen.push({ sources: promptSources(prompt).filter((source, index, all) => all.indexOf(source) === index), labels: (images ?? []).map((entry) => entry.label ?? "") });
+      return { text: "NOT FOUND" };
+    },
+  };
+  await askPages(adapter, askOptions([
+    { source: "a.md", text: "Alpha", images: [image("a1"), image("a2")] },
+    { source: "b.md", text: "Beta" },
+    { source: "c.md", text: "Gamma", images: [image("c1")] },
+  ]));
+  assert.deepEqual(seen, [{ sources: ["a.md", "b.md", "c.md"], labels: ["a1", "a2", "c1"] }]);
+});
+
+test("packBatches weighs images and never puts more than 100 images in one call", () => {
+  const many = (source: string, count: number) => ({ source, text: "x", images: Array.from({ length: count }, (_value, index) => image(`${source}${index}`)) });
+  const batches = packBatches([many("a", 60), many("b", 60), many("c", 10)], 10_000_000);
+  assert.deepEqual(batches.map((batch) => batch.map((entry) => entry.source)), [["a"], ["b", "c"]]);
+  assert.deepEqual(packBatches([many("a", 3), { source: "b", text: "y".repeat(10) }], 3 * IMAGE_CHARS).map((batch) => batch.length), [1, 1]);
+});
+
+test("an empty reply cut off at the output limit or refused is reported, not read as no answers", async () => {
+  const adapter: AskAdapter = {
+    name: "empty",
+    complete: async ({ prompt }) => ({ text: "", stopReason: promptSources(prompt)[0] === "cut.md" ? "max_tokens" : "refusal" }),
+  };
+  const report = await askPages(adapter, askOptions([doc("cut.md", 10), doc("refused.md", 10)], { maxPagesPerBatch: 1 }));
+  const text = renderAskResults("q", report, "empty", "m");
+  assert.match(text, /call 1 \[cut\.md\]: answer cut off at the output limit/);
+  assert.match(text, /call 2 \[refused\.md\]: the model refused to answer/);
 });

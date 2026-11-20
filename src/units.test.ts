@@ -318,3 +318,11 @@ test("siteHost normalises hosts and URLs into file-safe names", () => {
   assert.throws(() => siteHost("about:blank"), /no usable host name|not a host/);
   assert.equal(countNoteLines("# host\n\n- 2026-01-01: a\n- 2026-01-02: b\n"), 2);
 });
+
+test("the default ask adapter file is ~/.config/web-agent-mcp/ask-adapter.mjs and WEB_AGENT_ASK_ADAPTER is read separately", () => {
+  const home = path.join(path.sep, "tmp", "fake-home");
+  const fallback = loadConfig({ HOME: home });
+  assert.equal(fallback.askAdapterPath, path.join(home, ".config", "web-agent-mcp", "ask-adapter.mjs"));
+  assert.equal(fallback.askAdapter, undefined);
+  assert.equal(loadConfig({ HOME: home, WEB_AGENT_ASK_ADAPTER: " /opt/adapters/mine.mjs " }).askAdapter, "/opt/adapters/mine.mjs");
+});
