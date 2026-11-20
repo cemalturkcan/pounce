@@ -813,3 +813,38 @@ test("the skipped note replaces the Browsed block when the adapter cannot use to
   const merged = mergeBrowse(reportOf([{ sources: ["a.md"], answers: [], notFound: ["a.md"] }]), [], "Browsing skipped: the adapter fake does not support tool use (no converse()).");
   assert.match(renderAskResults("Q?", merged, "fake", "m"), /^Browsing skipped: the adapter fake does not support tool use \(no converse\(\)\)\.$/m);
 });
+
+test("the example adapter's converse sends tools and tool results and replays raw blocks unchanged", async () => {
+  const example = await loadAdapterModule(path.resolve(import.meta.dirname, "..", "examples", "ask-adapter.example.mjs"));
+  const saved = globalThis.fetch;
+  let body: { tools: Record<string, unknown>[]; messages: { role: string; content: Record<string, unknown>[] }[] } | undefined;
+  const thinking = { type: "thinking", thinking: "", signature: "c2ln" };
+  globalThis.fetch = (async (_url: string, init: { body: string }) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ content: [thinking, { type: "tool_use", id: "tu2", name: "find", input: { query: "x" } }], stop_reason: "tool_use", usage: { input_tokens: 3, output_tokens: 1 } }));
+  }) as unknown as typeof fetch;
+  try {
+    assert.ok(example.converse);
+    const reply = await example.converse({
+      system: "SYS",
+      tools: [{ name: "find", description: "find", inputSchema: { type: "object" } }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "start" }] },
+        { role: "assistant", content: [{ type: "opaque", raw: thinking }, { type: "tool_use", id: "tu1", name: "find", input: {}, raw: { type: "tool_use", id: "tu1", name: "find", input: {} } }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "tu1", content: [{ type: "text", text: "r" }, { type: "image", image: { mediaType: "image/jpeg", data: "CCCC" } }] }] },
+      ],
+      model: "m",
+      maxTokens: 10,
+      signal: new AbortController().signal,
+      conversationId: "c",
+    });
+    assert.deepEqual(body?.tools, [{ name: "find", description: "find", input_schema: { type: "object" } }]);
+    assert.deepEqual(body?.messages[1]?.content[0], thinking);
+    assert.deepEqual(body?.messages[2]?.content[0], { type: "tool_result", tool_use_id: "tu1", content: [{ type: "text", text: "r" }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "CCCC" } }] });
+    assert.equal(reply.stopReason, "tool_use");
+    assert.deepEqual(reply.content[0], { type: "opaque", raw: thinking });
+    assert.equal(reply.content[1]?.type, "tool_use");
+  } finally {
+    globalThis.fetch = saved;
+  }
+});

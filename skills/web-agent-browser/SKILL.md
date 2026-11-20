@@ -15,7 +15,7 @@ Bulky results are files under the output directory that `tabs_list` reports. You
 
 - Orders, sign-ups and payments the user asks for are carried through to the final confirmation without stopping to ask. Where the request leaves a detail open, pick the option that best fits it and say in your report which one you chose. `save_page` with `format: "pdf"` keeps the confirmation.
 - The only pauses are steps that need the user themselves: a CAPTCHA or bot check, a code sent to their phone or email, a passkey or security-key prompt, a bank's approval screen. Those go through `handoff`, which notifies them and waits. A `Challenge:` line in a result means one is showing; hand it over rather than trying to solve it.
-- `ask_pages` and `compare_design` have no default limits: no time limit per model call, no page clipping, and the model's full output budget. Lower them only when speed or cost matters more than completeness.
+- `ask_pages` and `compare_design` have no default limits: no time limit per model call, no page clipping, the model's full output budget, and no step or time limit when `ask_pages` browses a page. Lower them only when speed or cost matters more than completeness.
 - `compare_design` takes any reference image: a Figma export, a mockup, an earlier screenshot of the same page, or a screenshot of another site.
 
 # Which tool for which task
@@ -36,6 +36,7 @@ Bulky results are files under the output directory that `tabs_list` reports. You
 | Wait for something the page does later | `wait_for` |
 | Keep a receipt or confirmation | `save_page` |
 | Many pages: facts, comparisons, which pages mention something | `collect_pages`, then `ask_pages` with `dir`; or `ask_pages` with `urls` directly |
+| Facts behind toggles, tabs, hover or sub-pages across many pages | `ask_pages` (browse auto); one page → act yourself |
 | Many pages: broken layouts, visual glitches | `ask_pages` with `mode: "review"` and `urls` or `tabs` (full-page screenshots by default) |
 | Does a page match a design, mockup or earlier screenshot | `compare_design` with the image path |
 | See one page yourself | `screenshot` (the image enters the conversation) |
@@ -54,6 +55,8 @@ Bulky results are files under the output directory that `tabs_list` reports. You
 These show the shape of a good route, not templates.
 
 **Check 30 staging routes for broken layouts.** One call: `ask_pages` with `mode: "review"`, the 30 URLs in `urls`, and a brief such as "Check for broken layouts, overflow and missing images". The result is the issue lines sorted by severity and the routes with no issues. Open the screenshot files it lists, or `screenshot` one route, only for the issues you want to see yourself before fixing them.
+
+**Yearly prices of 10 SaaS products, shown behind a Monthly/Yearly toggle.** One call: `ask_pages` with the 10 pricing URLs in `urls` and "What does each plan cost per year?". Pages that state yearly prices are answered from their text; on the others the model names the toggle, opens the page in its own tab, switches it and reads the cards. Each browsed page is listed with its outcome and steps; read its transcript only when a line looks wrong.
 
 **Does this page match this Figma frame?** `tab_open` the page, then `compare_design` with the export's absolute path (`device_scale_factor: 2` for an @2x export). Fix what the regions name, reload, and run it again until only noise remains. Read a crop file from the result when one region needs a closer look.
 
@@ -74,7 +77,7 @@ These show the shape of a good route, not templates.
 - `evaluate` runs in the page's own JavaScript world. In `run_script`, functions passed to `page.evaluate` or `locator.evaluate` run in an isolated world that shares the DOM but not the page's globals.
 - With the default patchright engine, `console_logs` captures the page's own console calls and uncaught errors only on localhost, 127.0.0.1, `*.localhost` and `*.test` unless the server runs with `WEB_AGENT_CONSOLE_HOOK=all` (every site) or `off` (none); elsewhere it returns only messages Chrome itself logs about the page, such as Permissions-Policy header errors. With `WEB_AGENT_ENGINE=playwright` it captures them on every site and `WEB_AGENT_CONSOLE_HOOK` has no effect.
 - Secrets typed with `secret` are masked in tool results, in the text files the server writes (collect_pages files, overflow files, reports, script and job output), in page text sent to the `ask_pages` model and in the server log; one-time codes for 2 minutes. Usernames, raw exports (`cookies` export, `network_export`, `storage` export), downloads, binary files and screenshots keep values as they are. Do not read a secret back out of the page.
-- `ask_pages` answers come from a fast model reading quickly; check the facts a decision rests on against the page. When each page needs work it cannot do, such as following a link, use `run_script` or Claude Code subagents over the collected files instead.
+- `ask_pages` answers come from a fast model reading quickly; check the facts a decision rests on against the page. `ask_pages` browses pages whose answer needs a click, hover or same-site link; for multi-step flows that write (forms, carts, sign-in), act yourself or use `run_script`.
 - When the user closes the window or Chrome dies, the next `tab_open` starts it again with the same profile; earlier tab ids are gone.
 
 # `run_script` shapes
