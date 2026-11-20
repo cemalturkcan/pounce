@@ -47,6 +47,7 @@ const REFRESH_TIMEOUT_MS = 30_000;
 const REFRESH_RACE_WAIT_MS = 2_000;
 const REFRESH_RACE_POLL_MS = 100;
 const REFRESH_LOCK_STALE_MS = 60_000;
+const STORAGE_LOCK_STALE_MS = 15_000;
 
 type ApiError = { type?: unknown; message?: unknown };
 type ClaudeCredentials = {
@@ -161,6 +162,7 @@ async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: 
   const refreshToken = tokens.refreshToken;
   const response = await fetch(TOKEN_URL, {
     method: "POST",
+    redirect: "error",
     headers: { "content-type": "application/json", "user-agent": CLAUDE_CODE_USER_AGENT },
     body: JSON.stringify({
       grant_type: "refresh_token",
@@ -218,7 +220,7 @@ async function waitForNewerCredentials(credentialsPath: string, staleToken: stri
   }
 }
 
-async function acquireLock(lockPath: string, signal: AbortSignal) {
+async function acquireLock(lockPath: string, signal: AbortSignal, staleMs = REFRESH_LOCK_STALE_MS) {
   while (true) {
     try {
       await mkdir(lockPath);
@@ -231,7 +233,7 @@ async function acquireLock(lockPath: string, signal: AbortSignal) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     const lock = await lstat(lockPath).catch(() => undefined);
-    const stale = lock !== undefined && Date.now() - lock.mtimeMs > REFRESH_LOCK_STALE_MS;
+    const stale = lock !== undefined && Date.now() - lock.mtimeMs > staleMs;
     if (stale && await rmdir(lockPath).then(() => true, () => false)) continue;
     await delay(REFRESH_RACE_POLL_MS, undefined, { signal });
   }
@@ -257,6 +259,15 @@ async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal,
 }
 
 async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number; scopes?: string[] }) {
+  const releaseLock = await acquireLock(path.join(path.dirname(credentialsPath), ".storage-write.lock"), AbortSignal.timeout(REFRESH_TIMEOUT_MS), STORAGE_LOCK_STALE_MS);
+  try {
+    await writeRefreshedTokens(credentialsPath, stale, tokens);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function writeRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number; scopes?: string[] }) {
   const document = await readCredentialsDocument(credentialsPath);
   const oauth = document.claudeAiOauth;
   if (!oauth || typeof oauth !== "object") return;
@@ -273,11 +284,12 @@ async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken
   }
 }
 
-function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, rejectedToken?: string) {
+function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, deadRefreshTokens: Set<string>, rejectedToken?: string) {
   return withRefreshLocks(credentialsPath, signal, async () => {
     const credentials = await readCredentials(credentialsPath, signal);
     if (rejectedToken === undefined ? !isExpiring(credentials) : credentials.accessToken !== rejectedToken) return;
     if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
+    if (deadRefreshTokens.has(credentials.refreshToken)) throw new AskSetupError("The local Claude Code session can no longer be refreshed.", SIGN_IN);
 
     const tokens = { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken, clientId: credentials.clientId };
     const refresh = (scope: string | undefined) => withRetries(signal, () => requestTokenRefresh(tokens, scope, signal));
@@ -286,6 +298,7 @@ function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, re
     if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(storedScopes);
     if (!answer.response.ok) {
       if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
+      deadRefreshTokens.add(tokens.refreshToken);
       throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`, SIGN_IN);
     }
 
@@ -344,6 +357,7 @@ function claudeCodeHeaders(token: string, sessionId: string, retryCount: number)
 
 async function readAccountUuid(token: string, signal: AbortSignal) {
   const response = await fetch(PROFILE_URL, {
+    redirect: "error",
     headers: {
       authorization: `Bearer ${token}`,
       "anthropic-beta": "oauth-2025-04-20",
@@ -480,7 +494,9 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
   } catch (error) {
     const text = parts.join("");
     const partial = text.trim().length > 0;
-    if (partial && signal.reason instanceof Error && signal.reason.name === "TimeoutError") {
+    const timedOut = signal.reason instanceof Error && signal.reason.name === "TimeoutError";
+    if (stopReason !== undefined && (error instanceof RetryableAnthropicError || timedOut)) return finish();
+    if (partial && timedOut) {
       return { text, usage, stopReason: stopReason === "refusal" ? stopReason : "interrupted" };
     }
     signal.throwIfAborted();
@@ -544,6 +560,7 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
   const localDeviceId = deviceId();
   let profile: { token: string; uuid: Promise<string> } | undefined;
   let refreshPromise: Promise<void> | undefined;
+  const deadRefreshTokens = new Set<string>();
   const accountUuidFor = (token: string, signal: AbortSignal) => {
     if (profile?.token !== token) {
       const timeout = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
@@ -561,7 +578,7 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
   };
   const refreshSession = async (signal: AbortSignal, rejectedToken?: string) => {
     const timeout = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
-    refreshPromise ??= refreshCredentialsFile(credentialsPath, timeout, rejectedToken)
+    refreshPromise ??= refreshCredentialsFile(credentialsPath, timeout, deadRefreshTokens, rejectedToken)
       .catch((error: unknown) => {
         if (timeout.aborted) throw new ToolError(`Claude session refresh did not answer within ${REFRESH_TIMEOUT_MS / 1000} s.`);
         throw error;

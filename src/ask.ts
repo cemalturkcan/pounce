@@ -378,6 +378,7 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
       if ((overflow || oversized) && batch.length > 1) {
         const half = Math.ceil(batch.length / 2);
         const first = await run(batch.slice(0, half), `${call}.1`);
+        if (setupError) return first;
         const second = await run(batch.slice(half), `${call}.2`);
         return [...first, ...second];
       }
