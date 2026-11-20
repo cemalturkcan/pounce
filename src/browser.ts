@@ -333,6 +333,11 @@ export class BrowserManager {
       }
     });
     this.watchPopups(tab);
+    if (this.config.engine === "patchright") {
+      page.on("request", (request) => {
+        if (request.isNavigationRequest()) void this.profile.allowLocalNetwork(page.context(), request.url()).catch(() => undefined);
+      });
+    }
     page.on("requestfailed", (request) => {
       networkId += 1;
       pushBounded(

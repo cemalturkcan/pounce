@@ -37,13 +37,36 @@ export function originOf(value: string) {
   return origin;
 }
 
+const PRIVATE_IPV4 = /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/;
+
+export function isLocalNetworkHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(host) || host.startsWith("fe80:")) return true;
+  return /^\d+\.\d+\.\d+\.\d+$/.test(host) && PRIVATE_IPV4.test(host);
+}
+
 export class ProfileSettings {
   private readonly credentials = new Map<string, HttpCredential>();
   private readonly grants = new Map<string, Set<PermissionName>>();
+  private readonly localOrigins = new Set<string>();
 
   async apply(context: BrowserContext) {
     if (this.credentials.size) await this.applyCredentials(context);
     for (const [origin, names] of this.grants) await context.grantPermissions([...names], { origin });
+    for (const origin of this.localOrigins) await context.grantPermissions(["local-network-access"], { origin });
+  }
+
+  async allowLocalNetwork(context: BrowserContext, url: string) {
+    let origin: URL;
+    try {
+      origin = new URL(url);
+    } catch {
+      return;
+    }
+    if (!/^https?:$/.test(origin.protocol) || !isLocalNetworkHost(origin.hostname)) return;
+    this.localOrigins.add(origin.origin);
+    await context.grantPermissions(["local-network-access"], { origin: origin.origin });
   }
 
   async setCredential(context: BrowserContext, credential: HttpCredential) {
@@ -80,6 +103,7 @@ export class ProfileSettings {
     else this.grants.clear();
     await context.clearPermissions();
     for (const [kept, names] of this.grants) await context.grantPermissions([...names], { origin: kept });
+    for (const local of this.localOrigins) await context.grantPermissions(["local-network-access"], { origin: local });
     return cleared;
   }
 }
