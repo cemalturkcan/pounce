@@ -3,17 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { AskAdapter, AskUsage } from "./ask-adapter.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail } from "./output.ts";
 
+export type { AskAdapter, AskUsage } from "./ask-adapter.ts";
+
 export type AskDocument = { source: string; text: string };
-
-export type AskUsage = Record<string, number>;
-
-export type AskAdapter = {
-  name: string;
-  complete(input: { system: string; prompt: string; model: string; maxTokens: number; signal: AbortSignal }): Promise<{ text: string; usage?: Record<string, number> }>;
-};
 
 export type BatchResult = {
   index: number;
@@ -392,21 +388,21 @@ export async function loadAdapterModule(modulePath: string): Promise<AskAdapter>
 
 export class AskAdapterSource {
   private readonly modulePath?: string;
-  private readonly command: string;
+  private readonly adapter: AskAdapter;
   private loaded?: Promise<AskAdapter>;
 
-  constructor(options: { modulePath?: string; command: string; adapter?: AskAdapter }) {
+  constructor(options: { modulePath?: string; adapter: AskAdapter }) {
     this.modulePath = options.modulePath;
-    this.command = options.command;
-    if (options.adapter) this.loaded = Promise.resolve(options.adapter);
+    this.adapter = options.adapter;
   }
 
   get label() {
-    return this.modulePath ? `custom adapter ${this.modulePath}` : `claude CLI (${this.command} -p)`;
+    return this.modulePath ? `custom adapter ${this.modulePath}` : this.adapter.name;
   }
 
   get() {
-    this.loaded ??= (this.modulePath ? loadAdapterModule(this.modulePath) : Promise.resolve(claudeCliAdapter(this.command))).catch((error: unknown) => {
+    if (!this.modulePath) return Promise.resolve(this.adapter);
+    this.loaded ??= loadAdapterModule(this.modulePath).catch((error: unknown) => {
       this.loaded = undefined;
       throw error;
     });

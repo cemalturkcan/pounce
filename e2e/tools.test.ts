@@ -627,7 +627,7 @@ test("browser flow", async (t) => {
   });
 
   await t.test("ask_pages answers over collected pages, tabs and folders through the adapter", async () => {
-    assert.match(await ok("tabs_list"), /ask_pages adapter: claude CLI/);
+    assert.match(await ok("tabs_list"), /ask_pages adapter: fixture adapter/);
     const text = await ok("ask_pages", { question: "Which page mentions paragraph 7?", urls: [fixture.url, `${fixture.url}/article`, `${fixture.url}/doc`], batch_chars: 30_000, max_pages_per_batch: 2 });
     assert.match(text, /^- Paragraph 7 is in the article \[02-127-0-0-1-\d+-article\.md\]$/m);
     assert.match(text, /Nothing relevant in: .*01-127-0-0-1-\d+\.md/);
@@ -888,7 +888,7 @@ test("ask_pages edge cases through the tool", async (t) => {
       return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
     },
   };
-  deps.ask = new AskAdapterSource({ command: "unused", adapter: scripted });
+  deps.ask = new AskAdapterSource({ adapter: scripted });
   const root = await mkdtemp(path.join(workDir, "ask-files-"));
   const [left, right] = [`run-${randomBytes(3).toString("hex")}`, `run-${randomBytes(3).toString("hex")}`];
   const name = `01-${randomBytes(3).toString("hex")}.md`;
@@ -1138,7 +1138,7 @@ test("collect_pages waits for client-rendered content", async (t) => {
     const { AskAdapterSource } = await import("../src/ask.ts");
     const saved = deps.ask;
     const sent: string[] = [];
-    deps.ask = new AskAdapterSource({ command: "unused", adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
+    deps.ask = new AskAdapterSource({ adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
     try {
       await ok("ask_pages", { question: "Which items?", urls: [`${fixture.url}/spa`] });
       assert.ok(sent.join("\n").includes(SPA_TEXT.item));

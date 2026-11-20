@@ -25,7 +25,6 @@ export type Config = {
   extraArgs: string[];
   secretsBackend: "gopass" | "none";
   askAdapter?: string;
-  askCommand: string;
 };
 
 const DEFAULT_PORT = 29741;
@@ -86,6 +85,5 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     extraArgs: parseLaunchArgs(source.WEB_AGENT_DEFAULT_LAUNCH_ARGS),
     secretsBackend: source.WEB_AGENT_SECRETS === "none" ? "none" : "gopass",
     askAdapter: source.WEB_AGENT_ASK_ADAPTER?.trim() || undefined,
-    askCommand: source.WEB_AGENT_ASK_CLAUDE_COMMAND?.trim() || "claude",
   };
 }
