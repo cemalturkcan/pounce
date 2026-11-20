@@ -59,7 +59,8 @@ async function settleInPage(options: { maxMs: number; quietMs: number }) {
   const deadline = performance.now() + options.maxMs;
   const remaining = () => Math.max(0, deadline - performance.now());
   const within = (promise: Promise<unknown>) => Promise.race([promise, new Promise((resolve) => setTimeout(resolve, remaining()))]);
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const frames = () => within(new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await frames();
   const onScreen = (element: Element) => {
     const rect = element.getBoundingClientRect();
     return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
@@ -68,21 +69,22 @@ async function settleInPage(options: { maxMs: number; quietMs: number }) {
   await within(Promise.allSettled(images.map((image) => image.decode())));
   const finite = document.getAnimations().filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)));
   await within(Promise.allSettled(finite.map((animation) => animation.finished)));
-  await within(
-    new Promise<void>((resolve) => {
-      let timer = setTimeout(done, options.quietMs);
-      const observer = new MutationObserver(() => {
-        clearTimeout(timer);
-        timer = setTimeout(done, options.quietMs);
-      });
-      function done() {
-        observer.disconnect();
-        resolve();
-      }
-      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-    }),
-  );
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  await new Promise<void>((resolve) => {
+    let quiet = setTimeout(done, Math.min(options.quietMs, remaining()));
+    const cutoff = setTimeout(done, remaining());
+    const observer = new MutationObserver(() => {
+      clearTimeout(quiet);
+      quiet = setTimeout(done, Math.min(options.quietMs, remaining()));
+    });
+    function done() {
+      clearTimeout(quiet);
+      clearTimeout(cutoff);
+      observer.disconnect();
+      resolve();
+    }
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  });
+  await frames();
 }
 
 const RENDER_MAX_MS = 1500;
