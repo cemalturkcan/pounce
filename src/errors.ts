@@ -60,6 +60,10 @@ const RULES: Rule[] = [
     hint: "Nothing matched or the page did not react in time. Take a snapshot to see the current page before retrying.",
   },
   {
+    pattern: /net::ERR_INVALID_AUTH_CREDENTIALS/i,
+    hint: "The site asks for HTTP authentication (the browser's own login dialog). Use http_auth with a password-store entry for this origin, then navigate again.",
+  },
+  {
     pattern: /net::ERR_|NS_ERROR_/i,
     hint: "The navigation failed at the network level. Check the URL and network_requests for the failing request.",
   },

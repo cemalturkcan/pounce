@@ -96,7 +96,7 @@ after(async () => {
 });
 test("every tool and parameter is described", async () => {
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 37);
+  assert.equal(tools.length, 39);
   for (const tool of tools) {
     assert.ok((tool.description ?? "").length >= 60, `${tool.name} description too short`);
     const properties = (tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
@@ -871,6 +871,342 @@ test("review regressions", async (t) => {
     assert.match(await ok("tabs_list"), /Browser running/);
     openedTab(await ok("tab_open", { url: fixture.url }));
   });
+});
+
+import { edgeAuth } from "./fixture.ts";
+
+const SIGN_IN_NOTE = /Note: this looks like a sign-in page; the session may have expired\./;
+const LEAVE_EVENT = "Event: the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
+const PASSKEY_EVENT = "Event: the page requested a passkey or security key; use handoff";
+const MIXED_TEXT = "Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا";
+
+test("browser edge cases", async (t) => {
+  edgeAuth.username = "fixture-user";
+  edgeAuth.password = TEST_SECRET;
+  const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+  const authTexts: string[] = [];
+
+  await t.test("a Basic-auth page without credentials points to http_auth", async () => {
+    assert.match((await call("navigate", { tab, url: `${fixture.url}/auth-c/` })).text, /HTTP authentication[\s\S]*use http_auth/i);
+  });
+
+  await t.test("http_auth set answers the Basic challenge for the origin", async () => {
+    authTexts.push(await ok("http_auth", { action: "set", origin: fixture.url, secret: "fixture/site" }));
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-a/` }), /HTTP 200/);
+  });
+
+  await t.test("subresource requests on an authorized origin are answered too", async () => {
+    await ok("wait_for", { tab, text: "api auth-a" });
+  });
+
+  await t.test("http_auth works while an intercept rule matches the same requests", async () => {
+    await ok("intercept", { tab, action: "add", url: "/auth-b/", mode: "modify", set_headers: { "x-edge": "1" } });
+    const text = await ok("navigate", { tab, url: `${fixture.url}/auth-b/` });
+    await ok("intercept", { tab, action: "clear" });
+    assert.match(text, /HTTP 200/);
+  });
+
+  await t.test("http_auth applies to other tabs of the profile", async () => {
+    const other = openedTab(await ok("tab_open", { url: `${fixture.url}/auth-d/` }));
+    const status = await ok("read_text", { tab: other, target: "#auth-state" });
+    await ok("tab_close", { tab: other });
+    assert.match(status, /authorized auth-d/);
+  });
+
+  await t.test("http_auth list names the origin and the secret", async () => {
+    const text = await ok("http_auth", { action: "list" });
+    authTexts.push(text);
+    assert.match(text, new RegExp(`${fixture.url.replace(/[.]/g, "\\.")} .*fixture/site`));
+  });
+
+  await t.test("http_auth results never contain the credentials", async () => {
+    for (const text of authTexts) {
+      assert.ok(!text.includes(TEST_SECRET), `password leaked: ${text}`);
+      assert.ok(!text.includes(edgeAuth.username), `username leaked: ${text}`);
+    }
+  });
+
+  await t.test("http_auth clear stops answering new challenges", async () => {
+    await ok("http_auth", { action: "clear", origin: fixture.url });
+    assert.match((await call("navigate", { tab, url: `${fixture.url}/auth-c/` })).text, /HTTP authentication[\s\S]*use http_auth/i);
+  });
+
+  await t.test("a reCAPTCHA widget is reported after navigate", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/recaptcha` }), /^Challenge: reCAPTCHA on this page \(.+\)\. Use handoff to let the user complete it\.$/m);
+  });
+
+  await t.test("an invisible reCAPTCHA badge is not reported", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/recaptcha-invisible` }), /Challenge:/);
+  });
+
+  await t.test("an hCaptcha widget is reported after tab_open", async () => {
+    const text = await ok("tab_open", { url: `${fixture.url}/challenge/hcaptcha` });
+    await ok("tab_close", { tab: openedTab(text) });
+    assert.match(text, /^Challenge: hCaptcha on this page/m);
+  });
+
+  await t.test("a Turnstile widget is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/turnstile` }), /^Challenge: Cloudflare Turnstile on this page/m);
+  });
+
+  await t.test("a Cloudflare interstitial is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/cloudflare` }), /^Challenge: Cloudflare interstitial on this page/m);
+  });
+
+  await t.test("a 429 block page is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/blocked` }), /^Challenge: block page on this page \(HTTP 429/m);
+  });
+
+  await t.test("a 403 page without block wording is not reported", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/plain-error` }), /Challenge:/);
+  });
+
+  await t.test("a page without challenge markers adds no challenge line", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/start` }), /Challenge:/);
+  });
+
+  await t.test("a widget that appears after a click is reported", async () => {
+    assert.match(await ok("click", { tab, target: "#inject-hcaptcha" }), /^Challenge: hCaptcha on this page/m);
+  });
+
+  await t.test("a click that navigates onto a challenge page reports it", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/challenge/start` });
+    assert.match(await ok("click", { tab, target: "#to-recaptcha" }), /^Challenge: reCAPTCHA on this page/m);
+  });
+
+  await t.test("permissions grant answers a notification permission prompt", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    await ok("permissions", { tab, action: "grant", grant: ["notifications"] });
+    assert.match(await ok("evaluate", { tab, expression: "Notification.permission" }), /granted\s*$/);
+  });
+
+  await t.test("permissions grants for one origin accumulate", async () => {
+    await ok("permissions", { tab, action: "grant", grant: ["geolocation"] });
+    assert.match(await ok("evaluate", { tab, expression: "navigator.permissions.query({ name: 'notifications' }).then((s) => s.state)" }), /granted\s*$/);
+  });
+
+  await t.test("permissions clear removes the grants of the origin", async () => {
+    await ok("permissions", { tab, action: "clear" });
+    assert.doesNotMatch(await ok("evaluate", { tab, expression: "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)" }), /granted\s*$/);
+  });
+
+  await t.test("permissions rejects an unknown permission name", async () => {
+    assert.equal((await call("permissions", { tab, action: "grant", grant: ["teleport"] })).isError, true);
+  });
+
+  await t.test("leaving a page with unsaved changes is cancelled and reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/unsaved` });
+    await ok("click", { tab, target: "#draft" });
+    await ok("fill", { tab, target: "#draft", text: "draft text" });
+    assert.ok((await ok("navigate", { tab, url: fixture.url })).includes(LEAVE_EVENT));
+  });
+
+  await t.test("the tab stays on the page after a cancelled leave", async () => {
+    assert.match(await ok("evaluate", { tab, expression: "location.pathname" }), /\/unsaved\s*$/);
+  });
+
+  await t.test("a click on a link away from unsaved changes reports the cancelled leave", async () => {
+    assert.ok((await ok("click", { tab, target: "#leave" })).includes(LEAVE_EVENT));
+  });
+
+  await t.test("navigate with force leaves a page with unsaved changes", async () => {
+    assert.match(await ok("navigate", { tab, url: fixture.url, force: true }), /Fixture Home/);
+  });
+
+  await t.test("tab_close without force keeps a tab with unsaved changes", async () => {
+    const draft = openedTab(await ok("tab_open", { url: `${fixture.url}/unsaved` }));
+    await ok("click", { tab: draft, target: "#draft" });
+    const result = await call("tab_close", { tab: draft });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /unsaved changes.*force: true/s);
+    await ok("tab_close", { tab: draft, force: true });
+  });
+
+  await t.test("tab_close with force closes a tab with unsaved changes", async () => {
+    const draft = openedTab(await ok("tab_open", { url: `${fixture.url}/unsaved` }));
+    await ok("click", { tab: draft, target: "#draft" });
+    await ok("tab_close", { tab: draft, force: true });
+    assert.match((await call("snapshot", { tab: draft })).text, /is not open/);
+  });
+
+  await t.test("a passkey request is reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/passkey` });
+    assert.ok((await ok("click", { tab, target: "#passkey" })).includes(PASSKEY_EVENT));
+  });
+
+  await t.test("conditional passkey autofill is not reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/passkey` });
+    assert.ok(!(await ok("click", { tab, target: "#conditional" })).includes(PASSKEY_EVENT));
+  });
+
+  await t.test("a redirect to a sign-in page after navigate adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/app/private` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("navigating to a sign-in page on purpose adds no note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/login` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("an inline sign-in form at the requested URL adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/app/inline` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("a click that is redirected to a sign-in page adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("click", { tab, target: "#to-private" }), SIGN_IN_NOTE);
+  });
+
+  await t.test("a click on a plain sign-in link adds no note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.doesNotMatch(await ok("click", { tab, target: "#to-login" }), SIGN_IN_NOTE);
+  });
+
+  await t.test("closing an OAuth popup is reported on the opener", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/popups` });
+    const opened = await ok("click", { tab, target: "#open-popup" });
+    const popup = /opened new tab (t\d+)/.exec(opened)?.[1] ?? /opened new tab (t\d+)/.exec(await ok("press", { tab, key: "Shift" }))?.[1] ?? "";
+    assert.ok(popup, opened);
+    await ok("click", { tab: popup, target: "#finish" });
+    await pause(200);
+    assert.match(await ok("press", { tab, key: "Shift" }), new RegExp(`tab ${popup} \\(popup\\) closed; this tab is at ${fixture.url.replace(/[.]/g, "\\.")}/popups`));
+  });
+
+  await t.test("a popup opened by a click is not reported as blocked", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/popups` });
+    const text = await ok("click", { tab, target: "#open-popup" });
+    const popup = /opened new tab (t\d+)/.exec(text)?.[1];
+    if (popup) await ok("tab_close", { tab: popup });
+    assert.doesNotMatch(text, /popup was blocked/);
+  });
+
+  await t.test("a popup opened without a user gesture is reported as blocked", { skip: process.env.WEB_AGENT_ENGINE === "playwright" ? "Playwright launches Chrome with --disable-popup-blocking" : false }, async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/popup-onload` }), /^Event: a popup was blocked/m);
+  });
+
+  await t.test("a tab navigated outside a tool call is noted on the next call", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    await deps.manager.getTab(tab).page.goto(`${fixture.url}/article`);
+    assert.ok((await ok("read_text", { tab, max_chars: 200 })).startsWith(`Note: the tab moved to ${fixture.url}/article since your last call.`));
+  });
+
+  await t.test("the moved note is given only once", async () => {
+    assert.doesNotMatch(await ok("read_text", { tab, max_chars: 200 }), /the tab moved to/);
+  });
+
+  await t.test("a navigation made by a tool is not noted as a move", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    assert.doesNotMatch(await ok("read_text", { tab, max_chars: 200 }), /the tab moved to/);
+  });
+
+  await t.test("a tab closed outside a tool call is named on the next call", async () => {
+    const other = openedTab(await ok("tab_open", { url: fixture.url }));
+    await deps.manager.getTab(other).page.close();
+    const result = await call("snapshot", { tab: other });
+    assert.equal(result.isError, true);
+    assert.match(result.text, new RegExp(`^Tab ${other} was closed outside this session\\.`));
+  });
+
+  await t.test("fill picks the matching option of a custom combobox", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    await ok("fill", { tab, target: "#fruit", text: "Banana" });
+    assert.match(await ok("read_text", { tab, target: "#fruit-state" }), /Banana/);
+  });
+
+  await t.test("fill on a custom combobox lists the options when none matches", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    const result = await call("fill", { tab, target: "#fruit", text: "Mango" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Apple, Banana, Cherry/);
+  });
+
+  await t.test("fill on a read-only date input fails with the steps to pick a date", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    const result = await call("fill", { tab, target: "#date", text: "2026-11-21" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Click the control, take a snapshot, then click the option/);
+  });
+
+  await t.test("fill keeps line breaks in a contenteditable editor", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    await ok("fill", { tab, target: "#editor", text: "Line one\nLine two\nLine three" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.split('\\n').filter(Boolean))" }), /\["Line one","Line two","Line three"\]/);
+  });
+
+  await t.test("fill replaces the content of a contenteditable editor", async () => {
+    await ok("fill", { tab, target: "#editor", text: "Fresh" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.trim())" }), /"Fresh"/);
+  });
+
+  await t.test("fill writes into an editor iframe and keeps line breaks", async () => {
+    await ok("fill", { tab, target: "iframe[title=\"Rich editor\"]", text: "Top\nBottom" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('iframe').contentDocument.body.innerText.split('\\n').filter(Boolean))" }), /\["Top","Bottom"\]/);
+  });
+
+  await t.test("fill slowly keeps line breaks in a contenteditable editor", async () => {
+    await ok("fill", { tab, target: "#editor", text: "Slow one\nSlow two", slowly: true });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.split('\\n').filter(Boolean))" }), /\["Slow one","Slow two"\]/);
+  });
+
+  await t.test("fill stores Turkish, emoji and RTL text exactly", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/text` });
+    await ok("fill", { tab, target: "#note", text: MIXED_TEXT });
+    assert.ok((await ok("evaluate", { tab, expression: "document.querySelector('#note').value" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("fill slowly stores Turkish, emoji and RTL text exactly", async () => {
+    await ok("fill", { tab, target: "#body", text: MIXED_TEXT, slowly: true });
+    assert.ok((await ok("evaluate", { tab, expression: "document.querySelector('#body').value" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("fill reports no mismatch for mixed-script text", async () => {
+    assert.doesNotMatch(await ok("fill", { tab, target: "#note", text: MIXED_TEXT }), /reformatted or rejected/);
+  });
+
+  await t.test("read_text returns mixed-script text unchanged", async () => {
+    assert.ok((await ok("read_text", { tab, target: "#sample" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("snapshot keeps mixed-script text", async () => {
+    assert.ok((await ok("snapshot", { tab })).includes(MIXED_TEXT));
+  });
+
+  await t.test("find matches Turkish text regardless of dotted capital I", async () => {
+    assert.match(await ok("find", { tab, query: "çağrı istanbul" }), /Çağrı İstanbul/);
+  });
+
+  await t.test("find matches an emoji ZWJ sequence", async () => {
+    assert.match(await ok("find", { tab, query: "👩🏽‍💻" }), /^\d+ matches/m);
+  });
+
+  await t.test("find matches RTL text", async () => {
+    assert.match(await ok("find", { tab, query: "שלום עולם" }), /^\d+ matches/m);
+  });
+
+  await t.test("find matches an accessible name with an emoji", async () => {
+    assert.match(await ok("find", { tab, query: "gönder 👍" }), /button "Gönder 👍"/);
+  });
+
+  await t.test("navigate to a file download reports the saved file", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    const text = await ok("navigate", { tab, url: `${fixture.url}/download` });
+    const file = /^Downloaded .* to (\S+)$/m.exec(text)?.[1] ?? "";
+    assert.equal(await readFile(file, "utf8"), "a,b\n1,2\n");
+  });
+
+  await t.test("navigate to a download says the tab stayed on its page", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/download` }), new RegExp(`tab stays at ${fixture.url.replace(/[.]/g, "\\.")}/ `));
+  });
+
+  await t.test("tab_open on a file download reports the saved file", async () => {
+    const text = await ok("tab_open", { url: `${fixture.url}/download` });
+    await ok("tab_close", { tab: openedTab(text) });
+    assert.match(text, /^Downloaded .* to \S+report\.csv$/m);
+  });
+
+  await ok("tab_close", { tab });
 });
 
 test("ask_pages edge cases through the tool", async (t) => {
