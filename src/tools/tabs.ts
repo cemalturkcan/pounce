@@ -8,11 +8,13 @@ import { describeEmulation, emulate, resetEmulation, VIEWPORT_PRESETS } from "..
 import { RETENTION_NOTE } from "../output.ts";
 import { describePage, landingLines, pageTitle, renderSnapshot } from "../page.ts";
 import { siteNotesHint } from "../sites.ts";
+import { registerLogTool } from "./log.ts";
 import { defineTool, includeSnapshotParam, tabLine, tabParam, timeoutParam, type ToolDeps, waitUntilParam } from "./common.ts";
 
 const LEFT_PAGE_CANCELLED = Symbol("leave cancelled");
 
 const ERROR_PAGE_SETTLE_MS = 2000;
+const HOUR_MS = 60 * 60 * 1000;
 
 function authChallengeLine(response: Response | null) {
   const challenge = response?.status() === 401 ? response.headers()["www-authenticate"] : undefined;
@@ -49,13 +51,13 @@ async function leaveGuarded(tab: Tab, force: boolean, navigation: () => Promise<
 }
 
 export function registerTabTools(server: McpServer, deps: ToolDeps) {
-  const { manager, store, secrets } = deps;
+  const { manager, store, secrets, log } = deps;
 
   defineTool(server, deps, {
     name: "tabs_list",
     title: "List tabs",
     description:
-      "List the open tabs of the shared browser with their ids, owners and URLs, plus browser status (engine, Chrome version, profile and output directories) and recent background errors. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. Does not start the browser if it is not running.",
+      "List the open tabs of the shared browser with their ids, owners and URLs, plus browser status (engine, Chrome version, profile, output and log directories), recent background errors, and how many errors the server logged in the last hour (read them with server_log). Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. Does not start the browser if it is not running.",
     input: {},
     readOnly: true,
     handler: async (_input, owner) => {
@@ -64,6 +66,8 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
         ? `Browser running: Chrome ${manager.version ?? "?"} via ${config.engine}${config.headless ? " (headless)" : ""}.`
         : "Browser not started yet; it launches on the first tab_open.";
       const lines = [status, `Profile: ${config.profileDir}`, `Output files: ${store.root} (${RETENTION_NOTE})`, `Secret store: ${secrets.backend}`, `ask_pages adapter: ${deps.ask.label}`];
+      const errors = log.recentCount("error", HOUR_MS);
+      lines.push(`Log: ${log.dir} (${errors} ${errors === 1 ? "error" : "errors"} in the last hour; read with server_log)`);
       const faults = recentFaults();
       if (faults.length) lines.push("Recent background errors (newest last):", ...faults.map((fault) => `  ${fault.time.slice(11, 19)} ${fault.source}: ${fault.message}`));
       const tabs = manager.listTabs();
@@ -258,4 +262,6 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       return lines.join("\n");
     },
   });
+
+  registerLogTool(server, deps);
 }

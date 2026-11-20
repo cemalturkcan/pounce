@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,6 +46,20 @@ async function connect() {
   const session = { client, transport };
   sessions.push(session);
   return session;
+}
+
+function textOf(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return (result.content as { type: string; text?: string }[])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("\n");
+}
+
+async function readLogLines() {
+  const dir = path.join(workDir, "logs");
+  const names = (await readdir(dir).catch(() => [] as string[])).filter((name) => name.endsWith(".jsonl")).sort();
+  const raw = (await Promise.all(names.map((name) => readFile(path.join(dir, name), "utf8")))).join("");
+  return { raw, entries: raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>) };
 }
 
 async function ok(session: Session, name: string, args: Record<string, unknown> = {}) {
@@ -160,4 +175,49 @@ test("tabs of an ended session become orphaned and claimable", async () => {
   assert.match(await ok(second, "tabs_list"), new RegExp(`${tab} \\[yours\\]`));
   await ok(second, "tab_close", { tab });
   await assertAlive();
+});
+
+test("a failing call carries a request id that leads to its log line", async () => {
+  const session = await connect();
+  const tab = /Opened (t\d+)/.exec(await ok(session, "tab_open", { url: fixture.url }))?.[1] ?? "";
+  const typed = `pw-${randomBytes(8).toString("hex")}`;
+  const failed = await session.client.callTool({ name: "fill", arguments: { tab, target: "e9999", text: typed } });
+  const text = textOf(failed);
+  assert.equal(failed.isError, true);
+  const requestId = /\[req ([0-9a-f]{6})\]$/.exec(text)?.[1] ?? "";
+  assert.ok(requestId, `no request id in: ${text}`);
+  assert.ok(!text.includes(typed));
+
+  let log = await readLogLines();
+  for (let attempt = 0; attempt < 30 && !log.entries.some((entry) => entry.requestId === requestId); attempt += 1) {
+    await pause(100);
+    log = await readLogLines();
+  }
+  const entry = log.entries.find((candidate) => candidate.requestId === requestId);
+  assert.ok(entry, `no log line for ${requestId}`);
+  assert.equal(entry.event, "tool_call");
+  assert.equal(entry.level, "warn");
+  assert.equal(entry.tool, "fill");
+  assert.equal(entry.tab, tab);
+  assert.equal(entry.ok, false);
+  assert.equal(typeof entry.session, "string");
+  assert.equal(typeof entry.ms, "number");
+  assert.match(String(entry.error), /not in the latest snapshot/);
+  assert.deepEqual(entry.input, { tab, target: "e9999", text: `[${typed.length} chars]` });
+  assert.ok(!log.raw.includes(typed), "typed text leaked into the log");
+  for (const event of ["daemon_start", "session_open", "browser_launch"]) {
+    assert.ok(log.entries.some((candidate) => candidate.event === event), `no ${event} event`);
+  }
+
+  const listed = await ok(session, "server_log", { request_id: requestId });
+  assert.match(listed, new RegExp(`req=${requestId}`));
+  assert.match(listed, /tool=fill/);
+  assert.ok(listed.includes(path.join(workDir, "logs")));
+  assert.ok(!listed.includes(typed));
+  assert.match(await ok(session, "server_log", { level: "warn", tool: "fill", limit: 5 }), new RegExp(`req=${requestId}`));
+
+  const tabs = await ok(session, "tabs_list");
+  assert.ok(tabs.includes(`Log: ${path.join(workDir, "logs")}`), tabs);
+  assert.match(tabs, /\d+ errors? in the last hour/);
+  await ok(session, "tab_close", { tab });
 });
