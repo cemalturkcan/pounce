@@ -153,8 +153,10 @@ async function refreshCredentialsFile(credentialsPath: string, signal: AbortSign
   }
 
   const expiresIn = typeof answer.payload?.expires_in === "number" ? answer.payload.expires_in : 3_600;
-  const oauth = credentials.document.claudeAiOauth ?? {};
-  credentials.document.claudeAiOauth = {
+  const latest = await readCredentials(credentialsPath, signal);
+  if (latest.accessToken !== credentials.accessToken || latest.refreshToken !== credentials.refreshToken) return;
+  const oauth = latest.document.claudeAiOauth ?? {};
+  latest.document.claudeAiOauth = {
     ...oauth,
     accessToken: answer.payload?.access_token,
     refreshToken: typeof answer.payload?.refresh_token === "string" && answer.payload.refresh_token
@@ -164,7 +166,7 @@ async function refreshCredentialsFile(credentialsPath: string, signal: AbortSign
   };
   const temporaryPath = `${credentialsPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, JSON.stringify(credentials.document, null, 2), { mode: 0o600, signal });
+    await writeFile(temporaryPath, JSON.stringify(latest.document, null, 2), { mode: 0o600, signal });
     await rename(temporaryPath, credentialsPath);
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);

@@ -172,6 +172,23 @@ test("Anthropic adapter retries token refresh without scopes when the endpoint r
   assert.equal(refreshCalls, 2);
 });
 
+test("Anthropic adapter does not overwrite credentials refreshed concurrently by Claude Code", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeSession("external-access", Date.now() + 60 * 60_000, "account-test", "external-refresh");
+      return Response.json({ access_token: "mcp-access", refresh_token: "mcp-refresh", expires_in: 3600 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer external-access");
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "external-access");
+  assert.equal(saved.claudeAiOauth.refreshToken, "external-refresh");
+});
+
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
