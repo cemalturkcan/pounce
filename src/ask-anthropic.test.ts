@@ -17,8 +17,8 @@ const input = {
 async function credentialFixture(t: TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "web-agent-ask-test-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const writeSession = (accessToken: string, expiresAt = Date.now() + 60_000) =>
-    writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken, expiresAt } }));
+  const writeSession = (accessToken: string, expiresAt = Date.now() + 60_000, accountUuid: string | null = "account-test") =>
+    writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken, expiresAt }, ...(accountUuid ? { accountUuid } : {}) }));
   return { adapter: anthropicAskAdapter(dir), writeSession };
 }
 
@@ -76,20 +76,50 @@ test("Anthropic adapter forwards the prompt, Haiku model, token limit and abort 
   const retryRequest = second?.[1];
   assert.ok(request);
   assert.ok(retryRequest);
-  assert.equal(url, "https://api.anthropic.com/v1/messages");
+  assert.equal(url, "https://api.anthropic.com/v1/messages?beta=true");
   assert.equal(request.redirect, "error");
   assert.equal(request.signal, input.signal);
   assert.equal(new Headers(request.headers).get("authorization"), "Bearer test-token");
-  assert.deepEqual(JSON.parse(String(request.body)), {
-    model: "claude-haiku-5-5",
-    max_tokens: 123,
-    stream: true,
-    system: input.system,
-    messages: [{ role: "user", content: input.prompt }],
+  const body = JSON.parse(String(request.body));
+  assert.equal(body.model, "claude-haiku-5-5");
+  assert.equal(body.max_tokens, 123);
+  assert.equal(body.stream, true);
+  assert.deepEqual(body.messages, [{ role: "user", content: input.prompt }]);
+  assert.match(body.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.296\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;$/);
+  assert.equal(body.system[1].text, "You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+  assert.equal(body.system[2].text, input.system);
+  assert.deepEqual(JSON.parse(body.metadata.user_id), {
+    device_id: JSON.parse(body.metadata.user_id).device_id,
+    account_uuid: "account-test",
+    session_id: JSON.parse(body.metadata.user_id).session_id,
   });
+  assert.match(JSON.parse(body.metadata.user_id).device_id, /^[0-9a-f]{64}$/);
+  assert.match(JSON.parse(body.metadata.user_id).session_id, /^[0-9a-f-]{36}$/);
+  const headers = new Headers(request.headers);
+  assert.match(headers.get("anthropic-beta") ?? "", /claude-code-20250219/);
+  assert.match(headers.get("anthropic-beta") ?? "", /oauth-2025-04-20/);
+  assert.equal(headers.get("anthropic-dangerous-direct-browser-access"), "true");
+  assert.equal(headers.get("user-agent"), "claude-cli/2.1.296 (external, sdk-cli)");
+  assert.equal(headers.get("x-app"), "cli");
+  assert.equal(headers.get("x-claude-code-session-id"), JSON.parse(body.metadata.user_id).session_id);
   assert.equal(new Headers(retryRequest.headers).get("authorization"), "Bearer new-token");
   assert.equal(JSON.parse(String(retryRequest.body)).model, "claude-custom");
   assert.deepEqual(aliases.map((args) => JSON.parse(String(args[1]?.body)).model), ["claude-sonnet-5-5", "claude-opus-5-5"]);
+});
+
+test("Anthropic adapter resolves and caches the account UUID from the Claude profile", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 60_000, null);
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("/api/oauth/profile")) return Response.json({ account: { uuid: "profile-account" } });
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).endsWith("/api/oauth/profile")).length, 1);
+  const messageCall = fetch.mock.calls.find((call) => String(call.arguments[0]).includes("/v1/messages"));
+  const body = JSON.parse(String(messageCall?.arguments[1]?.body));
+  assert.equal(JSON.parse(body.metadata.user_id).account_uuid, "profile-account");
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {

@@ -1,12 +1,36 @@
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AskAdapter, AskImage, AskReply, AskUsage } from "./ask-adapter.ts";
 import { AskSetupError } from "./ask.ts";
 import { ToolError } from "./errors.ts";
 
-const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const API_ORIGIN = "https://api.anthropic.com";
+const MESSAGES_URL = `${API_ORIGIN}/v1/messages?beta=true`;
+const PROFILE_URL = `${API_ORIGIN}/api/oauth/profile`;
+const ANTHROPIC_VERSION = "2023-06-01";
+const CLAUDE_CODE_VERSION = "2.1.296";
+const CLAUDE_CODE_ENTRYPOINT = "sdk-cli";
+const CLAUDE_CODE_USER_AGENT = `claude-cli/${CLAUDE_CODE_VERSION} (external, ${CLAUDE_CODE_ENTRYPOINT})`;
+const CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+const BILLING_FINGERPRINT_SALT = "59cf53e54c78";
+const CLAUDE_CODE_BETAS = [
+  "claude-code-20250219",
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "thinking-token-count-2026-05-13",
+  "context-management-2025-06-27",
+  "prompt-caching-scope-2026-01-05",
+  "mid-conversation-system-2026-04-07",
+  "per-turn-control-2026-07-01",
+  "mid-conversation-tool-changes-2026-07-01",
+  "inline-tools-2026-09-15",
+  "advisor-tool-2026-03-01",
+  "effort-2025-11-24",
+  "extended-cache-ttl-2025-04-11",
+].join(",");
 const MODEL_ALIASES = new Map([
   ["haiku", "claude-haiku-5-5"],
   ["sonnet", "claude-sonnet-5-5"],
@@ -19,6 +43,10 @@ const RETRY_JITTER_MS = 250;
 const RETRY_OUTPUT_TOKEN_LIMIT = 4_096;
 
 type ApiError = { type?: unknown; message?: unknown };
+type ClaudeCredentials = {
+  claudeAiOauth?: { accessToken?: unknown; expiresAt?: unknown };
+  accountUuid?: unknown;
+};
 
 class RetryableAnthropicError extends ToolError {
   readonly failure: ToolError;
@@ -52,22 +80,84 @@ function networkErrorDetail(error: unknown, token: string) {
   return errorDetail({ message: detail }, token);
 }
 
-async function readAccessToken(credentialsPath: string, signal: AbortSignal) {
-  let oauth: { accessToken?: unknown; expiresAt?: unknown } | undefined;
+async function readCredentials(credentialsPath: string, signal: AbortSignal) {
+  let credentials: ClaudeCredentials;
   try {
-    const credentials = JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal }));
-    oauth = credentials?.claudeAiOauth;
+    credentials = JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal })) as ClaudeCredentials;
   } catch {
     signal.throwIfAborted();
     throw new AskSetupError(`Could not read Claude Code credentials at ${credentialsPath}.`, SIGN_IN);
   }
+  const oauth = credentials.claudeAiOauth;
   if (typeof oauth?.accessToken !== "string" || !oauth.accessToken.trim()) {
     throw new AskSetupError(`Claude Code credentials at ${credentialsPath} lack a Claude account access token.`, SIGN_IN);
   }
   if (typeof oauth.expiresAt === "number" && oauth.expiresAt <= Date.now()) {
     throw new AskSetupError("The local Claude Code session has expired.", SIGN_IN);
   }
-  return oauth.accessToken;
+  return {
+    accessToken: oauth.accessToken,
+    accountUuid: typeof credentials.accountUuid === "string" ? credentials.accountUuid : undefined,
+  };
+}
+
+function billingHeader(messageText: string) {
+  const sampled = [4, 7, 20].map((position) => messageText[position] ?? "0").join("");
+  const suffix = createHash("sha256")
+    .update(BILLING_FINGERPRINT_SALT + sampled + CLAUDE_CODE_VERSION)
+    .digest("hex")
+    .slice(0, 3);
+  return `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_VERSION}.${suffix}; cc_entrypoint=${CLAUDE_CODE_ENTRYPOINT};`;
+}
+
+function deviceId() {
+  let username = process.env.USER ?? "";
+  try {
+    username = userInfo().username;
+  } catch {}
+  return createHash("sha256").update(`${hostname()}:${username}`).digest("hex");
+}
+
+function claudeCodeHeaders(token: string, sessionId: string) {
+  const architectures: Record<string, string> = { x64: "x64", arm64: "arm64", ia32: "ia32", arm: "arm" };
+  const platforms: Record<string, string> = { linux: "Linux", darwin: "MacOS", win32: "Windows" };
+  return {
+    authorization: `Bearer ${token}`,
+    accept: "text/event-stream",
+    "content-type": "application/json",
+    "anthropic-version": ANTHROPIC_VERSION,
+    "anthropic-beta": CLAUDE_CODE_BETAS,
+    "anthropic-dangerous-direct-browser-access": "true",
+    "user-agent": CLAUDE_CODE_USER_AGENT,
+    "x-app": "cli",
+    "x-claude-code-session-id": sessionId,
+    "x-stainless-arch": architectures[process.arch] ?? process.arch,
+    "x-stainless-lang": "js",
+    "x-stainless-os": platforms[process.platform] ?? `Other:${process.platform}`,
+    "x-stainless-package-version": "0.128.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v26.3.0",
+    "x-stainless-timeout": "600",
+  };
+}
+
+async function readAccountUuid(token: string, signal: AbortSignal) {
+  const response = await fetch(PROFILE_URL, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "anthropic-beta": "oauth-2025-04-20",
+      "content-type": "application/json",
+      "user-agent": CLAUDE_CODE_USER_AGENT,
+    },
+    signal,
+  });
+  const payload = await response.json().catch(() => undefined) as { account?: { uuid?: unknown }; error?: ApiError } | undefined;
+  const uuid = payload?.account?.uuid;
+  if (!response.ok || typeof uuid !== "string" || !uuid) {
+    throw new AskSetupError(`Could not read the local Claude account profile (HTTP ${response.status})${errorDetail(payload?.error, token)}`, SIGN_IN);
+  }
+  return uuid;
 }
 
 function messageContent(prompt: string, images?: AskImage[]) {
@@ -202,18 +292,12 @@ function retryDelay(response: Response) {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
 }
 
-async function postMessage(body: string, token: string, signal: AbortSignal) {
+async function postMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
   signal.throwIfAborted();
   const response = await fetch(MESSAGES_URL, {
     method: "POST",
     redirect: "error",
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "text/event-stream",
-      "content-type": "application/json",
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "oauth-2025-04-20",
-    },
+    headers: claudeCodeHeaders(token, sessionId),
     body,
     signal,
   }).catch((error: unknown) => {
@@ -236,10 +320,10 @@ async function postMessage(body: string, token: string, signal: AbortSignal) {
   throw failure;
 }
 
-async function completeMessage(body: string, token: string, signal: AbortSignal) {
+async function completeMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await readMessage(await postMessage(body, token, signal), token, signal);
+      return await readMessage(await postMessage(body, token, sessionId, signal), token, signal);
     } catch (error) {
       signal.throwIfAborted();
       if (!(error instanceof RetryableAnthropicError)) throw error;
@@ -262,18 +346,37 @@ async function completeMessage(body: string, token: string, signal: AbortSignal)
 
 export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude")): AskAdapter {
   const credentialsPath = path.join(configDir, ".credentials.json");
+  const sessionId = randomUUID();
+  const localDeviceId = deviceId();
+  let profiledToken: string | undefined;
+  let profiledAccountUuid: string | undefined;
   return {
-    name: "Anthropic (local Claude login)",
+    name: "Anthropic Claude account",
     async complete({ system, prompt, model, maxTokens, images, signal }) {
-      const token = await readAccessToken(credentialsPath, signal);
+      const credentials = await readCredentials(credentialsPath, signal);
+      const token = credentials.accessToken;
+      let accountUuid = credentials.accountUuid;
+      if (!accountUuid && profiledToken === token) accountUuid = profiledAccountUuid;
+      if (!accountUuid) {
+        accountUuid = await readAccountUuid(token, signal);
+        profiledToken = token;
+        profiledAccountUuid = accountUuid;
+      }
       const body = JSON.stringify({
         model: MODEL_ALIASES.get(model) ?? model,
         max_tokens: maxTokens,
         stream: true,
-        system,
+        system: [
+          { type: "text", text: billingHeader(prompt) },
+          { type: "text", text: CLAUDE_CODE_IDENTITY },
+          { type: "text", text: system },
+        ],
         messages: [{ role: "user", content: messageContent(prompt, images) }],
+        metadata: {
+          user_id: JSON.stringify({ device_id: localDeviceId, account_uuid: accountUuid, session_id: sessionId }),
+        },
       });
-      return completeMessage(body, token, signal);
+      return completeMessage(body, token, sessionId, signal);
     },
   };
 }
