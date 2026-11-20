@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import path from "node:path";
+import { type LogLevel, parseLogLevel } from "./log.ts";
 import { SERVER_VERSION } from "./version.ts";
 
 export type Engine = "patchright" | "playwright";
@@ -14,6 +15,8 @@ export type Config = {
   profileDir: string;
   outputDir: string;
   sitesDir: string;
+  logDir: string;
+  logLevel: LogLevel;
   registryPath: string;
   engine: Engine;
   channel: string;
@@ -74,6 +77,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     profileDir: source.WEB_AGENT_CHROME_USER_DATA_DIR?.trim() || path.join(dataDir, "profile"),
     outputDir: source.WEB_AGENT_OUTPUT_DIR?.trim() || path.join(dataDir, "output"),
     sitesDir: source.WEB_AGENT_SITES_DIR?.trim() || path.join(dataDir, "sites"),
+    logDir: source.WEB_AGENT_LOG_DIR?.trim() || path.join(dataDir, "logs"),
+    logLevel: parseLogLevel(source.WEB_AGENT_LOG_LEVEL),
     registryPath: path.join(dataDir, "daemon.json"),
     engine: source.WEB_AGENT_ENGINE === "playwright" ? "playwright" : "patchright",
     channel: source.WEB_AGENT_CHROME_CHANNEL?.trim() || "chrome",

@@ -275,6 +275,11 @@ test("config reads launch args and defaults", () => {
   assert.equal(config.profileDir, "/data/profile");
   assert.equal(config.outputDir, "/data/output");
   assert.equal(config.sitesDir, "/data/sites");
+  assert.equal(config.logDir, "/data/logs");
+  assert.equal(config.logLevel, "info");
+  const logging = loadConfig({ WEB_AGENT_DAEMON_DATA_DIR: "/data", WEB_AGENT_LOG_DIR: "/var/log/agent", WEB_AGENT_LOG_LEVEL: "debug" });
+  assert.equal(logging.logDir, "/var/log/agent");
+  assert.equal(logging.logLevel, "debug");
   assert.equal(config.endpoint, "http://127.0.0.1:4000/mcp");
   assert.equal(config.engine, "patchright");
   assert.equal(config.headless, true);
