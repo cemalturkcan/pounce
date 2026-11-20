@@ -357,6 +357,33 @@ const EDGE_PAGES: Record<string, { status?: number; html: string }> = {
       `<style>#submenu{display:none}#menu:hover #submenu{display:block}</style><nav id="menu"><span id="menu-label">Products</span><ul id="submenu"><li><a href="#lamps">Lamps</a></li><li><a href="#desks">Desks</a></li><li><a href="#chairs">Chairs</a></li></ul></nav>`,
     ),
   },
+  "/modal/text-close": {
+    html: EDGE_HTML(
+      "Entry Ad",
+      `<style>#modal{position:fixed;inset:0}#modal .underlay{position:absolute;inset:0;background:rgba(0,0,0,.5);cursor:pointer}#modal .modal{position:absolute;inset:0;margin:auto;width:400px;height:240px;background:#f0f1f2}</style><p id="modal-state">open</p>
+<div id="modal"><div class="underlay"></div><div class="modal"><div class="modal-title"><h3>This is a modal window</h3></div><div class="modal-body"><p>It is used to ask for your e-mail address.</p></div><div class="modal-footer"><p>Close</p></div></div></div>
+<script>const dismissed = () => { document.getElementById("modal").style.display = "none"; document.getElementById("modal-state").textContent = "closed by footer"; }; document.querySelector(".modal-footer").addEventListener("click", dismissed);</script>`,
+    ),
+  },
+  "/modal/escape": {
+    html: EDGE_HTML(
+      "Escape Modal",
+      `<p id="modal-state">open</p><div id="promo" role="dialog" aria-modal="true" style="position:fixed;top:20%;left:20%;background:#fff;padding:20px">Get 10% off your first order <button onclick="document.getElementById('modal-state').textContent = 'SUBSCRIBED'">Subscribe</button></div>
+<script>addEventListener("keydown", (event) => { if (event.key !== "Escape") return; document.getElementById("promo").remove(); document.getElementById("modal-state").textContent = "closed by escape"; });</script>`,
+    ),
+  },
+  "/modal/backdrop": {
+    html: EDGE_HTML(
+      "Backdrop Modal",
+      `<p id="modal-state">open</p><div id="shade" style="position:fixed;inset:0;background:rgba(0,0,0,.5)" onclick="this.remove(); document.getElementById('modal-state').textContent = 'closed by backdrop'"><div class="popup-box" style="position:absolute;top:30%;left:30%;width:300px;height:150px;background:#fff" onclick="event.stopPropagation()">Special offer <button onclick="document.getElementById('modal-state').textContent = 'BOUGHT'">Buy now</button></div></div>`,
+    ),
+  },
+  "/modal/stuck": {
+    html: EDGE_HTML(
+      "Stuck Modal",
+      `<p id="modal-state">open</p><div role="dialog" aria-modal="true" style="position:fixed;inset:20%;background:#fff;padding:20px">Confirm your order? <button onclick="document.getElementById('modal-state').textContent = 'ORDER PLACED'">Confirm order</button></div>`,
+    ),
+  },
   "/text": { html: EDGE_HTML("Text", `<p id="sample">Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا</p><label>Note <input id="note"></label><label>Body <textarea id="body"></textarea></label><button aria-label="Gönder 👍">Gönder 👍</button>`) },
 };
 

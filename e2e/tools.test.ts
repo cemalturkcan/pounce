@@ -613,7 +613,7 @@ test("browser flow", async (t) => {
   await t.test("navigate accepts cookie banners and dismiss_overlays closes modals and handles iframes", async () => {
     assert.match(await ok("navigate", { tab, url: `${fixture.url}/consent` }), /^Event: accepted the cookie banner \(Accept all\)$/m);
     const text = await ok("dismiss_overlays", { tab, consent: "reject" });
-    assert.match(text, /Clicked "Kapat" \(close\)/);
+    assert.match(text, /^Modal \[role=dialog\] in main frame: closed by clicking "Kapat" \(close\)\.$/m);
     assert.doesNotMatch(text, /Accept all|Reject all/);
     const state = await ok("evaluate", {
       tab,
@@ -788,13 +788,47 @@ test("review regressions", async (t) => {
   await t.test("dismiss_overlays never clicks commit buttons", async () => {
     const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/checkout` }));
     const text = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.match(text, /Clicked "Vazgeç" \(cancel\)/);
+    assert.match(text, /^Modal \[role=dialog\] in main frame: closed by clicking "Vazgeç" \(cancel\)\.$/m);
     assert.doesNotMatch(text, /onayla|payment/i);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
     const again = await ok("dismiss_overlays", { tab, allow_accept: true });
-    assert.doesNotMatch(again, /Clicked/);
+    assert.doesNotMatch(again, /Clicked|closed by/);
     assert.match(await ok("read_text", { tab, target: "#order-state" }), /dialog dismissed/);
     await ok("tab_close", { tab });
+  });
+
+  const dismissIn = async (route: string) => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}${route}` }));
+    try {
+      const text = await ok("dismiss_overlays", { tab });
+      return { text, state: await ok("read_text", { tab, target: "#modal-state" }) };
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  };
+
+  await t.test("dismiss_overlays closes a modal whose close control is plain text", async () => {
+    const { text, state } = await dismissIn("/modal/text-close");
+    assert.match(text, /^Modal \.modal in main frame: closed by clicking "Close" \(close\)\.$/m);
+    assert.match(state, /closed by footer/);
+  });
+
+  await t.test("dismiss_overlays closes a modal without a close control by pressing Escape", async () => {
+    const { text, state } = await dismissIn("/modal/escape");
+    assert.match(text, /^Modal #promo in main frame: closed by pressing Escape\.$/m);
+    assert.match(state, /closed by escape/);
+  });
+
+  await t.test("dismiss_overlays closes a modal by clicking its backdrop when Escape does nothing", async () => {
+    const { text, state } = await dismissIn("/modal/backdrop");
+    assert.match(text, /^Modal \.popup-box in main frame: closed by a click outside it\.$/m);
+    assert.match(state, /closed by backdrop/);
+  });
+
+  await t.test("dismiss_overlays says when a modal is found but nothing closes it, and leaves its order button alone", async () => {
+    const { text, state } = await dismissIn("/modal/stuck");
+    assert.match(text, /^Modal \[role=dialog\] in main frame: found, but no close control worked \(tried Escape\)\.$/m);
+    assert.match(state, /^open/m);
   });
 
   await t.test("a click that only changes an iframe reports a change", async () => {

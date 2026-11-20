@@ -1,20 +1,22 @@
 import type { Frame, Page } from "playwright-core";
 
-export type OverlayKind = "reject" | "necessary" | "close" | "cancel" | "accept_all" | "accept";
+export type OverlayKind = "reject" | "necessary" | "close" | "cancel" | "accept_all" | "accept" | "none";
 export type ConsentChoice = "accept" | "reject";
 
 export type OverlayCandidate = {
   marker?: string;
+  overlay: string;
   kind: OverlayKind;
   name: string;
   label: string;
   container: string;
   consent: boolean;
+  modal: boolean;
 };
 
-export type OverlayClick = OverlayCandidate & { frame: string; clicked: boolean; skipped?: boolean; error?: string };
+export type OverlayClick = OverlayCandidate & { frame: string; clicked: boolean; skipped?: boolean; error?: string; closedBy?: string; tried?: string[] };
 
-const PATTERNS: Record<OverlayKind, string[]> = {
+const PATTERNS: Record<Exclude<OverlayKind, "none">, string[]> = {
   reject: [
     "reject", "decline", "deny", "refuse", "disagree", "do not accept", "don't accept", "do not consent",
     "reddet", "kabul etme", "onaylama", "izin verme",
@@ -90,6 +92,7 @@ function findCandidates(input: {
   const genericMatchers = compile(genericOrder);
   const commit = new RegExp(`(^|[^\\p{L}])(${input.commitWords.join("|")})`, "iu");
   const consentMarker = new RegExp(input.consentMarker, "i");
+  const modalMarker = /modal|popup|pop-up|lightbox/i;
   const consentText = new RegExp(`(^|[^\\p{L}])(${input.consentText})([^\\p{L}]|$)`, "iu");
   const visible = (element: Element) => {
     const box = element.getBoundingClientRect();
@@ -116,36 +119,131 @@ function findCandidates(input: {
       );
   const outer = containers.filter((element) => !containers.some((other) => other !== element && other.contains(element)));
 
-  const results: { marker?: string; kind: string; name: string; label: string; container: string; consent: boolean }[] = [];
+  const results: { marker?: string; overlay: string; kind: string; name: string; label: string; container: string; consent: boolean; modal: boolean }[] = [];
+  const control = "button, [role=button], a, input[type=button], input[type=submit], [aria-label], [title]";
+  const clickable = (element: Element) => element.matches(`${control}, [onclick], [tabindex]`) || getComputedStyle(element).cursor === "pointer";
   outer.forEach((container, containerIndex) => {
     const consent = isConsent(container);
     if (input.consentOnly && !consent) return;
+    const modal = !consent && (container.matches("[role=dialog], [role=alertdialog], [aria-modal=true], dialog[open]") || modalMarker.test(`${container.id} ${container.getAttribute("class") ?? ""}`));
     const matchers = consent ? consentMatchers : genericMatchers;
-    const controls = container.querySelectorAll("button, [role=button], a, input[type=button], input[type=submit], [aria-label], [title]");
     let best: { element: Element; rank: number; name: string; label: string } | undefined;
-    for (const control of controls) {
-      if (!visible(control)) continue;
-      const label = (control.getAttribute("aria-label") || (control as HTMLElement).innerText || (control as HTMLInputElement).value || control.getAttribute("title") || "")
+    for (const element of container.querySelectorAll("*")) {
+      const isControl = element.matches(control);
+      if (!isControl && element.children.length > 0 && !element.matches("[onclick], [tabindex]")) continue;
+      if (!visible(element)) continue;
+      const label = (element.getAttribute("aria-label") || (element as HTMLElement).innerText || (element as HTMLInputElement).value || element.getAttribute("title") || "")
         .replace(/\s+/g, " ")
         .trim();
       const name = label.toLowerCase();
       if (!name || name.length > 60) continue;
       const rank = matchers.findIndex((matcher) => matcher.regexes.some((regex) => regex.test(name)));
       if (rank === -1 || (best && best.rank <= rank)) continue;
-      if ((matchers[rank]?.kind ?? "").startsWith("accept") && commit.test(name)) continue;
-      best = { element: control, rank, name, label };
+      const kind = matchers[rank]?.kind ?? "";
+      if (kind.startsWith("accept") && commit.test(name)) continue;
+      if (!isControl && !clickable(element) && kind !== "close" && kind !== "cancel") continue;
+      best = { element, rank, name, label };
     }
-    if (!best) return;
+    if (!best && !modal) return;
     const marker = `${input.seed}-${containerIndex}`;
-    best.element.setAttribute("data-web-agent-dismiss", marker);
-    const label = container.id ? `#${container.id}` : container.getAttribute("role") ? `[role=${container.getAttribute("role")}]` : container.tagName.toLowerCase();
-    results.push({ marker, kind: matchers[best.rank]?.kind ?? "close", name: best.name, label: best.label, container: label, consent });
+    container.setAttribute("data-web-agent-overlay", marker);
+    best?.element.setAttribute("data-web-agent-dismiss", marker);
+    const className = (container.getAttribute("class") ?? "").trim().split(/\s+/)[0];
+    const label = container.id ? `#${container.id}` : container.getAttribute("role") ? `[role=${container.getAttribute("role")}]` : className ? `.${className}` : container.tagName.toLowerCase();
+    results.push({
+      ...(best ? { marker } : {}),
+      overlay: marker,
+      kind: best ? (matchers[best.rank]?.kind ?? "close") : "none",
+      name: best?.name ?? "",
+      label: best?.label ?? "",
+      container: label,
+      consent,
+      modal,
+    });
   });
   return results;
 }
 
 function frameLabel(page: Page, frame: Frame) {
   return frame === page.mainFrame() ? "main frame" : `frame ${frame.url().slice(0, 80) || frame.name()}`;
+}
+
+const MODAL_GONE_MS = 1500;
+
+function modalGone(frame: Frame, overlay: string) {
+  return frame
+    .locator(`[data-web-agent-overlay="${overlay}"]`)
+    .waitFor({ state: "hidden", timeout: MODAL_GONE_MS })
+    .then(() => true)
+    .catch(() => false);
+}
+
+function backdropPoint(overlay: string) {
+  const container = document.querySelector(`[data-web-agent-overlay="${overlay}"]`);
+  if (!container) return undefined;
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const covers = (element: Element) => {
+    const box = element.getBoundingClientRect();
+    return box.width * box.height >= 0.9 * width * height;
+  };
+  const fixed = (element: Element) => {
+    for (let node: Element | null = element; node && node !== document.body; node = node.parentElement) {
+      if (getComputedStyle(node).position === "fixed") return true;
+    }
+    return false;
+  };
+  const dialog = covers(container)
+    ? [...container.querySelectorAll("*")].filter((element) => !covers(element)).sort((left, right) => {
+        const area = (element: Element) => element.getBoundingClientRect().width * element.getBoundingClientRect().height;
+        return area(right) - area(left);
+      })[0]
+    : container;
+  const box = dialog?.getBoundingClientRect();
+  if (!box) return undefined;
+  const points = [
+    [8, 8],
+    [width - 8, 8],
+    [8, height - 8],
+    [width - 8, height - 8],
+  ];
+  for (const [x = 0, y = 0] of points) {
+    if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) continue;
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || hit === document.body || hit === document.documentElement || dialog?.contains(hit)) continue;
+    if (hit.closest("a, button, input, select, textarea, label, [role=button], [role=link]")) continue;
+    let backdrop: Element | null = hit;
+    while (backdrop && backdrop !== document.body && !(covers(backdrop) && fixed(backdrop))) backdrop = backdrop.parentElement;
+    if (backdrop && backdrop !== document.body) return { x, y };
+  }
+  return undefined;
+}
+
+async function closeModal(page: Page, frame: Frame, click: OverlayClick) {
+  const tried: string[] = [];
+  if (click.marker) {
+    tried.push(`clicking "${click.label}"`);
+    if (click.clicked && (await modalGone(frame, click.overlay))) {
+      click.closedBy = `clicking "${click.label}" (${click.kind})`;
+      return;
+    }
+  }
+  tried.push("Escape");
+  await page.keyboard.press("Escape").catch(() => undefined);
+  if (await modalGone(frame, click.overlay)) {
+    click.closedBy = "pressing Escape";
+    return;
+  }
+  const point = frame === page.mainFrame() ? await frame.evaluate(backdropPoint, click.overlay).catch(() => undefined) : undefined;
+  if (point) {
+    tried.push("a click outside it");
+    await page.mouse.click(point.x, point.y).catch(() => undefined);
+    if (await modalGone(frame, click.overlay)) {
+      click.closedBy = "a click outside it";
+      return;
+    }
+  }
+  click.tried = tried;
 }
 
 export type DismissOptions = { consent?: ConsentChoice; allowAccept?: boolean; consentOnly?: boolean };
@@ -182,27 +280,39 @@ export async function dismissOverlays(page: Page, options: DismissOptions = {}) 
         clicks.push({ ...click, skipped: true });
         continue;
       }
-      try {
-        await frame.locator(`[data-web-agent-dismiss="${candidate.marker}"]`).click({ timeout: 3000 });
-        click.clicked = true;
-      } catch (error) {
-        click.error = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+      if (candidate.marker) {
+        try {
+          await frame.locator(`[data-web-agent-dismiss="${candidate.marker}"]`).click({ timeout: 3000 });
+          click.clicked = true;
+        } catch (error) {
+          click.error = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+        }
       }
+      if (candidate.modal) await closeModal(page, frame, click);
       clicks.push(click);
     }
   }
   return clicks;
 }
 
+function describeModal(click: OverlayClick) {
+  const where = `Modal ${click.container} in ${click.frame}`;
+  if (click.closedBy) return `${where}: closed by ${click.closedBy}.`;
+  const failed = click.error ? ` The click on "${click.label}" failed: ${click.error}` : "";
+  return `${where}: found, but no close control worked (tried ${(click.tried ?? []).join(", ")}).${failed}`;
+}
+
 export function describeOverlayClicks(clicks: OverlayClick[]) {
-  if (clicks.length === 0) return "No cookie banner or modal with a control to dismiss it was found.";
+  if (clicks.length === 0) return "No cookie banner or modal was found.";
   return clicks
     .map((click) =>
-      click.skipped
-        ? `Left "${click.label}" (accept) in ${click.container}, ${click.frame} unclicked: the consent banner offers no reject or close control. Pass allow_accept: true to accept it.`
-        : click.clicked
-          ? `Clicked "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}.`
-          : `Found "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}, but the click failed: ${click.error}`,
+      click.modal
+        ? describeModal(click)
+        : click.skipped
+          ? `Left "${click.label}" (accept) in ${click.container}, ${click.frame} unclicked: the consent banner offers no reject or close control. Pass allow_accept: true to accept it.`
+          : click.clicked
+            ? `Clicked "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}.`
+            : `Found "${click.label}" (${click.kind}) in ${click.container}, ${click.frame}, but the click failed: ${click.error}`,
     )
     .join("\n");
 }

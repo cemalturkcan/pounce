@@ -97,7 +97,7 @@ test("automatic consent never commits an order and leaves other dialogs alone", 
     await new Promise((resolve) => setTimeout(resolve, 1800));
     assert.equal(await stateOf(server, tab, "order-state"), "pending");
     const text = await server.ok("dismiss_overlays", { tab });
-    assert.match(text, /Clicked "Vazgeç" \(cancel\)/);
+    assert.match(text, /closed by clicking "Vazgeç" \(cancel\)/);
     assert.doesNotMatch(text, /onayla|payment/i);
     assert.equal(await stateOf(server, tab, "order-state"), "dialog dismissed");
   });
