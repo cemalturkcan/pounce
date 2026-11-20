@@ -95,7 +95,7 @@ test("Anthropic adapter forwards the prompt, Haiku model, token limit and abort 
   assert.equal(body.max_tokens, 123);
   assert.equal(body.stream, true);
   assert.deepEqual(body.messages, [{ role: "user", content: input.prompt }]);
-  assert.match(body.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.296\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;$/);
+  assert.match(body.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.329\.[0-9a-f]{3}; cc_entrypoint=sdk-cli;$/);
   assert.equal(body.system[1].text, "You are a Claude agent, built on Anthropic's Claude Agent SDK.");
   assert.equal(body.system[2].text, input.system);
   assert.deepEqual(JSON.parse(body.metadata.user_id), {
@@ -109,7 +109,7 @@ test("Anthropic adapter forwards the prompt, Haiku model, token limit and abort 
   assert.match(headers.get("anthropic-beta") ?? "", /claude-code-20250219/);
   assert.match(headers.get("anthropic-beta") ?? "", /oauth-2025-04-20/);
   assert.equal(headers.get("anthropic-dangerous-direct-browser-access"), "true");
-  assert.equal(headers.get("user-agent"), "claude-cli/2.1.296 (external, sdk-cli)");
+  assert.equal(headers.get("user-agent"), "claude-cli/2.1.329 (external, sdk-cli)");
   assert.equal(headers.get("x-app"), "cli");
   assert.equal(headers.get("x-claude-code-session-id"), JSON.parse(body.metadata.user_id).session_id);
   assert.equal(new Headers(retryRequest.headers).get("authorization"), "Bearer new-token");
@@ -534,8 +534,8 @@ test("Anthropic adapter fingerprints the first text block it sends", async (t) =
   await adapter.complete({ ...input, images: [{ mediaType: "image/png", data: "aGVsbG8=", label: "home.png" }] });
   const body = JSON.parse(String(fetch.mock.calls[0]?.arguments[1]?.body));
   const firstText = "Screenshot: home.png";
-  const suffix = createHash("sha256").update(`59cf53e54c78${firstText[4]}${firstText[7]}${firstText[20] ?? "0"}2.1.296`).digest("hex").slice(0, 3);
-  assert.equal(body.system[0].text, `x-anthropic-billing-header: cc_version=2.1.296.${suffix}; cc_entrypoint=sdk-cli;`);
+  const suffix = createHash("sha256").update(`59cf53e54c78${firstText[4]}${firstText[7]}${firstText[20] ?? "0"}2.1.329`).digest("hex").slice(0, 3);
+  assert.equal(body.system[0].text, `x-anthropic-billing-header: cc_version=2.1.329.${suffix}; cc_entrypoint=sdk-cli;`);
 });
 
 test("Anthropic adapter does not sign back in when the session was logged out during its refresh", async (t) => {
