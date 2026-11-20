@@ -51,7 +51,8 @@ export async function completeLogged(adapter: AskAdapter, input: AskInput, conte
   };
   try {
     const reply = await adapter.complete(input);
-    logEvent("model_call", { ...fields, ms: Date.now() - startedAt, ok: true, stopReason: reply?.stopReason, usage: reply?.usage });
+    const partial = reply?.stopReason === "interrupted" || reply?.stopReason === "max_tokens" || reply?.stopReason === "refusal";
+    logEvent("model_call", { ...fields, ms: Date.now() - startedAt, ok: true, stopReason: reply?.stopReason, usage: reply?.usage }, partial ? "warn" : "info");
     return reply;
   } catch (error) {
     logEvent("model_call", { ...fields, ms: Date.now() - startedAt, ok: false, error: firstLine(error) }, "warn");

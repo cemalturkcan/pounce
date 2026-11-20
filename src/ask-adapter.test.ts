@@ -79,3 +79,15 @@ test("a failed model call is logged at warn with the redacted first error line a
   assert.equal(entry.error, "401 invalid key <secret:api>");
   assert.doesNotMatch(raw, /sk-ant-secret-key-1234|second line detail/);
 });
+
+test("an interrupted stream is logged at warn with its stop reason", async () => {
+  const adapter: AskAdapter = { name: "fake", complete: async () => ({ text: "partial", stopReason: "interrupted", usage: { output_tokens: 7 } }) };
+  const reply = await completeLogged(adapter, input(), { tool: "ask_pages", call: 9, pages: 1 });
+  assert.equal(reply.stopReason, "interrupted");
+  const { list } = await entries();
+  const entry = list.find((candidate) => candidate.event === "model_call" && candidate.call === 9);
+  assert.ok(entry);
+  assert.equal(entry.level, "warn");
+  assert.equal(entry.ok, true);
+  assert.equal(entry.stopReason, "interrupted");
+});
