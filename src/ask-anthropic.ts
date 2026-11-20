@@ -225,7 +225,10 @@ async function completeMessage(body: string, token: string, signal: AbortSignal)
       if (!(error instanceof RetryableAnthropicError)) throw error;
       const wait = error.retryAfterMs ?? 250 * 2 ** attempt;
       if (wait > MAX_RETRY_DELAY_MS) {
-        throw new ToolError(`${error.message} Retry-After exceeds the 60-second wait limit.`);
+        const failure = error.failure;
+        const message = `${failure.message} Retry-After exceeds the 60-second wait limit.`;
+        if (failure instanceof AskSetupError) throw new AskSetupError(message, failure.hint);
+        throw new ToolError(message, failure.hint);
       }
       if (attempt >= MAX_RETRIES) throw error.failure;
       const withJitter = Math.min(wait + Math.random() * RETRY_JITTER_MS, MAX_RETRY_DELAY_MS);

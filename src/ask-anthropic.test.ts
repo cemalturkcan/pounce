@@ -298,6 +298,21 @@ test("Anthropic parses retry delays and rejects server waits above 60 seconds", 
   assert.equal(fetch.mock.callCount(), 6);
 });
 
+test("Anthropic preserves the login error when an explicitly retryable 401 exceeds the wait limit", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({
+    error: { type: "authentication_error", message: "Session expired" },
+  }, { status: 401, headers: { "x-should-retry": "true", "retry-after": "61" } }));
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(error instanceof AskSetupError);
+    assert.match(error.message, /authentication_error: Session expired.*60-second wait limit/);
+    assert.match(error.hint ?? "", /claude auth login/);
+    return true;
+  });
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
 test("Anthropic cancels a stalled stream on abort without retrying", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
