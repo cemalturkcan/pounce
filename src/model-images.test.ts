@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { imageSize, MAX_IMAGE_BYTES, prepareModelImage, type Transcode, type TranscodeTarget } from "./model-images.ts";
+import { describeSent, imageSize, MAX_IMAGE_BYTES, prepareModelImage, type Transcode, type TranscodeTarget } from "./model-images.ts";
 
 function fakeTranscoder(bytesPerPixel: (target: TranscodeTarget) => number) {
   const seen: TranscodeTarget[] = [];
@@ -68,4 +68,17 @@ test("imageSize reads PNG and JPEG headers", async () => {
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20]);
   assert.deepEqual(imageSize(jpeg), { width: 800, height: 600 });
   assert.equal(imageSize(Buffer.from("nope")), undefined);
+});
+
+test("only an image with a side over 8000 px is downscaled to fit 8000 before encoding", async () => {
+  const { transcode, seen } = fakeTranscoder(() => 0.1);
+  const tall = await prepareModelImage(png(1280, 9500), "jpeg", transcode, "whole design");
+  assert.deepEqual(seen, [{ type: "image/jpeg", quality: 80, width: 1078, height: 8000 }]);
+  assert.deepEqual([tall.width, tall.height], [1078, 8000]);
+  assert.deepEqual(tall.downscaled, { from: { width: 1280, height: 9500 }, to: { width: 1078, height: 8000 }, reason: "side" });
+  assert.match(describeSent([tall]), /whole design was larger than 8000 px on a side and was downscaled from 1280x9500 to 1078x8000/);
+  const { transcode: second, seen: none } = fakeTranscoder(() => 0.1);
+  const limit = await prepareModelImage(png(8000, 400, 100), "png", second, "wide");
+  assert.deepEqual(none, []);
+  assert.deepEqual([limit.width, limit.height, limit.downscaled], [8000, 400, undefined]);
 });

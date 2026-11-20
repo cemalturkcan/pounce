@@ -4,6 +4,7 @@ import { withTimeout } from "./async.ts";
 import { ToolError } from "./errors.ts";
 
 export const MAX_IMAGE_BYTES = 3_750_000;
+export const MAX_IMAGE_SIDE = 8000;
 export const JPEG_QUALITY = 80;
 const PNG_FALLBACK_QUALITY = 90;
 const LOWER_QUALITIES = [70, 60, 50];
@@ -15,7 +16,14 @@ export type TranscodeTarget = { type: "image/jpeg" | "image/png"; quality?: numb
 export type Transcode = (bytes: Buffer, target: TranscodeTarget) => Promise<Buffer>;
 export type ImageSource = { bytes: Buffer; width: number; height: number; encoded?: { type: "image/jpeg" | "image/png"; quality?: number } };
 export type Size = { width: number; height: number };
-export type PreparedImage = { image: AskImage; bytes: number; width: number; height: number; downscaled?: { from: Size; to: Size } };
+export type PreparedImage = { image: AskImage; bytes: number; width: number; height: number; downscaled?: { from: Size; to: Size; reason?: "side" } };
+
+function fitSide(size: Size): Size {
+  const longest = Math.max(size.width, size.height);
+  if (longest <= MAX_IMAGE_SIDE) return size;
+  const scale = MAX_IMAGE_SIDE / longest;
+  return { width: Math.max(1, Math.min(MAX_IMAGE_SIDE, Math.round(size.width * scale))), height: Math.max(1, Math.min(MAX_IMAGE_SIDE, Math.round(size.height * scale))) };
+}
 
 export function imageSize(bytes: Buffer) {
   if (bytes.length >= 24 && bytes.readUInt32BE(0) === 0x89504e47) return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
@@ -41,30 +49,33 @@ function ladder(format: "jpeg" | "png", width: number, height: number): Transcod
 const sameEncoding = (source: ImageSource, target: TranscodeTarget) => source.encoded?.type === target.type && source.encoded.quality === target.quality;
 
 export async function prepareModelImage(source: ImageSource, format: "jpeg" | "png", transcode: Transcode, label: string): Promise<PreparedImage> {
+  const fitted = fitSide(source);
+  const sideLimited = fitted.width !== source.width || fitted.height !== source.height;
   const prepared = (target: TranscodeTarget, bytes: Buffer): PreparedImage => {
     const resized = target.width !== source.width || target.height !== source.height;
+    const reason = sideLimited && target.width === fitted.width && target.height === fitted.height ? { reason: "side" as const } : {};
     return {
       image: { mediaType: target.type, data: bytes.toString("base64"), label },
       bytes: bytes.length,
       width: target.width,
       height: target.height,
-      ...(resized ? { downscaled: { from: { width: source.width, height: source.height }, to: { width: target.width, height: target.height } } } : {}),
+      ...(resized ? { downscaled: { from: { width: source.width, height: source.height }, to: { width: target.width, height: target.height }, ...reason } } : {}),
     };
   };
   let last: PreparedImage | undefined;
-  for (const target of ladder(format, source.width, source.height)) {
-    last = prepared(target, sameEncoding(source, target) ? source.bytes : await transcode(source.bytes, target));
+  for (const target of ladder(format, fitted.width, fitted.height)) {
+    last = prepared(target, !sideLimited && sameEncoding(source, target) ? source.bytes : await transcode(source.bytes, target));
     if (last.bytes <= MAX_IMAGE_BYTES) return last;
   }
   const quality = LOWER_QUALITIES.at(-1);
-  let size = { width: source.width, height: source.height };
+  let size = fitted;
   while (Math.min(size.width, size.height) * DOWNSCALE_STEP >= MIN_SIDE) {
     size = { width: Math.round(size.width * DOWNSCALE_STEP), height: Math.round(size.height * DOWNSCALE_STEP) };
     const target: TranscodeTarget = { type: "image/jpeg", quality, ...size };
     last = prepared(target, await transcode(source.bytes, target));
     if (last.bytes <= MAX_IMAGE_BYTES) return last;
   }
-  return last ?? prepared({ type: format === "png" ? "image/png" : "image/jpeg", width: source.width, height: source.height }, source.bytes);
+  return last ?? prepared({ type: format === "png" ? "image/png" : "image/jpeg", width: fitted.width, height: fitted.height }, source.bytes);
 }
 
 export function browserTranscoder(page: Page): Transcode {
@@ -106,8 +117,9 @@ export function describeSent(prepared: PreparedImage[]) {
   const lines = [`${prepared.length} image(s) sent to the model, ${(base64 / 1_000_000).toFixed(2)} MB as base64.`];
   for (const entry of prepared) {
     if (!entry.downscaled) continue;
-    const { from, to } = entry.downscaled;
-    lines.push(`${entry.image.label ?? "image"} was over the 5 MB image limit after recompression and was downscaled from ${from.width}x${from.height} to ${to.width}x${to.height}.`);
+    const { from, to, reason } = entry.downscaled;
+    const why = reason === "side" ? `was larger than ${MAX_IMAGE_SIDE} px on a side` : "was over the 5 MB image limit after recompression";
+    lines.push(`${entry.image.label ?? "image"} ${why} and was downscaled from ${from.width}x${from.height} to ${to.width}x${to.height}.`);
   }
   return lines.join("\n");
 }
