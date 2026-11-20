@@ -32,8 +32,12 @@ type ToolSpec<Shape extends z.ZodRawShape> = {
   input: Shape;
   readOnly?: boolean;
   destructive?: boolean;
-  handler: (input: z.infer<z.ZodObject<Shape>>, owner: string, signal: AbortSignal) => Promise<ToolOutput>;
+  handler: (input: z.infer<z.ZodObject<Shape>>, owner: string, signal: AbortSignal, call: { requestId: string }) => Promise<ToolOutput>;
 };
+
+export type ToolCallExtra = { sessionId?: string; signal: AbortSignal; parentRequestId?: string };
+export type ToolCallResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean };
+export type ToolCallback = { shape: z.ZodRawShape; call(input: unknown, extra: ToolCallExtra): Promise<ToolCallResult> };
 
 const RESULT_LOG_CHARS = 500;
 const ERROR_LOG_LINES = 3;
@@ -65,7 +69,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
   const register = server.registerTool.bind(server) as unknown as (
     name: string,
     config: Record<string, unknown>,
-    callback: (input: unknown, extra: { sessionId?: string; signal: AbortSignal }) => Promise<unknown>,
+    callback: (input: unknown, extra: ToolCallExtra) => Promise<ToolCallResult>,
   ) => void;
 
   register(
@@ -94,6 +98,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
       const record = (fields: Record<string, unknown>) =>
         deps.log.log(fields.ok ? "info" : "warn", "tool_call", {
           requestId,
+          parent: extra.parentRequestId,
           session: owner,
           tab: typeof tabId === "string" ? tabId : undefined,
           tool: spec.name,
@@ -104,14 +109,14 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
       const endAction = tab ? deps.manager.beginAction(tab, spec.name, owner) : undefined;
       try {
         if (typeof tabId === "string") deps.manager.claimIfOrphaned(tabId, owner);
-        const output = await spec.handler(input as z.infer<z.ZodObject<Shape>>, owner, extra.signal);
+        const output = await spec.handler(input as z.infer<z.ZodObject<Shape>>, owner, extra.signal, { requestId });
         const text = withNote(typeof output === "string" ? output : output.text);
         const images = typeof output === "string" ? [] : (output.images ?? []);
         record({ ok: true, images: images.length || undefined, result: deps.log.enabled("debug") ? text.slice(0, RESULT_LOG_CHARS) : undefined });
         return {
           content: [
-            { type: "text", text },
-            ...images.map((image) => ({ type: "image", data: image.data.toString("base64"), mimeType: image.mimeType })),
+            { type: "text" as const, text },
+            ...images.map((image) => ({ type: "image" as const, data: image.data.toString("base64"), mimeType: image.mimeType })),
           ],
         };
       } catch (error) {
@@ -123,7 +128,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
           error: described.split("\n").slice(0, ERROR_LOG_LINES).join("\n"),
           stack: error instanceof Error && !(error instanceof ToolError) ? error.stack?.split("\n").slice(0, STACK_LOG_LINES).join("\n") : undefined,
         });
-        return { content: [{ type: "text", text: `${withNote(described)} [req ${requestId}]` }], isError: true };
+        return { content: [{ type: "text" as const, text: `${withNote(described)} [req ${requestId}]` }], isError: true };
       } finally {
         endAction?.();
         if (tab) deps.manager.markSeen(tab);

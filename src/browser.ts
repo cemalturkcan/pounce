@@ -87,6 +87,7 @@ export type Tab = {
   actions: TabAction[];
   captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
+  browse?: { dismissDialogs: true; blockDownloads: true };
 };
 
 type PopupCheck = { done: Promise<void>; finish: (blocked: boolean) => void };
@@ -359,6 +360,7 @@ export class BrowserManager {
         if (!parent) return;
         if (tab.owner === UNCLAIMED_OWNER) tab.owner = parent.owner;
         tab.openerId = parent.id;
+        if (parent.browse) tab.browse = parent.browse;
         const during = runningActions(parent.id, running.get(parent) ?? []);
         pushEvent(parent, `opened new tab ${tab.id} from ${parent.id} (${parent.page.url()}), ${during}`, { at: openedAt, stamped: true });
       })
@@ -402,10 +404,20 @@ export class BrowserManager {
         this.answerBeforeUnload(tab, dialog);
         return;
       }
+      if (tab.browse && (dialog.type() === "confirm" || dialog.type() === "prompt")) {
+        pushEvent(tab, `${dialog.type()} dialog "${dialog.message().slice(0, 300)}" was dismissed, because browsing only looks`);
+        void dialog.dismiss().catch(() => undefined);
+        return;
+      }
       pushEvent(tab, `${dialog.type()} dialog "${dialog.message().slice(0, 300)}" was accepted automatically`);
       void dialog.accept(dialog.type() === "prompt" ? dialog.defaultValue() : undefined).catch(() => undefined);
     });
     page.on("download", (download) => {
+      if (tab.browse) {
+        pushEvent(tab, `a download of ${download.suggestedFilename()} was blocked, because browsing only looks`);
+        void download.cancel().catch(() => undefined);
+        return;
+      }
       const fileName = `${timestampSlug()}-${download.suggestedFilename().replace(/[^\w.-]+/g, "_").slice(-120)}`;
       const target = path.join(this.config.outputDir, "downloads", fileName);
       const saving = mkdir(path.dirname(target), { recursive: true })
