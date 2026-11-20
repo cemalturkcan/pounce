@@ -346,6 +346,16 @@ test("a batch cut off at the output limit keeps its partial lines and is marked 
   assert.match(text, /call 1 \[long\.md\]: answer cut off at the output limit; raise max_output_tokens or lower batch_chars/);
 });
 
+test("an interrupted batch reports its partial answer separately from output cutoffs", async () => {
+  const adapter: AskAdapter = {
+    name: "interrupted",
+    complete: async () => ({ text: "- first fact [long.md]", stopReason: "interrupted" }),
+  };
+  const report = await askPages(adapter, askOptions([doc("long.md", 10)]));
+  assert.equal(report.batches[0]?.interrupted, true);
+  assert.match(renderAskResults("q", report, adapter.name, "m"), /first fact \[long\.md\][\s\S]*Interrupted calls[\s\S]*call 1 \[long\.md\]/);
+});
+
 test("a refused batch is failed with the refusal as its reason", async () => {
   const adapter: AskAdapter = {
     name: "refusing",

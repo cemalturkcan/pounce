@@ -28,6 +28,7 @@ export type BatchResult = {
   notFound: string[];
   error?: string;
   truncated?: boolean;
+  interrupted?: boolean;
   usage?: AskUsage;
   ms: number;
 };
@@ -267,7 +268,8 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
         if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
         const parsed = parseReply(reply.text, sources);
         const truncated = reply.stopReason === "max_tokens" ? { truncated: true } : {};
-        results[index] = { index: index + 1, sources, ...parsed, ...truncated, usage: reply.usage, ms: Date.now() - started };
+        const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
+        results[index] = { index: index + 1, sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, ms: Date.now() - started };
       } catch (error) {
         if (error instanceof AskSetupError) setupError = error;
         results[index] = { index: index + 1, sources, answers: [], notFound: [], error: failureReason(error, options.timeoutMs), ms: Date.now() - started };
@@ -299,6 +301,11 @@ export function renderAskResults(question: string, report: AskReport, adapter: s
   if (truncated.length) {
     lines.push("", "Cut off calls (their answers above may be incomplete):");
     for (const result of truncated) lines.push(`call ${result.index} [${result.sources.join(", ")}]: ${TRUNCATED_NOTE}`);
+  }
+  const interrupted = results.filter((result) => result.interrupted);
+  if (interrupted.length) {
+    lines.push("", "Interrupted calls (their answers above may be incomplete):");
+    for (const result of interrupted) lines.push(`call ${result.index} [${result.sources.join(", ")}]`);
   }
   const failed = results.filter((result) => result.error);
   if (failed.length) {

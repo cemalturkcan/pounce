@@ -154,7 +154,7 @@ test("Anthropic joins fragmented UTF-8 text deltas and detects interrupted strea
       textDelta("Partial"), { type: "error", error: { type: "invalid_request_error", message: "invalid media" } },
     ]),
   ];
-  const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift() ?? eventStream([textDelta("Partial")]));
+  const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift() ?? eventStream([{ type: "ping" }]));
   assert.equal((await adapter.complete(input)).text, "Mavi çizgili 📘");
   await assert.rejects(adapter.complete(input), { message: "Anthropic Messages stream error: invalid_request_error: invalid media" });
   assert.equal(fetch.mock.callCount(), 2);
@@ -207,7 +207,8 @@ test("Anthropic retries HTTP 529, other 5xx, network failures and SSE overloads"
     () => Response.json({ error: { type: "overloaded_error", message: "Busy" } }, { status: 529, headers: { "retry-after-ms": "0" } }),
     () => Response.json({ error: { type: "api_error", message: "Unavailable" } }, { status: 503, headers: { "retry-after": "0" } }),
     () => { throw new TypeError("fetch failed"); },
-    () => eventStream([textDelta("Discard this partial answer"), { type: "error", error: { type: "overloaded_error", message: "Busy" } }]),
+    () => eventStream([{ type: "error", error: { type: "overloaded_error", message: "Busy" } }]),
+    () => eventStream([{ type: "error", error: { type: "api_error", message: "Unavailable" } }]),
   ];
   for (const fail of failures) {
     const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
@@ -217,6 +218,60 @@ test("Anthropic retries HTTP 529, other 5xx, network failures and SSE overloads"
     fetch.mock.restore();
   }
   assert.equal(random.mock.callCount(), failures.length);
+});
+
+test("Anthropic preserves partial text and usage after an interrupted stream without retrying", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const partial = [
+    { type: "message_start", message: { usage: { input_tokens: 10 } } },
+    textDelta("Partial answer"),
+  ];
+  let sent = false;
+  const disconnected = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(encodeEvents(partial));
+        return;
+      }
+      return new Promise<void>((resolve) => setImmediate(() => {
+        controller.error(new TypeError("connection terminated"));
+        resolve();
+      }));
+    },
+  });
+  const responses = [
+    eventStream(partial),
+    eventStream([...partial, { type: "error", error: { type: "overloaded_error", message: "Busy" } }]),
+    eventStream([...partial, { type: "error", error: { type: "api_error", message: "Unavailable" } }]),
+    new Response(disconnected),
+  ];
+  const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift());
+  for (const calls of [1, 2, 3, 4]) {
+    assert.deepEqual(await adapter.complete(input), {
+      text: "Partial answer",
+      usage: { input_tokens: 10 },
+      stopReason: "interrupted",
+    });
+    assert.equal(fetch.mock.callCount(), calls);
+  }
+});
+
+test("Anthropic honors explicit x-should-retry overrides on HTTP failures", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(Math, "random", () => 0);
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 529, headers: { "x-should-retry": "false" } }));
+  await assert.rejects(adapter.complete(input), /HTTP 529/);
+  assert.equal(fetch.mock.callCount(), 1);
+  fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 400, headers: { "x-should-retry": "true", "retry-after-ms": "0" } }));
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.callCount(), 3);
+  fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 503, headers: { "x-should-retry": "unknown", "retry-after-ms": "0" } }));
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(fetch.mock.callCount(), 5);
 });
 
 test("Anthropic parses retry delays and rejects server waits above 60 seconds", async (t) => {
