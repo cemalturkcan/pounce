@@ -10,7 +10,7 @@ import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
 import { untrusted } from "./output.ts";
 import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "./settle.ts";
-import { clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
+import { cancelled, clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
 import { registerTabTools } from "./tools/tabs.ts";
 import { registerPageReadTools } from "./tools/page-read.ts";
 import { registerActionTools } from "./tools/actions.ts";
@@ -75,6 +75,7 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const wantsImages = imageMode !== "none" || regions.length > 0;
       const shots = new Map<string, PageImages>();
       const imageLines: string[] = [];
+      const notLoaded: string[] = [];
       let imageDir: string | undefined;
       if (input.files) {
         const names = sourceNames(input.files);
@@ -84,31 +85,35 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
           documents.push({ source: names[index] ?? path.basename(file), text });
         }
       } else if (input.dir || input.urls) {
-        const dir = input.dir
-          ? input.dir
-          : (
-              await collectPages(manager, store, owner, {
-                urls: input.urls ?? [],
-                include: ["markdown"],
-                scope: "main",
-                concurrency: 6,
-                waitUntil: "domcontentloaded",
-                settleMs: DEFAULT_QUIET_MS,
-                maxWaitMs: DEFAULT_MAX_WAIT_MS,
-                timeoutMs: 30_000,
-                fullPage: false,
-                previewChars: 0,
-                label: "ask",
-                capture: wantsImages
-                  ? async (tab, base, dir) => {
-                      imageDir = dir;
-                      const captured = await capturePageImages(manager, tab, { mode: imageMode, regions, source: `${base}.md`, dir, base });
-                      shots.set(`${base}.md`, captured);
-                      return captured.files.map((file) => path.basename(file));
-                    }
-                  : undefined,
-              })
-            ).dir;
+        let dir = input.dir;
+        if (!dir) {
+          const collected = await collectPages(manager, store, owner, {
+            urls: input.urls ?? [],
+            include: ["markdown"],
+            scope: "main",
+            concurrency: 6,
+            waitUntil: "domcontentloaded",
+            settleMs: DEFAULT_QUIET_MS,
+            maxWaitMs: DEFAULT_MAX_WAIT_MS,
+            timeoutMs: 30_000,
+            fullPage: false,
+            previewChars: 0,
+            label: "ask",
+            signal,
+            capture: wantsImages
+              ? async (tab, base, dir) => {
+                  imageDir = dir;
+                  const captured = await capturePageImages(manager, tab, { mode: imageMode, regions, source: `${base}.md`, dir, base });
+                  shots.set(`${base}.md`, captured);
+                  return captured.files.map((file) => path.basename(file));
+                }
+              : undefined,
+          });
+          if (signal.aborted) throw cancelled();
+          dir = collected.dir;
+          notLoaded.push(...collected.results.filter((result) => result.error).map((result) => `Not loaded: ${result.url} — ${result.error}`));
+          if (collected.results.every((result) => result.error)) throw new ToolError(`No page loaded, so nothing was asked.\n${notLoaded.join("\n")}`);
+        }
         const names = await readdir(dir).catch(() => undefined);
         if (!names) throw new ToolError(`Cannot read the folder ${dir}.`);
         const markdown = new Set(names.filter((name) => name.endsWith(".md")).map((name) => name.slice(0, -3)));
@@ -150,7 +155,8 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const prepared = [...shots.values()].flatMap((captured) => captured.prepared);
       const sentLine = prepared.length ? `\n${describeSent(prepared)}` : "";
       const imageFooter = imageLines.length || prepared.length ? `\n\nScreenshots (${prepared.length} sent${imageDir && prepared.length ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}${sentLine}` : "";
-      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${imageFooter}`;
+      const notLoadedBlock = notLoaded.length ? `\n\n${notLoaded.join("\n")}` : "";
+      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${notLoadedBlock}${imageFooter}`;
       const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
       if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
       const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;

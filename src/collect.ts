@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { runPool, TIMED_OUT, withDeadline } from "./async.ts";
+import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
 import { type BodyType, classifyBody, extractPdfText, fetchBody, isDownloadError, isTextKind } from "./body.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { describeError } from "./errors.ts";
@@ -88,7 +88,7 @@ async function collectOne(
 
   try {
     const limit = 2 * input.timeoutMs + input.settleMs + (input.scroll ? input.scroll.maxSteps * (input.scroll.idleMs + SCROLL_PROBE_MS) : 0);
-    const outcome = await withDeadline(saveOne(manager, tab, dir, input, url, base, result), limit);
+    const outcome = await withDeadline(untilAborted(saveOne(manager, tab, dir, input, url, base, result), input.signal, () => new Error("cancelled before the page was saved")), limit);
     if (outcome === TIMED_OUT) result.error = `timed out after ${limit} ms; the page did not load or did not answer while its content was saved`;
   } catch (error) {
     result.error = describeError(error).split("\n")[0];

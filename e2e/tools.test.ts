@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT, FEED_TOTAL, FRAME_TEXT, SPA_TEXT } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT, hangRequests, SPA_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -1370,6 +1370,32 @@ test("ask_pages edge cases through the tool", async (t) => {
     await t.test("urls are collected and sent through the injected adapter", async () => {
       const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`] });
       assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);
+    });
+
+    await t.test("urls that fail to load are reported as not loaded", async () => {
+      const dead = "http://127.0.0.1:9/";
+      const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`, dead], images: "none" });
+      assert.match(text, /^Not loaded: http:\/\/127\.0\.0\.1:9\/ — .*net::ERR_/m);
+      const saved = /Full answers: (\S+)/.exec(text)?.[1] ?? "";
+      assert.match(await readFile(saved, "utf8"), /^Not loaded: http:\/\/127\.0\.0\.1:9\/ — /m);
+      const none = await call("ask_pages", { question: "What is here?", urls: [dead, "http://127.0.0.1:9/second"], images: "none" });
+      assert.equal(none.isError, true);
+      assert.match(none.text, /No page loaded/);
+      assert.match(none.text, /127\.0\.0\.1:9\/second — /);
+    });
+
+    await t.test("cancelling ask_pages with urls stops the collection", async () => {
+      const before = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+      const controller = new AbortController();
+      const urls = Array.from({ length: 12 }, (_value, index) => `${fixture.url}/hang?${index}`);
+      const pending = client.callTool({ name: "ask_pages", arguments: { question: "What is here?", urls, images: "none" } }, undefined, { signal: controller.signal, timeout: 120_000 });
+      await pause(1500);
+      controller.abort();
+      await assert.rejects(pending);
+      await pause(1500);
+      const after = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+      assert.ok(after <= before, `tabs still open: ${after} > ${before}`);
+      assert.ok(hangRequests() <= 6, `collection kept going: ${hangRequests()} hanging requests`);
     });
   } finally {
     failAll = false;
