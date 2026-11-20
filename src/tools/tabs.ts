@@ -1,12 +1,29 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Response } from "playwright-core";
 import { z } from "zod";
+import { LEAVE_CANCELLED, pushEvent, type Tab } from "../browser.ts";
 import { normalizeUrl } from "../collect.ts";
 import { recentFaults } from "../errors.ts";
 import { describeEmulation, emulate, resetEmulation, VIEWPORT_PRESETS } from "../emulate.ts";
 import { RETENTION_NOTE } from "../output.ts";
-import { describePage, pageTitle, renderSnapshot } from "../page.ts";
+import { describePage, landingLines, pageTitle, renderSnapshot } from "../page.ts";
 import { siteNotesHint } from "../sites.ts";
 import { defineTool, includeSnapshotParam, tabLine, tabParam, timeoutParam, type ToolDeps, waitUntilParam } from "./common.ts";
+
+const LEFT_PAGE_CANCELLED = Symbol("leave cancelled");
+
+async function leaveGuarded(tab: Tab, force: boolean, navigation: () => Promise<Response | null>) {
+  let cancel = () => undefined as void;
+  const cancelled = new Promise<typeof LEFT_PAGE_CANCELLED>((resolve) => (cancel = () => resolve(LEFT_PAGE_CANCELLED)));
+  tab.unload = force ? { force: true } : { force: false, onBlocked: () => (pushEvent(tab, LEAVE_CANCELLED), cancel()) };
+  try {
+    const running = navigation();
+    running.catch(() => undefined);
+    return await Promise.race([running, cancelled]);
+  } finally {
+    tab.unload = undefined;
+  }
+}
 
 export function registerTabTools(server: McpServer, deps: ToolDeps) {
   const { manager, store, secrets } = deps;
@@ -50,9 +67,16 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     },
     handler: async (input, owner) => {
       const tab = await manager.openTab(owner);
-      if (!input.url) return `Opened ${tab.id} (blank).`;
+      if (!input.url) {
+        manager.markSeen(tab);
+        return `Opened ${tab.id} (blank).`;
+      }
+      const startedAt = Date.now();
       const response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
+      manager.markSeen(tab);
       const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`];
+      lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
+      lines.push(...manager.drainEvents(tab, startedAt));
       const notes = await siteNotesHint(manager.config.sitesDir, tab.page.url());
       if (notes) lines.push(notes);
       if (input.include_snapshot) lines.push("", await renderSnapshot(manager, store, tab, { maxChars: 12_000 }));
@@ -64,11 +88,14 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_close",
     title: "Close tab",
     description:
-      "Close a tab and free its memory. Unsaved state in the page is lost; cookies, logins and other profile data stay. Close tabs you opened once the task no longer needs them, and leave tabs that belong to other sessions or the user open.",
-    input: { tab: tabParam },
+      "Close a tab and free its memory. Cookies, logins and other profile data stay. If the page asks to confirm leaving because of unsaved changes, the tab stays open and the call fails; pass force: true to close it anyway and lose them. Close tabs you opened once the task no longer needs them, and leave tabs that belong to other sessions or the user open.",
+    input: {
+      tab: tabParam,
+      force: z.boolean().optional().describe("Close even if the page asks to confirm leaving (unsaved changes are lost). Default false."),
+    },
     destructive: true,
     handler: async (input) => {
-      await manager.closeTab(input.tab);
+      await manager.closeTab(input.tab, { runBeforeUnload: !input.force });
       return `Closed ${input.tab}.`;
     },
   });
@@ -93,31 +120,42 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "navigate",
     title: "Navigate",
     description:
-      "Load a URL in an existing tab, or move through its history. Returns the final URL, title and HTTP status. Refs from earlier snapshots of this tab stop working after navigation.",
+      "Load a URL in an existing tab, or move through its history. Returns the final URL, title and HTTP status, and flags a CAPTCHA or bot wall and a sign-in page that suggests an expired session. Refs from earlier snapshots of this tab stop working after navigation. If the page asks to confirm leaving because of unsaved changes, the tab stays where it is and the result says so; call again with force: true to leave anyway.",
     input: {
       tab: tabParam,
       url: z.string().describe("URL to load, or one of back, forward, reload. https:// is assumed when no scheme is given."),
       wait_until: waitUntilParam,
       timeout_ms: timeoutParam(30_000),
+      force: z.boolean().optional().describe("Leave even if the page asks to confirm leaving because of unsaved changes, which are then lost. Default false."),
       include_snapshot: includeSnapshotParam,
     },
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const startedAt = Date.now();
+      const previousUrl = tab.page.url();
       const options = { waitUntil: input.wait_until ?? ("domcontentloaded" as const), timeout: input.timeout_ms };
       const history = { waitUntil: "commit" as const, timeout: input.timeout_ms };
-      const response =
+      const requestedUrl = input.url === "reload" ? previousUrl : input.url === "back" || input.url === "forward" ? undefined : normalizeUrl(input.url);
+      const outcome = await leaveGuarded(tab, input.force ?? false, () =>
         input.url === "back"
-          ? await tab.page.goBack(history)
+          ? tab.page.goBack(history)
           : input.url === "forward"
-            ? await tab.page.goForward(history)
+            ? tab.page.goForward(history)
             : input.url === "reload"
-              ? await tab.page.reload(options)
-              : await tab.page.goto(normalizeUrl(input.url), options);
+              ? tab.page.reload(options)
+              : tab.page.goto(requestedUrl ?? input.url, options),
+      );
+      if (outcome === LEFT_PAGE_CANCELLED) {
+        return [`Still at ${await describePage(tab.page)}`, ...manager.drainEvents(tab, startedAt)].join("\n");
+      }
+      const response = outcome;
       if (input.url === "back" || input.url === "forward") {
         await tab.page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => undefined);
       }
       const lines = [`${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`];
+      lines.push(
+        ...(await landingLines(manager, tab, { previousUrl, requestedUrl, status: response?.status(), redirected: response ? response.request().redirectedFrom() !== null : undefined })),
+      );
       lines.push(...manager.drainEvents(tab, startedAt));
       const notes = await siteNotesHint(manager.config.sitesDir, tab.page.url());
       if (notes) lines.push(notes);

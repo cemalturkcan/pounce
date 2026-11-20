@@ -74,21 +74,26 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
       },
     },
     async (input, extra) => {
+      const tabId = (input as { tab?: unknown }).tab;
+      const tab = typeof tabId === "string" ? deps.manager.peekTab(tabId) : undefined;
+      const moved = tab ? deps.manager.movedSinceSeen(tab) : undefined;
+      const withNote = (text: string) => deps.redactor.redact(moved ? `Note: the tab moved to ${moved} since your last call.\n${text}` : text);
       try {
         const owner = extra.sessionId ?? "stdio";
-        const tabId = (input as { tab?: unknown }).tab;
         if (typeof tabId === "string") deps.manager.claimIfOrphaned(tabId, owner);
         const output = await spec.handler(input as z.infer<z.ZodObject<Shape>>, owner, extra.signal);
         const text = typeof output === "string" ? output : output.text;
         const images = typeof output === "string" ? [] : (output.images ?? []);
         return {
           content: [
-            { type: "text", text: deps.redactor.redact(text) },
+            { type: "text", text: withNote(text) },
             ...images.map((image) => ({ type: "image", data: image.data.toString("base64"), mimeType: image.mimeType })),
           ],
         };
       } catch (error) {
-        return { content: [{ type: "text", text: deps.redactor.redact(describeError(error)) }], isError: true };
+        return { content: [{ type: "text", text: withNote(describeError(error)) }], isError: true };
+      } finally {
+        if (tab) deps.manager.markSeen(tab);
       }
     },
   );

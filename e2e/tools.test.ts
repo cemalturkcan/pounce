@@ -930,6 +930,49 @@ test("browser edge cases", async (t) => {
     assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-c/` }), /HTTP 401/);
   });
 
+  await t.test("a reCAPTCHA widget is reported after navigate", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/recaptcha` }), /^Challenge: reCAPTCHA on this page \(.+\)\. Use handoff to let the user complete it\.$/m);
+  });
+
+  await t.test("an invisible reCAPTCHA badge is not reported", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/recaptcha-invisible` }), /Challenge:/);
+  });
+
+  await t.test("an hCaptcha widget is reported after tab_open", async () => {
+    const text = await ok("tab_open", { url: `${fixture.url}/challenge/hcaptcha` });
+    await ok("tab_close", { tab: openedTab(text) });
+    assert.match(text, /^Challenge: hCaptcha on this page/m);
+  });
+
+  await t.test("a Turnstile widget is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/turnstile` }), /^Challenge: Cloudflare Turnstile on this page/m);
+  });
+
+  await t.test("a Cloudflare interstitial is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/cloudflare` }), /^Challenge: Cloudflare interstitial on this page/m);
+  });
+
+  await t.test("a 429 block page is reported", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/challenge/blocked` }), /^Challenge: block page on this page \(HTTP 429/m);
+  });
+
+  await t.test("a 403 page without block wording is not reported", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/plain-error` }), /Challenge:/);
+  });
+
+  await t.test("a page without challenge markers adds no challenge line", async () => {
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/challenge/start` }), /Challenge:/);
+  });
+
+  await t.test("a widget that appears after a click is reported", async () => {
+    assert.match(await ok("click", { tab, target: "#inject-hcaptcha" }), /^Challenge: hCaptcha on this page/m);
+  });
+
+  await t.test("a click that navigates onto a challenge page reports it", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/challenge/start` });
+    assert.match(await ok("click", { tab, target: "#to-recaptcha" }), /^Challenge: reCAPTCHA on this page/m);
+  });
+
   await t.test("permissions grant answers a notification permission prompt", async () => {
     await ok("navigate", { tab, url: fixture.url });
     await ok("permissions", { tab, action: "grant", grant: ["notifications"] });
@@ -948,6 +991,121 @@ test("browser edge cases", async (t) => {
 
   await t.test("permissions rejects an unknown permission name", async () => {
     assert.equal((await call("permissions", { tab, action: "grant", grant: ["teleport"] })).isError, true);
+  });
+
+  await t.test("leaving a page with unsaved changes is cancelled and reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/unsaved` });
+    await ok("click", { tab, target: "#draft" });
+    await ok("fill", { tab, target: "#draft", text: "draft text" });
+    assert.ok((await ok("navigate", { tab, url: fixture.url })).includes(LEAVE_EVENT));
+  });
+
+  await t.test("the tab stays on the page after a cancelled leave", async () => {
+    assert.match(await ok("evaluate", { tab, expression: "location.pathname" }), /\/unsaved\s*$/);
+  });
+
+  await t.test("a click on a link away from unsaved changes reports the cancelled leave", async () => {
+    assert.ok((await ok("click", { tab, target: "#leave" })).includes(LEAVE_EVENT));
+  });
+
+  await t.test("navigate with force leaves a page with unsaved changes", async () => {
+    assert.match(await ok("navigate", { tab, url: fixture.url, force: true }), /Fixture Home/);
+  });
+
+  await t.test("tab_close without force keeps a tab with unsaved changes", async () => {
+    const draft = openedTab(await ok("tab_open", { url: `${fixture.url}/unsaved` }));
+    await ok("click", { tab: draft, target: "#draft" });
+    const result = await call("tab_close", { tab: draft });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /unsaved changes.*force: true/s);
+    await ok("tab_close", { tab: draft, force: true });
+  });
+
+  await t.test("tab_close with force closes a tab with unsaved changes", async () => {
+    const draft = openedTab(await ok("tab_open", { url: `${fixture.url}/unsaved` }));
+    await ok("click", { tab: draft, target: "#draft" });
+    await ok("tab_close", { tab: draft, force: true });
+    assert.match((await call("snapshot", { tab: draft })).text, /is not open/);
+  });
+
+  await t.test("a passkey request is reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/passkey` });
+    assert.ok((await ok("click", { tab, target: "#passkey" })).includes(PASSKEY_EVENT));
+  });
+
+  await t.test("conditional passkey autofill is not reported", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/passkey` });
+    assert.ok(!(await ok("click", { tab, target: "#conditional" })).includes(PASSKEY_EVENT));
+  });
+
+  await t.test("a redirect to a sign-in page after navigate adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/app/private` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("navigating to a sign-in page on purpose adds no note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.doesNotMatch(await ok("navigate", { tab, url: `${fixture.url}/login` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("an inline sign-in form at the requested URL adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/app/inline` }), SIGN_IN_NOTE);
+  });
+
+  await t.test("a click that is redirected to a sign-in page adds the note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.match(await ok("click", { tab, target: "#to-private" }), SIGN_IN_NOTE);
+  });
+
+  await t.test("a click on a plain sign-in link adds no note", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/app/account` });
+    assert.doesNotMatch(await ok("click", { tab, target: "#to-login" }), SIGN_IN_NOTE);
+  });
+
+  await t.test("closing an OAuth popup is reported on the opener", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/popups` });
+    const opened = await ok("click", { tab, target: "#open-popup" });
+    const popup = /opened new tab (t\d+)/.exec(opened)?.[1] ?? /opened new tab (t\d+)/.exec(await ok("press", { tab, key: "Shift" }))?.[1] ?? "";
+    assert.ok(popup, opened);
+    await ok("click", { tab: popup, target: "#finish" });
+    await pause(200);
+    assert.match(await ok("press", { tab, key: "Shift" }), new RegExp(`tab ${popup} \\(popup\\) closed; this tab is at ${fixture.url.replace(/[.]/g, "\\.")}/popups`));
+  });
+
+  await t.test("a popup opened by a click is not reported as blocked", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/popups` });
+    const text = await ok("click", { tab, target: "#open-popup" });
+    const popup = /opened new tab (t\d+)/.exec(text)?.[1];
+    if (popup) await ok("tab_close", { tab: popup });
+    assert.doesNotMatch(text, /popup was blocked/);
+  });
+
+  await t.test("a popup opened without a user gesture is reported as blocked", { skip: process.env.WEB_AGENT_ENGINE === "playwright" ? "Playwright launches Chrome with --disable-popup-blocking" : false }, async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/popup-onload` }), /^Event: a popup was blocked/m);
+  });
+
+  await t.test("a tab navigated outside a tool call is noted on the next call", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    await deps.manager.getTab(tab).page.goto(`${fixture.url}/article`);
+    assert.ok((await ok("read_text", { tab, max_chars: 200 })).startsWith(`Note: the tab moved to ${fixture.url}/article since your last call.`));
+  });
+
+  await t.test("the moved note is given only once", async () => {
+    assert.doesNotMatch(await ok("read_text", { tab, max_chars: 200 }), /the tab moved to/);
+  });
+
+  await t.test("a navigation made by a tool is not noted as a move", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    assert.doesNotMatch(await ok("read_text", { tab, max_chars: 200 }), /the tab moved to/);
+  });
+
+  await t.test("a tab closed outside a tool call is named on the next call", async () => {
+    const other = openedTab(await ok("tab_open", { url: fixture.url }));
+    await deps.manager.getTab(other).page.close();
+    const result = await call("snapshot", { tab: other });
+    assert.equal(result.isError, true);
+    assert.match(result.text, new RegExp(`^Tab ${other} was closed outside this session\\.`));
   });
 
 

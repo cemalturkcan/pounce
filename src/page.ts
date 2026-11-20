@@ -3,6 +3,7 @@ import { TIMED_OUT, withDeadline } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail, type OutputStore } from "./output.ts";
+import { challengeLine, classifyChallenge, probe as probeLanding, SIGN_IN_NOTE, sessionMayHaveExpired } from "./page-checks.ts";
 import { cutSubtree, interactiveOnly, limitDepth, parseRef, topLevelRefs } from "./snapshot.ts";
 
 const SETTLE_MS = 150;
@@ -169,6 +170,26 @@ export async function readFrames(page: Page, { known, armed }: ArmedFrames): Pro
   return { state: silent ? "unknown" : "unchanged", silent, total };
 }
 
+export type Landing = { previousUrl: string; requestedUrl?: string; status?: number; redirected?: boolean };
+
+export async function landingLines(manager: BrowserManager, tab: Tab, landing: Landing) {
+  const { page } = tab;
+  if (page.isClosed()) return [];
+  const [probed] = await Promise.all([probeLanding(page), manager.drainPasskeyRequests(tab), manager.settlePopups(tab)]);
+  if (!probed || page.isClosed()) return [];
+  const lines: string[] = [];
+  const challenge = classifyChallenge(probed, landing.status);
+  if (challenge) lines.push(challengeLine(challenge));
+  const check = { previousUrl: landing.previousUrl, finalUrl: page.url(), requestedUrl: landing.requestedUrl, redirected: landing.redirected, page: probed };
+  if (sessionMayHaveExpired(check)) lines.push(SIGN_IN_NOTE);
+  return lines;
+}
+
+function currentDocument(tab: Tab) {
+  const document = tab.document;
+  return document && document.url === tab.page.url() ? document : undefined;
+}
+
 export type ActionOptions = {
   includeSnapshot?: boolean;
   includeDiff?: boolean;
@@ -219,6 +240,8 @@ export async function runAction(
         lines.push(`Could not tell whether the page changed: ${verdict.silent} of ${verdict.total} frames did not answer. Take a snapshot to check.`);
       } else if (options.noChangeText !== "") lines.push(options.noChangeText ?? "No change detected on the page.");
     }
+    const document = currentDocument(tab);
+    lines.push(...(await landingLines(manager, tab, { previousUrl: urlBefore, status: document?.status, redirected: navigated && document?.redirected === true })));
   }
   lines.push(...manager.drainEvents(tab, startedAt));
 
