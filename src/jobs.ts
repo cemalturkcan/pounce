@@ -2,6 +2,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Tab } from "./browser.ts";
 import { describeError, recordFault, ToolError } from "./errors.ts";
+import { logEvent } from "./log.ts";
 import { timestampSlug } from "./output.ts";
 import { runScript, serializeValue, type ScriptDeps } from "./script.ts";
 
@@ -21,6 +22,7 @@ export type Job = {
   logLines: number;
   recentLogs: string[];
   resultError?: string;
+  failure?: string;
   controller: AbortController;
   finished: Promise<void>;
 };
@@ -77,6 +79,7 @@ export class JobRunner {
         },
         async (error: unknown) => {
           job.state = controller.signal.aborted ? "cancelled" : "failed";
+          job.failure = describeError(error).split("\n").slice(0, 3).join("\n");
           await writeResult(describeError(error));
         },
       )
@@ -84,8 +87,10 @@ export class JobRunner {
       .catch((error: unknown) => recordFault(`job ${id}`, error))
       .finally(() => {
         job.endedAt = Date.now();
+        logEvent("job_end", { job: id, session: owner, tab: tab?.id, state: job.state, ms: job.endedAt - job.startedAt, logLines: job.logLines, error: job.failure }, job.state === "failed" ? "warn" : "info");
         this.trim();
       });
+    logEvent("job_start", { job: id, session: owner, tab: tab?.id, label: label || undefined, codeChars: code.length });
 
     this.jobs.set(id, job);
     return job;

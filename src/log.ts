@@ -74,10 +74,10 @@ function errorText(value: unknown) {
 
 function stderrLine(event: string, fields: LogFields) {
   const request = typeof fields.requestId === "string" ? ` [req ${fields.requestId}]` : "";
-  const message = [fields.message, errorText(fields.error)].filter((part) => typeof part === "string" && part).join(": ");
+  const message = [fields.message, fields.source, errorText(fields.error)].filter((part) => typeof part === "string" && part).join(": ");
   const nested = fields.error && typeof fields.error === "object" ? (fields.error as { stack?: unknown }).stack : undefined;
   const stack = typeof fields.stack === "string" ? fields.stack : typeof nested === "string" ? nested : "";
-  const rest = Object.fromEntries(Object.entries(fields).filter(([key]) => !["message", "error", "stack", "requestId"].includes(key)));
+  const rest = Object.fromEntries(Object.entries(fields).filter(([key]) => !["message", "source", "error", "stack", "requestId"].includes(key)));
   const detail = message || JSON.stringify(rest);
   return `web-agent-mcp ${event}${request}: ${detail}${stack ? `\n${stack}` : ""}`;
 }
@@ -86,8 +86,10 @@ function clipStack(stack: string | undefined) {
   return stack?.split("\n").slice(0, STACK_LINES).join("\n");
 }
 
+const ANSI = /\u001B\[[0-9;]*m/g;
+
 function sanitize(value: unknown, redact: (text: string) => string, depth = 0): unknown {
-  if (typeof value === "string") return redact(value);
+  if (typeof value === "string") return redact(value.replace(ANSI, ""));
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Error) return { message: redact(value.message), stack: redact(clipStack(value.stack) ?? "") };

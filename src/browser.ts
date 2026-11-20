@@ -4,6 +4,7 @@ import type { BrowserContext, BrowserType, Dialog, Locator, Page, Request, Respo
 import type { Config } from "./config.ts";
 import { TIMED_OUT, withDeadline } from "./async.ts";
 import { ToolError } from "./errors.ts";
+import { logEvent } from "./log.ts";
 import { isStreamingMime, isTextualMime } from "./mime.ts";
 import { timestampSlug } from "./output.ts";
 import { clearStaleProfileLock } from "./profile-lock.ts";
@@ -178,6 +179,8 @@ export class BrowserManager {
   private counter = 0;
   private browserVersion?: string;
   private closing: Promise<unknown> = Promise.resolve();
+  private launches = 0;
+  private shuttingDown = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -192,11 +195,28 @@ export class BrowserManager {
   }
 
   ensureContext() {
-    this.contextPromise ??= this.launch().catch((error: unknown) => {
-      this.contextPromise = undefined;
-      throw error;
-    });
+    this.contextPromise ??= this.launchLogged();
     return this.contextPromise;
+  }
+
+  private async launchLogged() {
+    const startedAt = Date.now();
+    this.shuttingDown = false;
+    if (this.launches > 0) logEvent("browser_relaunch", { launches: this.launches });
+    try {
+      const context = await this.launch();
+      this.launches += 1;
+      logEvent("browser_launch", { chrome: this.browserVersion, engine: this.config.engine, headless: this.config.headless, ms: Date.now() - startedAt, tabs: this.tabs.size });
+      return context;
+    } catch (error) {
+      this.contextPromise = undefined;
+      logEvent(
+        "browser_launch_failed",
+        { engine: this.config.engine, ms: Date.now() - startedAt, error: error instanceof Error ? error.message.split("\n").slice(0, 3).join("\n") : String(error), stack: error instanceof Error ? error.stack?.split("\n").slice(0, 12).join("\n") : undefined },
+        "error",
+      );
+      throw error;
+    }
   }
 
   private get consoleHookMode(): ConsoleHookMode {
@@ -209,7 +229,9 @@ export class BrowserManager {
     const { config } = this;
     await mkdir(config.profileDir, { recursive: true });
     const chromium = await loadChromium(config.engine);
-    await clearStaleProfileLock(config.profileDir);
+    const lock = await clearStaleProfileLock(config.profileDir);
+    if (lock === "cleared") logEvent("profile_lock_cleared", { profileDir: config.profileDir }, "warn");
+    if (lock === "in-use") logEvent("profile_lock_in_use", { profileDir: config.profileDir }, "warn");
     const context = await chromium.launchPersistentContext(config.profileDir, {
       handleSIGINT: false,
       handleSIGTERM: false,
@@ -240,6 +262,8 @@ export class BrowserManager {
   }
 
   private reset() {
+    if (this.shuttingDown) logEvent("browser_closed", { reason: "shutdown" });
+    else logEvent("browser_closed", { reason: "unexpected", tabs: this.tabs.size }, "warn");
     this.context = undefined;
     this.contextPromise = undefined;
     this.tabs.clear();
@@ -288,7 +312,10 @@ export class BrowserManager {
     let networkId = 0;
 
     page.on("close", () => this.onClose(tab));
-    page.on("crash", () => pushEvent(tab, "the page crashed; reload it with navigate or close the tab"));
+    page.on("crash", () => {
+      logEvent("tab_crash", { tab: tab.id, owner: tab.owner, url: page.url() }, "warn");
+      pushEvent(tab, "the page crashed; reload it with navigate or close the tab");
+    });
     page.on("console", (message) => {
       pushBounded(tab.console, { level: message.type(), text: message.text().slice(0, 2000), time: new Date().toISOString() }, CONSOLE_LIMIT);
     });
@@ -367,6 +394,7 @@ export class BrowserManager {
     this.tabs.delete(tab.id);
     for (const check of [...tab.popupChecks]) check.finish(false);
     if (!tab.closingByTool) {
+      if (!this.shuttingDown) logEvent("tab_closed_outside", { tab: tab.id, owner: tab.owner, url: tab.page.url() });
       this.closedOutside.add(tab.id);
       if (this.closedOutside.size > CLOSED_OUTSIDE_LIMIT) this.closedOutside.delete(this.closedOutside.values().next().value ?? "");
     }
@@ -612,6 +640,7 @@ export class BrowserManager {
   async shutdown() {
     const context = this.context;
     if (!context) return;
+    this.shuttingDown = true;
     await Promise.race([
       context.close().catch(() => undefined),
       new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),

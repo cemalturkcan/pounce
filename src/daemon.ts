@@ -4,13 +4,16 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import path from "node:path";
+import { withDeadline } from "./async.ts";
 import type { Config } from "./config.ts";
+import { activeLogger, type Logger, logEvent } from "./log.ts";
 import { SERVER_SCRIPT } from "./version.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const IDLE_SESSION_MS = 12 * 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 30 * 60 * 1000;
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
+const LOG_FLUSH_MS = 2000;
 
 export type DaemonRegistry = {
   pid: number;
@@ -106,13 +109,15 @@ export async function startDaemon(
   config: Config,
   createServer: () => McpServer,
   onShutdown: () => Promise<void>,
-  onSessionEnd: (sessionId: string) => void = () => undefined,
+  onSessionEnd: (sessionId: string) => number | void = () => undefined,
+  log: Logger | undefined = activeLogger(),
 ) {
   const sessions = new Map<string, Session>();
-  const endSession = (sessionId: string | undefined) => {
+  const endSession = (sessionId: string | undefined, reason: string) => {
     if (!sessionId) return;
-    sessions.delete(sessionId);
-    onSessionEnd(sessionId);
+    const known = sessions.delete(sessionId);
+    const orphaned = onSessionEnd(sessionId);
+    if (known) logEvent(reason === "idle" ? "session_sweep" : "session_close", { session: sessionId, reason, orphanedTabs: orphaned || undefined, open: sessions.size });
   };
 
   async function openSession() {
@@ -120,11 +125,15 @@ export async function startDaemon(
       sessionIdGenerator: randomUUID,
       onsessioninitialized: (sessionId) => {
         sessions.set(sessionId, { transport, lastSeen: Date.now() });
+        logEvent("session_open", { session: sessionId, open: sessions.size });
       },
-      onsessionclosed: (sessionId) => endSession(sessionId),
+      onsessionclosed: (sessionId) => endSession(sessionId, "client"),
     });
-    transport.onclose = () => endSession(transport.sessionId);
-    transport.onerror = (error) => console.error("web-agent-mcp transport error:", error.message);
+    transport.onclose = () => endSession(transport.sessionId, "transport closed");
+    transport.onerror = (error) => {
+      console.error("web-agent-mcp transport error:", error.message);
+      logEvent("transport_error", { session: transport.sessionId, error: error.message }, "warn");
+    };
     await createServer().connect(transport);
     return transport;
   }
@@ -175,6 +184,7 @@ export async function startDaemon(
 
   const httpServer = http.createServer((request, response) => {
     handle(request, response).catch((error: unknown) => {
+      logEvent("http_error", { method: request.method, path: (request.url ?? "/").split("?")[0], error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, "error");
       if (!response.headersSent) response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
     });
@@ -200,12 +210,13 @@ export async function startDaemon(
   };
   writeFileSync(config.registryPath, `${JSON.stringify(registry, null, 2)}\n`);
   console.error(`web-agent-mcp daemon running at ${config.endpoint}`);
+  logEvent("daemon_start", { version: config.serverVersion, engine: config.engine, headless: config.headless, port: config.port, pid: process.pid, node: process.version, logLevel: log?.level });
 
   const sweep = setInterval(() => {
     const cutoff = Date.now() - IDLE_SESSION_MS;
     for (const [sessionId, session] of sessions) {
       if (session.lastSeen < cutoff) {
-        endSession(sessionId);
+        endSession(sessionId, "idle");
         void session.transport.close().catch(() => undefined);
       }
     }
@@ -213,18 +224,22 @@ export async function startDaemon(
   sweep.unref();
 
   let stopping = false;
-  const shutdown = async () => {
+  const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
+    const startedAt = Date.now();
+    logEvent("daemon_shutdown", { signal, sessions: sessions.size });
     clearInterval(sweep);
     httpServer.close();
     httpServer.closeAllConnections();
     await Promise.allSettled([...sessions.values()].map((session) => session.transport.close()));
     await onShutdown();
     if (readRegistry(config)?.pid === process.pid) rmSync(config.registryPath, { force: true });
+    logEvent("daemon_stopped", { ms: Date.now() - startedAt });
+    if (log) await withDeadline(log.flush(), LOG_FLUSH_MS);
     process.exit(0);
   };
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown());
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown(signal));
 }
 
 export function daemonStatus(config: Config) {

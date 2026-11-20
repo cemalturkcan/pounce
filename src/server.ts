@@ -10,6 +10,7 @@ import { daemonStatus, startDaemon, stopDaemon } from "./daemon.ts";
 import { installProcessGuards } from "./errors.ts";
 import { defaultImportOptions, ImportError, importProfile, renderImportFailure, renderImportReport } from "./import-profile.ts";
 import { JobRunner } from "./jobs.ts";
+import { Logger, useLogger } from "./log.ts";
 import { OutputStore, Redactor } from "./output.ts";
 import { GopassStore, NoSecretStore, type SecretStore } from "./secrets.ts";
 import { registerTools, type ToolDeps } from "./tools.ts";
@@ -26,6 +27,8 @@ export const SERVER_INSTRUCTIONS = [
 
 export function createDeps(config: Config, secrets?: SecretStore, askAdapter?: AskAdapter): ToolDeps {
   const redactor = new Redactor();
+  const log = new Logger({ dir: config.logDir, level: config.logLevel, redactor });
+  useLogger(log);
   return {
     manager: new BrowserManager(config),
     store: new OutputStore(config.outputDir, redactor),
@@ -33,6 +36,7 @@ export function createDeps(config: Config, secrets?: SecretStore, askAdapter?: A
     redactor,
     jobs: new JobRunner(),
     ask: new AskAdapterSource(askAdapter ? { adapter: askAdapter } : { modulePath: config.askAdapter, adapter: anthropicAskAdapter() }),
+    log,
   };
 }
 
@@ -69,6 +73,10 @@ async function main() {
   const deps = createDeps(config);
   installProcessGuards("web-agent-mcp");
   void deps.store.prune().catch((error: unknown) => console.error("web-agent-mcp prune failed:", error));
+  void deps.log
+    .prune()
+    .then((removed) => removed && deps.log.log("info", "log_pruned", { removed }))
+    .catch((error: unknown) => console.error("web-agent-mcp log prune failed:", error));
 
   if (args.includes("--daemon")) {
     await startDaemon(
@@ -79,6 +87,7 @@ async function main() {
         return deps.manager.shutdown();
       },
       (sessionId) => deps.manager.orphanTabsOf(sessionId),
+      deps.log,
     );
     return;
   }

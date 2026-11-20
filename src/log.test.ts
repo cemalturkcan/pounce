@@ -138,6 +138,15 @@ describe("Logger", () => {
     assert.match(raw, /<secret:otp>/);
   });
 
+  test("strips terminal color codes", async () => {
+    const dir = await freshDir();
+    const logger = new Logger({ dir, now: clock().now, stderr: () => undefined });
+    logger.log("warn", "tool_call", { error: "Call log:\n\u001b[2m  - waiting for locator('#missing')\u001b[22m" });
+    await logger.flush();
+    const [entry] = await lines(dir, "daemon-2026-11-20.jsonl");
+    assert.equal(entry?.error, "Call log:\n  - waiting for locator('#missing')");
+  });
+
   test("serializes errors with message and stack", async () => {
     const dir = await freshDir();
     const logger = new Logger({ dir, now: clock().now, stderr: () => undefined });

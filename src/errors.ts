@@ -1,14 +1,26 @@
+import { logEvent } from "./log.ts";
+
 const CALL_LOG_LINES = 8;
 const FAULT_LIMIT = 20;
+const STACK_LINES = 12;
 
 export type Fault = { time: string; source: string; message: string };
 
 const faults: Fault[] = [];
 
-export function recordFault(source: string, error: unknown) {
+function stackOf(error: unknown) {
+  return error instanceof Error ? error.stack?.split("\n").slice(0, STACK_LINES).join("\n") : undefined;
+}
+
+function pushFault(source: string, error: unknown) {
   const message = (error instanceof Error ? (error.stack ?? error.message) : String(error)).split("\n").slice(0, 3).join(" | ");
   faults.push({ time: new Date().toISOString(), source, message: message.slice(0, 500) });
   if (faults.length > FAULT_LIMIT) faults.splice(0, faults.length - FAULT_LIMIT);
+}
+
+export function recordFault(source: string, error: unknown) {
+  pushFault(source, error);
+  logEvent("fault", { source, error: error instanceof Error ? error.message : String(error), stack: stackOf(error) }, "error");
 }
 
 export function recentFaults(limit = 5) {
@@ -21,8 +33,12 @@ export function installProcessGuards(label: string) {
   if (guardsInstalled) return;
   guardsInstalled = true;
   process.on("unhandledRejection", (reason) => {
-    recordFault("unhandled rejection", reason);
-    console.error(`${label}: unhandled rejection kept the server running:`, reason instanceof Error ? (reason.stack ?? reason.message) : reason);
+    pushFault("unhandled rejection", reason);
+    logEvent(
+      "unhandled_rejection",
+      { message: `${label}: unhandled rejection kept the server running`, error: reason instanceof Error ? reason.message : String(reason), stack: stackOf(reason) },
+      "error",
+    );
   });
 }
 
