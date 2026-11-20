@@ -67,6 +67,28 @@ npm run import-profile -- [--from ~/.config/google-chrome] [--profile Default] [
 | `WEB_AGENT_SECRETS` | `gopass` | `gopass` or `none` |
 | `WEB_AGENT_CONSOLE_HOOK` | `local` | Console capture on `local` dev hosts, `all`, or `off` |
 | `WEB_AGENT_ASK_ADAPTER` | `~/.config/web-agent-mcp/ask-adapter.mjs` when it exists, else the built-in Anthropic adapter | Absolute path of an ES module that replaces the model adapter of `ask_pages` and `compare_design`; see `examples/ask-adapter.example.mjs` |
+| `WEB_AGENT_LOG_DIR` | `<data dir>/logs` | Where the daemon writes its JSON Lines log (config key `logDir`) |
+| `WEB_AGENT_LOG_LEVEL` | `info` | Lowest level written: `debug`, `info`, `warn` or `error`. `debug` adds the first 500 characters of every tool result. |
+
+## Debugging
+
+The daemon writes one JSON object per line to `<data dir>/logs/daemon-YYYY-MM-DD.jsonl` (UTC days; files older than 14 days are deleted at startup). Each line has `time`, `level`, `event`, and where it applies `requestId`, `session` and `tab`. Events cover every tool call (`tool_call`: tool, duration, outcome, the first lines of an error, a summarized input), daemon start and shutdown, MCP sessions opening, closing and being swept, browser launches, failures, crashes and relaunches, tabs that crash or are closed outside a tool, background jobs, and internal faults and unhandled rejections with their stacks. Inputs are summarized: long strings are cut, and fields such as `secret`, `password`, `text`, `value`, `code`, `script`, `expression` and `body` are logged only as their length. Every string passes through the same masking as tool results, so stored secrets and one-time codes do not appear.
+
+A failed tool result ends with `[req <id>]`; that id finds the matching line. Agents can read the log with the `server_log` tool, and `tabs_list` shows the log directory and the errors of the last hour.
+
+```bash
+cd ~/.local/share/claude-code-pair/web-agent/logs
+jq -c 'select(.requestId == "3fa91c")' daemon-*.jsonl
+jq -c 'select(.level == "error" or .level == "warn")' daemon-$(date -u +%F).jsonl | tail -20
+jq -c 'select(.event == "tool_call") | {time, tool, ms, ok}' daemon-$(date -u +%F).jsonl | tail
+jq -r 'select(.event == "tool_call") | "\(.ms)\t\(.tool)"' daemon-*.jsonl | sort -n | tail
+```
+
+Errors are also printed to stderr, so the service journal keeps them:
+
+```bash
+journalctl --user -u claude-code-pair-web-agent.service -n 100
+```
 
 ## Tests
 

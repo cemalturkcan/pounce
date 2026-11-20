@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AskAdapter, AskImage, AskUsage } from "./ask-adapter.ts";
+import { type AskAdapter, type AskImage, type AskUsage, completeLogged } from "./ask-adapter.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail } from "./output.ts";
 
@@ -259,7 +259,11 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
       try {
         const signal = AbortSignal.timeout(options.timeoutMs);
         const images = batch.flatMap((document) => document.images ?? []);
-        const reply = await adapter.complete({ system: ASK_SYSTEM, prompt: buildPrompt(options.question, batch), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal });
+        const reply = await completeLogged(
+          adapter,
+          { system: ASK_SYSTEM, prompt: buildPrompt(options.question, batch), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal },
+          { tool: "ask_pages", call: index + 1, pages: batch.length },
+        );
         if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
         if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
         const parsed = parseReply(reply.text, sources);

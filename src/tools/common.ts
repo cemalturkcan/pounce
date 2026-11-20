@@ -4,6 +4,7 @@ import type { AskAdapterSource } from "../ask.ts";
 import { type BrowserManager, ORPHANED_OWNER, type Tab, UNCLAIMED_OWNER } from "../browser.ts";
 import { describeError, ToolError } from "../errors.ts";
 import type { JobRunner } from "../jobs.ts";
+import { type Logger, newRequestId, summarizeInput } from "../log.ts";
 import { clipHeadTail, type OutputStore, type Redactor } from "../output.ts";
 import type { SecretStore } from "../secrets.ts";
 
@@ -14,6 +15,7 @@ export type ToolDeps = {
   redactor: Redactor;
   jobs: JobRunner;
   ask: AskAdapterSource;
+  log: Logger;
 };
 
 type ToolImage = { data: Buffer; mimeType: string };
@@ -30,6 +32,10 @@ type ToolSpec<Shape extends z.ZodRawShape> = {
   destructive?: boolean;
   handler: (input: z.infer<z.ZodObject<Shape>>, owner: string, signal: AbortSignal) => Promise<ToolOutput>;
 };
+
+const RESULT_LOG_CHARS = 500;
+const ERROR_LOG_LINES = 3;
+const STACK_LOG_LINES = 8;
 
 export const INLINE_SCREENSHOT_MAX_HEIGHT = 6000;
 export const SENSITIVE_HEADERS = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"]);
@@ -74,24 +80,43 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
       },
     },
     async (input, extra) => {
+      const requestId = newRequestId();
+      const startedAt = performance.now();
+      const owner = extra.sessionId ?? "stdio";
       const tabId = (input as { tab?: unknown }).tab;
       const tab = typeof tabId === "string" ? deps.manager.peekTab(tabId) : undefined;
       const moved = tab ? deps.manager.movedSinceSeen(tab) : undefined;
       const withNote = (text: string) => deps.redactor.redact(moved ? `Note: the tab moved to ${moved} since your last call.\n${text}` : text);
+      const record = (fields: Record<string, unknown>) =>
+        deps.log.log(fields.ok ? "info" : "warn", "tool_call", {
+          requestId,
+          session: owner,
+          tab: typeof tabId === "string" ? tabId : undefined,
+          tool: spec.name,
+          ms: Math.round(performance.now() - startedAt),
+          ...fields,
+          input: summarizeInput(input),
+        });
       try {
-        const owner = extra.sessionId ?? "stdio";
         if (typeof tabId === "string") deps.manager.claimIfOrphaned(tabId, owner);
         const output = await spec.handler(input as z.infer<z.ZodObject<Shape>>, owner, extra.signal);
-        const text = typeof output === "string" ? output : output.text;
+        const text = withNote(typeof output === "string" ? output : output.text);
         const images = typeof output === "string" ? [] : (output.images ?? []);
+        record({ ok: true, images: images.length || undefined, result: deps.log.enabled("debug") ? text.slice(0, RESULT_LOG_CHARS) : undefined });
         return {
           content: [
-            { type: "text", text: withNote(text) },
+            { type: "text", text },
             ...images.map((image) => ({ type: "image", data: image.data.toString("base64"), mimeType: image.mimeType })),
           ],
         };
       } catch (error) {
-        return { content: [{ type: "text", text: withNote(describeError(error)) }], isError: true };
+        const described = describeError(error);
+        record({
+          ok: false,
+          error: described.split("\n").slice(0, ERROR_LOG_LINES).join("\n"),
+          stack: error instanceof Error && !(error instanceof ToolError) ? error.stack?.split("\n").slice(0, STACK_LOG_LINES).join("\n") : undefined,
+        });
+        return { content: [{ type: "text", text: `${withNote(described)} [req ${requestId}]` }], isError: true };
       } finally {
         if (tab) deps.manager.markSeen(tab);
       }

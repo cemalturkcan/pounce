@@ -81,6 +81,7 @@ before(async () => {
     WEB_AGENT_HEADLESS: "true",
     WEB_AGENT_PASSWORD_STORE: "basic",
     WEB_AGENT_ENGINE: process.env.WEB_AGENT_ENGINE,
+    WEB_AGENT_LOG_LEVEL: "debug",
   });
   deps = createDeps(config, fakeSecrets, fakeAdapter);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -97,7 +98,7 @@ after(async () => {
 });
 test("every tool and parameter is described", async () => {
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 40);
+  assert.equal(tools.length, 41);
   for (const tool of tools) {
     assert.ok((tool.description ?? "").length >= 60, `${tool.name} description too short`);
     const properties = (tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
@@ -1492,4 +1493,17 @@ test("collect_pages waits for client-rendered content", async (t) => {
       deps.ask = saved;
     }
   });
+});
+
+test("the debug log records every call without secret values", async () => {
+  await deps.log.flush();
+  const dir = path.join(workDir, "logs");
+  const files = (await readdir(dir)).filter((name) => /^daemon-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
+  assert.ok(files.length > 0, `no log files in ${dir}`);
+  const raw = (await Promise.all(files.map((name) => readFile(path.join(dir, name), "utf8")))).join("");
+  assert.ok(raw.includes('"tool":"fill"'), "fill calls are not logged");
+  assert.ok(raw.includes('"result":'), "debug level does not log result text");
+  assert.ok(raw.includes('"event":"model_call","tool":"ask_pages","adapter":"fixture adapter"'), "ask_pages model calls are not logged");
+  assert.ok(!raw.includes(TEST_SECRET), "secret leaked into the log");
+  assert.ok(!raw.includes(encodeURIComponent(TEST_SECRET)), "url-encoded secret leaked into the log");
 });
