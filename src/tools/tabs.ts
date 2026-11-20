@@ -231,7 +231,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
         })
         .optional()
         .describe("Viewport to emulate: a preset, a size, or both."),
-      color_scheme: z.enum(["light", "dark", "none"]).optional().describe("prefers-color-scheme to report; none removes the override."),
+      color_scheme: z.enum(["light", "dark", "none"]).optional().describe("prefers-color-scheme to report for this tab; none removes the override, and pages then follow the system setting as they do by default."),
       reduced_motion: z.enum(["reduce", "no-preference", "none"]).optional().describe("prefers-reduced-motion to report; none removes the override."),
       geolocation: z
         .object({

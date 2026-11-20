@@ -194,6 +194,25 @@ export function sandboxLaunchError(error: unknown, sandbox: boolean) {
   );
 }
 
+export function launchOptions(config: Config) {
+  return {
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    channel: config.executablePath ? undefined : config.channel,
+    executablePath: config.executablePath,
+    headless: config.headless,
+    viewport: null,
+    colorScheme: null,
+    locale: config.locale,
+    timezoneId: config.timezoneId,
+    acceptDownloads: true,
+    ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
+    chromiumSandbox: config.chromeSandbox,
+    args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", "--test-type", ...config.extraArgs],
+  };
+}
+
 export class BrowserManager {
   readonly config: Config;
   readonly profile = new ProfileSettings();
@@ -262,21 +281,7 @@ export class BrowserManager {
     const lock = await clearStaleProfileLock(config.profileDir);
     if (lock === "cleared") logEvent("profile_lock_cleared", { profileDir: config.profileDir }, "warn");
     if (lock === "in-use") logEvent("profile_lock_in_use", { profileDir: config.profileDir }, "warn");
-    const context = await chromium.launchPersistentContext(config.profileDir, {
-      handleSIGINT: false,
-      handleSIGTERM: false,
-      handleSIGHUP: false,
-      channel: config.executablePath ? undefined : config.channel,
-      executablePath: config.executablePath,
-      headless: config.headless,
-      viewport: null,
-      locale: config.locale,
-      timezoneId: config.timezoneId,
-      acceptDownloads: true,
-      ignoreDefaultArgs: ["--password-store=basic", "--use-mock-keychain", "--disable-sync"],
-      chromiumSandbox: config.chromeSandbox,
-      args: [`--password-store=${config.passwordStore}`, "--hide-crash-restore-bubble", "--test-type", ...config.extraArgs],
-    }).catch((error: unknown) => {
+    const context = await chromium.launchPersistentContext(config.profileDir, launchOptions(config)).catch((error: unknown) => {
       throw sandboxLaunchError(error, config.chromeSandbox) ?? error;
     });
 

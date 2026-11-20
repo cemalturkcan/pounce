@@ -374,3 +374,10 @@ test("pruning runs at start and again on every interval", async () => {
   stop();
   assert.ok(store >= 3 && log >= 3, `store ${store}, log ${log}`);
 });
+
+test("the browser launches without a color scheme override so pages follow the system", async () => {
+  const { launchOptions } = await import("./browser.ts");
+  const options = launchOptions(loadConfig({ HOME: "/tmp/x", WEB_AGENT_HEADLESS: "true" }));
+  assert.equal(options.colorScheme, null);
+  assert.equal(options.viewport, null);
+});
