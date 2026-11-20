@@ -6,6 +6,7 @@ import { TIMED_OUT, withDeadline } from "./async.ts";
 import { ToolError } from "./errors.ts";
 import { isStreamingMime, isTextualMime } from "./mime.ts";
 import { timestampSlug } from "./output.ts";
+import { ProfileSettings } from "./profile-settings.ts";
 import { parseRef } from "./snapshot.ts";
 
 const CONSOLE_LIMIT = 300;
@@ -128,6 +129,7 @@ async function loadChromium(engine: Config["engine"]) {
 
 export class BrowserManager {
   readonly config: Config;
+  readonly profile = new ProfileSettings();
   private contextPromise?: Promise<BrowserContext>;
   private context?: BrowserContext;
   private readonly tabs = new Map<string, Tab>();
@@ -184,6 +186,7 @@ export class BrowserManager {
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
     await context.addInitScript(installConsoleHook, this.consoleHookMode);
+    await this.profile.apply(context);
 
     this.context = context;
     this.browserVersion = context.browser()?.version();

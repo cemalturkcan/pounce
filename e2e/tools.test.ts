@@ -95,7 +95,7 @@ after(async () => {
 });
 test("every tool and parameter is described", async () => {
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 37);
+  assert.equal(tools.length, 39);
   for (const tool of tools) {
     assert.ok((tool.description ?? "").length >= 60, `${tool.name} description too short`);
     const properties = (tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
@@ -870,4 +870,86 @@ test("review regressions", async (t) => {
     assert.match(await ok("tabs_list"), /Browser running/);
     openedTab(await ok("tab_open", { url: fixture.url }));
   });
+});
+
+import { edgeAuth } from "./fixture.ts";
+
+const SIGN_IN_NOTE = /Note: this looks like a sign-in page; the session may have expired\./;
+const LEAVE_EVENT = "Event: the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
+const PASSKEY_EVENT = "Event: the page requested a passkey or security key; use handoff";
+const MIXED_TEXT = "Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا";
+
+test("browser edge cases", async (t) => {
+  edgeAuth.username = "fixture-user";
+  edgeAuth.password = TEST_SECRET;
+  const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+  const authTexts: string[] = [];
+
+  await t.test("a Basic-auth page answers 401 before http_auth is set", async () => {
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-c/` }), /HTTP 401/);
+  });
+
+  await t.test("http_auth set answers the Basic challenge for the origin", async () => {
+    authTexts.push(await ok("http_auth", { action: "set", origin: fixture.url, secret: "fixture/site" }));
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-a/` }), /HTTP 200/);
+  });
+
+  await t.test("subresource requests on an authorized origin are answered too", async () => {
+    await ok("wait_for", { tab, text: "api auth-a" });
+  });
+
+  await t.test("http_auth works while an intercept rule matches the same requests", async () => {
+    await ok("intercept", { tab, action: "add", url: "/auth-b/", mode: "modify", set_headers: { "x-edge": "1" } });
+    const text = await ok("navigate", { tab, url: `${fixture.url}/auth-b/` });
+    await ok("intercept", { tab, action: "clear" });
+    assert.match(text, /HTTP 200/);
+  });
+
+  await t.test("http_auth applies to other tabs of the profile", async () => {
+    const other = openedTab(await ok("tab_open", { url: `${fixture.url}/auth-d/` }));
+    const status = await ok("read_text", { tab: other, target: "#auth-state" });
+    await ok("tab_close", { tab: other });
+    assert.match(status, /authorized auth-d/);
+  });
+
+  await t.test("http_auth list names the origin and the secret", async () => {
+    const text = await ok("http_auth", { action: "list" });
+    authTexts.push(text);
+    assert.match(text, new RegExp(`${fixture.url.replace(/[.]/g, "\\.")} .*fixture/site`));
+  });
+
+  await t.test("http_auth results never contain the credentials", async () => {
+    for (const text of authTexts) {
+      assert.ok(!text.includes(TEST_SECRET), `password leaked: ${text}`);
+      assert.ok(!text.includes(edgeAuth.username), `username leaked: ${text}`);
+    }
+  });
+
+  await t.test("http_auth clear stops answering new challenges", async () => {
+    await ok("http_auth", { action: "clear", origin: fixture.url });
+    assert.match(await ok("navigate", { tab, url: `${fixture.url}/auth-c/` }), /HTTP 401/);
+  });
+
+  await t.test("permissions grant answers a notification permission prompt", async () => {
+    await ok("navigate", { tab, url: fixture.url });
+    await ok("permissions", { tab, action: "grant", grant: ["notifications"] });
+    assert.match(await ok("evaluate", { tab, expression: "Notification.permission" }), /granted\s*$/);
+  });
+
+  await t.test("permissions grants for one origin accumulate", async () => {
+    await ok("permissions", { tab, action: "grant", grant: ["geolocation"] });
+    assert.match(await ok("evaluate", { tab, expression: "navigator.permissions.query({ name: 'notifications' }).then((s) => s.state)" }), /granted\s*$/);
+  });
+
+  await t.test("permissions clear removes the grants of the origin", async () => {
+    await ok("permissions", { tab, action: "clear" });
+    assert.doesNotMatch(await ok("evaluate", { tab, expression: "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)" }), /granted\s*$/);
+  });
+
+  await t.test("permissions rejects an unknown permission name", async () => {
+    assert.equal((await call("permissions", { tab, action: "grant", grant: ["teleport"] })).isError, true);
+  });
+
+
+  await ok("tab_close", { tab });
 });

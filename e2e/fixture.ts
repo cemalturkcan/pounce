@@ -151,6 +151,7 @@ export async function startFixture(): Promise<Fixture> {
   const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
   const server = http.createServer((request, response) => {
     const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+    if (handleEdgeCase(request, response)) return;
     if (pages[pathname]) {
       response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
     } else if (pathname === "/pixel.png") {
@@ -193,4 +194,72 @@ export async function startFixture(): Promise<Fixture> {
         server.close(() => resolve());
       }),
   };
+}
+
+export const edgeAuth = { username: "", password: "" };
+
+const EDGE_HTML = (title: string, body: string) => `<!doctype html>\n<html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
+
+const EDGE_PAGES: Record<string, { status?: number; html: string }> = {
+  "/challenge/start": { html: EDGE_HTML("Challenge Start", `<a id="to-recaptcha" href="/challenge/recaptcha">Continue</a><button id="inject-hcaptcha" onclick="document.body.insertAdjacentHTML('beforeend', '<div class=&quot;h-captcha&quot;><iframe title=&quot;Widget containing checkbox for hCaptcha security challenge&quot; src=&quot;/captcha/v1/abc/static/hcaptcha.html#frame=checkbox&quot; width=&quot;300&quot; height=&quot;80&quot;></iframe></div>')">Load widget</button>`) },
+  "/challenge/recaptcha": { html: EDGE_HTML("Login", `<form><input name="user"><iframe title="reCAPTCHA" src="/recaptcha/api2/anchor?k=fixture&amp;size=normal" width="304" height="78"></iframe></form>`) },
+  "/challenge/recaptcha-invisible": { html: EDGE_HTML("Shop", `<p>Shop</p><div class="grecaptcha-badge"><iframe title="reCAPTCHA" src="/recaptcha/api2/anchor?k=fixture&amp;size=invisible" width="256" height="60"></iframe></div>`) },
+  "/challenge/hcaptcha": { html: EDGE_HTML("Signup", `<div class="h-captcha" data-sitekey="fixture"><iframe title="Widget containing checkbox for hCaptcha security challenge" src="/captcha/v1/abc/static/hcaptcha.html#frame=checkbox" width="300" height="80"></iframe></div>`) },
+  "/challenge/turnstile": { html: EDGE_HTML("Contact", `<div class="cf-turnstile" data-sitekey="fixture"><iframe title="Widget containing a Cloudflare security challenge" src="/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/abc/light/normal" width="300" height="65"></iframe><input type="hidden" name="cf-turnstile-response"></div>`) },
+  "/challenge/cloudflare": { status: 403, html: EDGE_HTML("Just a moment...", `<div class="main-wrapper"><h1>127.0.0.1</h1><p id="challenge-body-text">Verify you are human by completing the action below.</p><div id="challenge-stage"></div><form id="challenge-form" action="/challenge/cloudflare" method="POST"></form></div>`) },
+  "/challenge/blocked": { status: 429, html: EDGE_HTML("Too Many Requests", `<h1>Too many requests</h1><p>You have been rate limited. Try again later.</p>`) },
+  "/challenge/plain-error": { status: 403, html: EDGE_HTML("Members", `<h1>Members area</h1><p>Your plan does not include this report.</p>`) },
+  "/unsaved": { html: EDGE_HTML("Unsaved Draft", `<textarea id="draft"></textarea><a id="leave" href="/">Leave</a><script>addEventListener("beforeunload", (event) => { event.preventDefault(); event.returnValue = ""; });</script>`) },
+  "/passkey": { html: EDGE_HTML("Passkey", `<button id="passkey" onclick="navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32), timeout: 20000, userVerification: 'preferred' } }).catch(() => undefined)">Sign in with a passkey</button><button id="conditional" onclick="navigator.credentials.get({ mediation: 'conditional', publicKey: { challenge: new Uint8Array(32) } }).catch(() => undefined)">Autofill</button><button id="plain" onclick="document.title = 'clicked'">Plain</button>`) },
+  "/popups": { html: EDGE_HTML("Popup Opener", `<p id="opener-state">waiting</p><button id="open-popup" onclick="window.open('/popup-child', 'oauth', 'width=420,height=420')">Sign in with provider</button>`) },
+  "/popup-child": { html: EDGE_HTML("Provider", `<button id="finish" onclick="window.opener && (window.opener.document.getElementById('opener-state').textContent = 'signed in'); window.close()">Allow</button>`) },
+  "/popup-onload": { html: EDGE_HTML("Popup On Load", `<p>promo</p><script>window.open("/popup-child", "promo");</script>`) },
+  "/app/account": { html: EDGE_HTML("Account", `<h1>Your account</h1><a id="to-private" href="/app/private">Private report</a><a id="to-login" href="/login">Switch account</a>`) },
+  "/app/inline": { html: EDGE_HTML("Account", `<h1>Oturum aç</h1><form><input name="email"><input type="password" name="password"><button>Giriş yap</button></form>`) },
+  "/login": { html: EDGE_HTML("Sign in", `<h1>Sign in</h1><form><input name="email"><input type="password" name="password"><button>Sign in</button></form>`) },
+  "/widgets": {
+    html: EDGE_HTML(
+      "Widgets",
+      `<p id="fruit-state">none</p>
+<div id="fruit" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="fruit-list" aria-label="Fruit" tabindex="0" onclick="const list = document.getElementById('fruit-list'); list.hidden = !list.hidden; this.setAttribute('aria-expanded', String(!list.hidden))">Choose fruit</div>
+<ul id="fruit-list" role="listbox" hidden>${["Apple", "Banana", "Cherry"].map((name) => `<li role="option" onclick="document.getElementById('fruit-state').textContent = '${name}'; document.getElementById('fruit').textContent = '${name}'; this.parentElement.hidden = true">${name}</li>`).join("")}</ul>
+<label>Date <input id="date" readonly placeholder="Pick a date" onclick="document.getElementById('calendar').hidden = false"></label>
+<div id="calendar" role="dialog" aria-label="Calendar" hidden><table role="grid"><tr>${[19, 20, 21].map((day) => `<td><button onclick="document.getElementById('date').value = '2026-11-${day}'; document.getElementById('calendar').hidden = true">${day}</button></td>`).join("")}</tr></table></div>
+<div id="editor" contenteditable="true" role="textbox" aria-label="Editor" aria-multiline="true" style="min-height:40px;border:1px solid"></div>
+<iframe title="Rich editor" srcdoc="<body contenteditable=&quot;true&quot; style=&quot;min-height:40px&quot;></body>"></iframe>`,
+    ),
+  },
+  "/text": { html: EDGE_HTML("Text", `<p id="sample">Çağrı İstanbul’da ığdır şöförü 👩🏽‍💻 🏳️‍🌈 שלום עולם مرحبا</p><label>Note <input id="note"></label><label>Body <textarea id="body"></textarea></label><button aria-label="Gönder 👍">Gönder 👍</button>`) },
+};
+
+function edgeAuthPage(request: http.IncomingMessage, response: http.ServerResponse, realm: string, pathname: string) {
+  const expected = `Basic ${Buffer.from(`${edgeAuth.username}:${edgeAuth.password}`).toString("base64")}`;
+  if (!edgeAuth.password || request.headers.authorization !== expected) {
+    response.writeHead(401, { "www-authenticate": `Basic realm="${realm}"`, "content-type": "text/html" }).end(EDGE_HTML("Unauthorized", "<h1>401 Unauthorized</h1>"));
+    return;
+  }
+  if (pathname.endsWith("/api")) {
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ realm, ok: true }));
+    return;
+  }
+  response
+    .writeHead(200, { "content-type": "text/html" })
+    .end(EDGE_HTML("Auth OK", `<p id="auth-state">authorized ${realm}</p><p id="api-state">pending</p><script>fetch("api").then((r) => r.json()).then((d) => { document.getElementById("api-state").textContent = "api " + d.realm; }, () => { document.getElementById("api-state").textContent = "api failed"; });</script>`));
+}
+
+function handleEdgeCase(request: http.IncomingMessage, response: http.ServerResponse) {
+  const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+  const realm = /^\/(auth-[a-z])\//.exec(pathname)?.[1];
+  if (realm) {
+    edgeAuthPage(request, response, realm, pathname);
+    return true;
+  }
+  if (pathname === "/app/private") {
+    response.writeHead(302, { location: "/login?next=%2Fapp%2Fprivate" }).end();
+    return true;
+  }
+  const page = EDGE_PAGES[pathname];
+  if (!page) return false;
+  response.writeHead(page.status ?? 200, { "content-type": "text/html; charset=utf-8" }).end(page.html);
+  return true;
 }
