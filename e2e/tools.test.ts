@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT, FEED_TOTAL, FRAME_TEXT } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT, SPA_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -1106,4 +1106,44 @@ test("frames are readable", async (t) => {
     await frameDeps.manager.shutdown();
     await rm(frameDir, { recursive: true, force: true });
   }
+});
+
+test("collect_pages waits for client-rendered content", async (t) => {
+  const collectText = async (route: string, extra: Record<string, unknown> = {}) => {
+    const index = await ok("collect_pages", { urls: [fixture.url + route], include: ["text"], ...extra });
+    const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+    const file = (await readdir(dir)).find((name) => name.endsWith(".txt")) ?? "";
+    return { index, text: await readFile(path.join(dir, file), "utf8") };
+  };
+
+  await t.test("the rendered list is captured with default options", async () => {
+    assert.ok((await collectText("/spa")).text.includes(SPA_TEXT.item));
+  });
+
+  await t.test("the skeleton is gone from the captured text", async () => {
+    assert.ok(!(await collectText("/spa")).text.includes(SPA_TEXT.skeleton));
+  });
+
+  await t.test("a page that never stops changing is reported at the cap", async () => {
+    assert.match((await collectText("/ticker", { max_wait_ms: 2000 })).index, /content still changing after 2 s/);
+  });
+
+  await t.test("the cap bounds the wait", async () => {
+    const started = Date.now();
+    await collectText("/ticker", { max_wait_ms: 2000 });
+    assert.ok(Date.now() - started < 8000, `took ${Date.now() - started} ms`);
+  });
+
+  await t.test("ask_pages with urls reads the rendered list", async () => {
+    const { AskAdapterSource } = await import("../src/ask.ts");
+    const saved = deps.ask;
+    const sent: string[] = [];
+    deps.ask = new AskAdapterSource({ command: "unused", adapter: { name: "capture", complete: async ({ prompt }) => (sent.push(prompt), { text: "NOT FOUND" }) } });
+    try {
+      await ok("ask_pages", { question: "Which items?", urls: [`${fixture.url}/spa`] });
+      assert.ok(sent.join("\n").includes(SPA_TEXT.item));
+    } finally {
+      deps.ask = saved;
+    }
+  });
 });

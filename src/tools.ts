@@ -7,6 +7,7 @@ import { collectPages } from "./collect.ts";
 import { ToolError } from "./errors.ts";
 import { pageMarkdown } from "./markdown.ts";
 import { untrusted } from "./output.ts";
+import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "./settle.ts";
 import { clipToFile, defineTool, tabParam, type ToolDeps } from "./tools/common.ts";
 import { registerTabTools } from "./tools/tabs.ts";
 import { registerPageReadTools } from "./tools/page-read.ts";
@@ -73,7 +74,8 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
                 scope: "main",
                 concurrency: 6,
                 waitUntil: "domcontentloaded",
-                settleMs: 800,
+                settleMs: DEFAULT_QUIET_MS,
+                maxWaitMs: DEFAULT_MAX_WAIT_MS,
                 timeoutMs: 30_000,
                 fullPage: false,
                 previewChars: 0,

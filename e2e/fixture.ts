@@ -299,3 +299,28 @@ async function listenOnLoopbackV6(handler: http.RequestListener, port: number) {
       }),
   };
 }
+
+export const SPA_TEXT = { item: `SPA item ${contentToken()}`, skeleton: `Loading placeholder ${contentToken()}` };
+
+CONTENT_ROUTES["/spa"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><title>Fixture SPA</title></head><body><main id="app"><div class="skeleton-list">${SPA_TEXT.skeleton}</div></main>
+<script>
+setTimeout(() => fetch("/api/data").then((response) => response.json()).then(() => {
+  const list = document.createElement("ul");
+  for (let index = 1; index <= 5; index += 1) {
+    const item = document.createElement("li");
+    item.textContent = "${SPA_TEXT.item} " + index;
+    list.append(item);
+  }
+  document.getElementById("app").append(list);
+  document.querySelector(".skeleton-list").remove();
+}), 1500);
+</script></body></html>`,
+};
+
+CONTENT_ROUTES["/ticker"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><title>Fixture Ticker</title></head><body><main><p id="tick">0</p></main>
+<script>let ticks = 0; setInterval(() => { ticks += 1; document.getElementById("tick").textContent = "tick " + ticks + " ".repeat(ticks % 7); }, 100);</script></body></html>`,
+};

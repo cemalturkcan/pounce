@@ -7,6 +7,7 @@ import { describeError } from "./errors.ts";
 import { extractPage, summarizeStructured } from "./extract.ts";
 import { pageMarkdown } from "./markdown.ts";
 import { slugify, timestampSlug, type OutputStore } from "./output.ts";
+import { waitForContent } from "./settle.ts";
 import { pageLinks, pageText, pageTitle, rawSnapshot, sleep } from "./page.ts";
 
 export type CollectPart = "text" | "markdown" | "links" | "snapshot" | "screenshot" | "structured";
@@ -22,6 +23,7 @@ export type CollectInput = {
   concurrency: number;
   waitUntil: "commit" | "domcontentloaded" | "load";
   settleMs: number;
+  maxWaitMs: number;
   timeoutMs: number;
   fullPage: boolean;
   previewChars: number;
@@ -40,6 +42,7 @@ export type CollectedPage = {
   bytes?: number;
   note?: string;
   scrolled?: ScrollOutcome;
+  unsettledMs?: number;
   chars?: number;
   links?: number;
   files: string[];
@@ -121,7 +124,8 @@ async function saveOne(
     const body = bodyType.kind === "pdf" ? (await fetchBody(page.context(), response.url(), input.timeoutMs)).body : await response.body();
     return saveBody(dir, base, bodyType, body, input, result);
   }
-  if (input.settleMs > 0) await sleep(input.settleMs);
+  const settle = await waitForContent(page, { quietMs: input.settleMs, maxWaitMs: Math.min(input.maxWaitMs, input.timeoutMs) });
+  if (!settle.settled && !settle.unresponsive) result.unsettledMs = settle.ms;
   if (input.scroll) result.scrolled = await autoScroll(page, input.scroll);
   result.status = response?.status();
   result.finalUrl = page.url();
@@ -252,6 +256,7 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
     const label = result.type ? `[${result.type}]` : `"${result.title ?? ""}"`;
     lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} ${label}${size} → ${result.files.join(", ")}`);
     if (result.note) lines.push(`   ${result.note}`);
+    if (result.unsettledMs !== undefined) lines.push(`   content still changing after ${Math.round(result.unsettledMs / 1000)} s; saved as it was then`);
     if (result.scrolled) {
       const { steps, height, capped } = result.scrolled;
       lines.push(`   scrolled ${steps} step${steps === 1 ? "" : "s"}${capped ? " (max_steps reached)" : ""}, page height ${height}px`);

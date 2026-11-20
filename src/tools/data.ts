@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "../settle.ts";
 import { collectPages, renderCollectIndex } from "../collect.ts";
 import { ToolError } from "../errors.ts";
 import { untrusted } from "../output.ts";
@@ -140,7 +141,8 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
       full_page: z.boolean().optional().describe("For screenshot: capture the whole scrollable page instead of the viewport. Default true."),
       concurrency: z.number().int().min(1).max(12).optional().describe("Tabs loading at once. Default 6."),
       wait_until: waitUntilParam,
-      settle_ms: z.number().int().min(0).max(30_000).optional().describe("Extra wait after the navigation milestone, for pages that render content with JavaScript. Default 800."),
+      settle_ms: z.number().int().min(0).max(30_000).optional().describe("Quiet window: after the navigation milestone, the page is saved once its main content has stopped changing for this long and no loading spinner or skeleton is visible, so pages that render with JavaScript are captured complete. Default 800."),
+      max_wait_ms: z.number().int().min(0).max(60_000).optional().describe("Longest wait for the content to settle; a page still changing then is saved as it is and flagged in the index. Never longer than timeout_ms. Default 8000."),
       timeout_ms: z
         .number()
         .int()
@@ -166,7 +168,8 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
         scope: input.scope ?? "main",
         concurrency: input.concurrency ?? 6,
         waitUntil: input.wait_until ?? "domcontentloaded",
-        settleMs: input.settle_ms ?? 800,
+        settleMs: input.settle_ms ?? DEFAULT_QUIET_MS,
+        maxWaitMs: input.max_wait_ms ?? DEFAULT_MAX_WAIT_MS,
         timeoutMs: input.timeout_ms ?? 30_000,
         fullPage: input.full_page ?? true,
         previewChars: input.preview_chars ?? 160,
