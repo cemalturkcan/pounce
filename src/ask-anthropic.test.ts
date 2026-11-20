@@ -22,9 +22,13 @@ async function credentialFixture(t: TestContext) {
   return { adapter: anthropicAskAdapter(dir), writeSession };
 }
 
-function eventStream(events: Array<Record<string, unknown>>) {
+function encodeEvents(events: Array<Record<string, unknown>>) {
   const frames = events.map((event) => `event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`).join("");
-  const bytes = new TextEncoder().encode(frames);
+  return new TextEncoder().encode(frames);
+}
+
+function eventStream(events: Array<Record<string, unknown>>) {
+  const bytes = encodeEvents(events);
   let offset = 0;
   return new Response(new ReadableStream({
     pull(controller) {
@@ -35,16 +39,21 @@ function eventStream(events: Array<Record<string, unknown>>) {
   }), { headers: { "content-type": "text/event-stream" } });
 }
 
-function textDelta(text: string) {
-  return { type: "content_block_delta", delta: { type: "text_delta", text } };
+function textDelta(text: string, index = 0) {
+  return { type: "content_block_delta", index, delta: { type: "text_delta", text } };
 }
 
 function streamReply(text: string, stopReason = "end_turn") {
   return eventStream([
-    { type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1, nested: { ignored: 1 } } } },
+    { type: "message_start", message: { content: [], usage: { input_tokens: 10, output_tokens: 1, nested: { ignored: 1 } } } },
+    { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
     { type: "ping" },
-    { type: "content_block_delta", delta: { type: "thinking_delta", text: "ignored" } },
-    textDelta(text),
+    { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "ignored" } },
+    { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "test-signature" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+    textDelta(text, 1),
+    { type: "content_block_stop", index: 1 },
     { type: "message_delta", usage: { output_tokens: 3 } },
     { type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 5 } },
     { type: "message_stop" },
@@ -135,21 +144,35 @@ test("Anthropic joins fragmented UTF-8 text deltas and detects interrupted strea
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
   const responses = [
-    eventStream([textDelta("Mavi "), textDelta("çizgili 📘"), { type: "message_stop" }]),
-    eventStream([textDelta("Partial")]),
-    eventStream([textDelta("Partial"), { type: "error", error: { message: "private detail" } }]),
+    eventStream([
+      { type: "message_start", message: { content: [] } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      textDelta("Mavi "), textDelta("çizgili 📘"), { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" } }, { type: "message_stop" },
+    ]),
+    eventStream([
+      textDelta("Partial"), { type: "error", error: { type: "invalid_request_error", message: "invalid media" } },
+    ]),
   ];
-  t.mock.method(globalThis, "fetch", async () => responses.shift());
+  const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift() ?? eventStream([textDelta("Partial")]));
   assert.equal((await adapter.complete(input)).text, "Mavi çizgili 📘");
+  await assert.rejects(adapter.complete(input), { message: "Anthropic Messages stream error: invalid_request_error: invalid media" });
+  assert.equal(fetch.mock.callCount(), 2);
   await assert.rejects(adapter.complete(input), /stream ended before message_stop/);
-  await assert.rejects(adapter.complete(input), { message: "Anthropic Messages reported an error in the stream." });
+  assert.equal(fetch.mock.callCount(), 5);
 });
 
 test("Anthropic rejects credentials without retrying or dumping the response body", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   await writeSession("test-token");
-  const fetch = t.mock.method(globalThis, "fetch", async () => new Response("private error detail", { status: 401 }));
-  await assert.rejects(adapter.complete(input), AskSetupError);
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({
+    error: { type: "authentication_error", message: "Invalid token test-token" },
+  }, { status: 401 }));
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(error instanceof AskSetupError);
+    assert.match(error.message, /authentication_error: Invalid token \[REDACTED\]/);
+    return true;
+  });
   assert.equal(fetch.mock.callCount(), 1);
 });
 
@@ -162,7 +185,7 @@ test("Anthropic retries 429 twice and obeys the abort signal during backoff", as
   assert.equal((await adapter.complete(input)).text, "OK");
   assert.equal(fetch.mock.callCount(), 3);
   await assert.rejects(adapter.complete(input), {
-    message: "Anthropic Messages returned HTTP 429. Retry after 0 seconds.",
+    message: "Anthropic Messages returned HTTP 429.",
   });
   assert.equal(fetch.mock.callCount(), 6);
 
@@ -174,4 +197,68 @@ test("Anthropic retries 429 twice and obeys the abort signal during backoff", as
   });
   await assert.rejects(adapter.complete({ ...input, signal: controller.signal }), abortReason);
   assert.equal(fetch.mock.callCount(), 7);
+});
+
+test("Anthropic retries HTTP 529, other 5xx, network failures and SSE overloads", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const random = t.mock.method(Math, "random", () => 0.5);
+  const failures = [
+    () => Response.json({ error: { type: "overloaded_error", message: "Busy" } }, { status: 529, headers: { "retry-after-ms": "0" } }),
+    () => Response.json({ error: { type: "api_error", message: "Unavailable" } }, { status: 503, headers: { "retry-after": "0" } }),
+    () => { throw new TypeError("fetch failed"); },
+    () => eventStream([textDelta("Discard this partial answer"), { type: "error", error: { type: "overloaded_error", message: "Busy" } }]),
+  ];
+  for (const fail of failures) {
+    const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+    fetch.mock.mockImplementationOnce(async () => fail());
+    assert.equal((await adapter.complete(input)).text, "OK");
+    assert.equal(fetch.mock.callCount(), 2);
+    fetch.mock.restore();
+  }
+  assert.equal(random.mock.callCount(), failures.length);
+});
+
+test("Anthropic parses retry delays and rejects server waits above 60 seconds", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(Math, "random", () => 0);
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 529, headers: { "retry-after": "0.04" } }));
+  const started = performance.now();
+  await adapter.complete(input);
+  assert.ok(performance.now() - started >= 30);
+
+  fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 429, headers: { "retry-after": "120", "retry-after-ms": "0" } }));
+  await adapter.complete(input);
+  assert.equal(fetch.mock.callCount(), 4);
+  for (const headers of [new Headers({ "retry-after": "60.001" }), new Headers({ "retry-after-ms": "60001" })]) {
+    fetch.mock.mockImplementationOnce(async () => Response.json({
+      error: { type: "overloaded_error", message: "Try later" },
+    }, { status: 529, headers }));
+    await assert.rejects(adapter.complete(input), {
+      message: "Anthropic Messages returned HTTP 529: overloaded_error: Try later Retry-After exceeds the 60-second wait limit.",
+    });
+  }
+  assert.equal(fetch.mock.callCount(), 6);
+});
+
+test("Anthropic cancels a stalled stream on abort without retrying", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const controller = new AbortController();
+  const abortReason = new Error("canceled mid-stream");
+  let canceled = false;
+  let pulls = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(streamController) {
+      if (++pulls === 1) streamController.enqueue(encodeEvents([textDelta("Partial")]));
+      else setImmediate(() => controller.abort(abortReason));
+    },
+    cancel() { canceled = true; },
+  });
+  const fetch = t.mock.method(globalThis, "fetch", async () => new Response(stream));
+  await assert.rejects(adapter.complete({ ...input, signal: controller.signal }), abortReason);
+  assert.equal(canceled, true);
+  assert.equal(fetch.mock.callCount(), 1);
 });
