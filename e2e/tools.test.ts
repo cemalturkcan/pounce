@@ -192,7 +192,8 @@ test("browser flow", async (t) => {
     assert.match(await ok("evaluate", { tab, expression: "document.title" }), /Fixture Home/);
     assert.match(await ok("evaluate", { tab, expression: "() => window.appState.ready" }), /true/);
     assert.match(await ok("evaluate", { tab, expression: "const n = 20; return n + 1;" }), /21/);
-    assert.match(await ok("evaluate", { tab, expression: "typeof window.appState", world: "isolated" }), /undefined|object/);
+    assert.match(await ok("evaluate", { tab, expression: "typeof window.appState", world: "isolated" }), /undefined$/);
+    assert.match(await ok("evaluate", { tab, expression: "document.title", world: "isolated" }), /Fixture Home$/);
   });
 
   await t.test("dialogs are accepted and reported", async () => {
@@ -862,6 +863,16 @@ test("review regressions", async (t) => {
       assert.match(result.text, /did not finish within \d+ s/);
     }
     await ok("tab_close", { tab, force: true });
+  });
+
+  await t.test("request from_request does not ask for an encoding it cannot decode", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/zstd` }));
+    const list = await ok("network_requests", { tab, pattern: "/zstd" });
+    const id = Number(/#(\d+) GET 200/.exec(list)?.[1]);
+    assert.ok(id, list);
+    const replay = await ok("request", { tab, from_request: id });
+    assert.match(replay, /"item-19"/);
+    await ok("tab_close", { tab });
   });
 
   await t.test("streaming responses do not hang network tools", async () => {

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { zstdCompressSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 
 const HOME = `<!doctype html>
@@ -358,6 +359,12 @@ export const stallRequests = () => stalled;
 
 function handleEdgeCase(request: http.IncomingMessage, response: http.ServerResponse) {
   const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+  if (pathname === "/zstd") {
+    const body = Buffer.from(JSON.stringify({ ok: true, items: Array.from({ length: 20 }, (_value, index) => `item-${index}`) }));
+    if (/zstd/.test(String(request.headers["accept-encoding"] ?? ""))) response.writeHead(200, { "content-type": "application/json", "content-encoding": "zstd" }).end(zstdCompressSync(body));
+    else response.writeHead(200, { "content-type": "application/json" }).end(body);
+    return true;
+  }
   if (pathname === "/stall") {
     stalled += 1;
     response.writeHead(200, { "content-type": "text/html" });

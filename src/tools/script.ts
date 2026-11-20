@@ -47,7 +47,7 @@ export function registerScriptTools(server: McpServer, deps: ToolDeps) {
       const tab = manager.getTab(input.tab);
       const timeout = input.timeout_ms ?? 15_000;
       const run = (source: string) =>
-        input.world === "isolated" ? (tab.page.evaluate(source) as Promise<unknown>) : manager.evaluateMain<unknown>(tab.page, source);
+        input.world === "isolated" ? manager.evaluateIsolated<unknown>(tab.page, source) : manager.evaluateMain<unknown>(tab.page, source);
       const value = await withTimeout(
         run(evaluationSource(input.expression)),
         timeout,

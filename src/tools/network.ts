@@ -38,7 +38,7 @@ async function sendRequest({ manager, store }: ToolDeps, input: ToolInput<typeof
 
   const headers: Record<string, string> = {};
   if (source) {
-    const dropped = new Set(["host", "content-length", "cookie", "connection", ...(input.remove_headers ?? []).map((name) => name.toLowerCase())]);
+    const dropped = new Set(["host", "content-length", "cookie", "connection", "accept-encoding", ...(input.remove_headers ?? []).map((name) => name.toLowerCase())]);
     for (const [name, value] of Object.entries(await source.request.allHeaders())) {
       if (!name.startsWith(":") && !dropped.has(name.toLowerCase())) headers[name] = value;
     }

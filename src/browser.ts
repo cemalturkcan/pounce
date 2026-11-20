@@ -29,6 +29,7 @@ const DOWNLOAD_SAVE_MS = 60_000;
 const CLOSED_OUTSIDE_LIMIT = 200;
 export const LEAVE_CANCELLED = "the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
 const PASSKEY_KEY = "webAgent.passkey";
+const ISOLATED_WORLD = "web-agent-isolated";
 export const ORPHAN_IDLE_MS = 30 * 60 * 1000;
 const ORPHAN_SWEEP_MS = 5 * 60 * 1000;
 
@@ -662,6 +663,23 @@ export class BrowserManager {
       return evaluate(expression, undefined, undefined, false);
     }
     return page.evaluate(expression) as Promise<T>;
+  }
+
+  async evaluateIsolated<T>(page: Page, expression: string): Promise<T> {
+    if (this.config.engine === "patchright") return (await page.evaluate(expression)) as T;
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { frameTree } = (await session.send("Page.getFrameTree")) as { frameTree: { frame: { id: string } } };
+      const { executionContextId } = (await session.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: ISOLATED_WORLD })) as { executionContextId: number };
+      const evaluated = (await session.send("Runtime.evaluate", { expression, contextId: executionContextId, awaitPromise: true, returnByValue: true })) as {
+        result: { value?: unknown; type: string };
+        exceptionDetails?: { text?: string; exception?: { description?: string } };
+      };
+      if (evaluated.exceptionDetails) throw new Error(evaluated.exceptionDetails.exception?.description ?? evaluated.exceptionDetails.text ?? "evaluation failed");
+      return evaluated.result.value as T;
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
   }
 
   async drainConsole(tab: Tab) {
