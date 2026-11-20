@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import { type AskAdapter, type AskImage, type AskUsage, completeLogged, isCutOff } from "./ask-adapter.ts";
 import { ToolError } from "./errors.ts";
 import { clipHeadTail } from "./output.ts";
+import type { BrowseResult } from "./browse-loop.ts";
+import { ASK_BROWSE_NOTE, REVIEW_BROWSE_NOTE } from "./browse-prompt.ts";
 
 export type AskDocument = { source: string; text: string; images?: AskImage[] };
 
@@ -31,8 +33,13 @@ export type BatchResult = {
   interrupted?: boolean;
   usage?: AskUsage;
   reply?: string;
+  escalations?: Escalation[];
   ms: number;
 };
+
+export type Escalation = { source: string; hint: string };
+
+export type BrowseSelection = { source: string; reason: "not_found" | "hidden" | "interaction" | "all"; hint?: string; found: string[] };
 
 export type AskMode = "answer" | "review";
 
@@ -41,6 +48,7 @@ export type AskReport = {
   batches: BatchResult[];
   empty: string[];
   clipped: { source: string; chars: number }[];
+  browse?: { results: BrowseResult[]; skipped?: string };
 };
 
 export class AskSetupError extends ToolError {}
@@ -57,6 +65,7 @@ export type AskOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   mode?: AskMode;
+  browse?: boolean;
 };
 
 export const ASK_SYSTEM = `You answer one question from a set of web pages for a research agent. The agent never sees the pages: it reads only your reply, merged line by line with the replies of other calls like this one over other pages, so every line has to stand on its own and say which page it came from.
@@ -137,7 +146,7 @@ export function packBatches(documents: AskDocument[], batchChars: number, maxPag
   return batches;
 }
 
-function escapeAttribute(value: string) {
+export function escapeAttribute(value: string) {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
@@ -244,6 +253,28 @@ function citedSource(rest: string, sources: string[], match: (entry: string) => 
   return undefined;
 }
 
+const ESCALATION_LINE: Record<AskMode, RegExp> = {
+  answer: /^[-*•\s]*[*_]*HIDDEN[*_]*\s*:\s*(.+)$/i,
+  review: /^[-*•\s]*[*_]*NEEDS INTERACTION[*_]*\s*:\s*(.+)$/i,
+};
+
+export function parseEscalations(text: string, sources: string[], mode: AskMode) {
+  const match = sourceMatcher(sources);
+  const escalations: Escalation[] = [];
+  const kept: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = ESCALATION_LINE[mode].exec(raw.trim());
+    if (!line) {
+      kept.push(raw);
+      continue;
+    }
+    const cited = citedSource((line[1] ?? "").trim(), sources, match);
+    const hint = cited?.after.replace(/^\s*[:,]\s*/, "").trim();
+    if (cited && hint) escalations.push({ source: cited.source, hint });
+  }
+  return { text: kept.join("\n").trim(), escalations };
+}
+
 export function parseReview(text: string, sources: string[]) {
   const match = sourceMatcher(sources);
   const answers: string[] = [];
@@ -310,7 +341,7 @@ export function sourceNames(files: string[]) {
   return files.map((file) => path.relative(root, path.resolve(file)));
 }
 
-export function totalUsage(results: BatchResult[]) {
+export function totalUsage(results: { usage?: AskUsage }[]) {
   const total: AskUsage = {};
   let reported = false;
   for (const result of results) {
@@ -381,17 +412,21 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
     const started = Date.now();
     try {
       const images = batch.flatMap((document) => document.images ?? []);
+      const base = review ? REVIEW_SYSTEM : ASK_SYSTEM;
+      const system = options.browse ? `${base}\n\n${review ? REVIEW_BROWSE_NOTE : ASK_BROWSE_NOTE}` : base;
       const reply = await completeLogged(
         adapter,
-        { system: review ? REVIEW_SYSTEM : ASK_SYSTEM, prompt: buildPrompt(options.question, batch, options.mode), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal: callSignal(options) },
+        { system, prompt: buildPrompt(options.question, batch, options.mode), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal: callSignal(options) },
         { tool: "ask_pages", call, pages: batch.length },
       );
       if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
       if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
-      const parsed = review ? parseReview(reply.text, sources) : parseReply(reply.text, sources);
+      const escalated = options.browse ? parseEscalations(reply.text, sources, options.mode ?? "answer") : undefined;
+      const replyText = escalated ? escalated.text : reply.text;
+      const parsed = review ? parseReview(replyText, sources) : parseReply(replyText, sources);
       const truncated = isCutOff(reply.stopReason) ? { truncated: true } : {};
       const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
-      return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, reply: reply.text, ms: Date.now() - started }];
+      return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, reply: reply.text, ...(escalated ? { escalations: escalated.escalations } : {}), ms: Date.now() - started }];
     } catch (error) {
       if (error instanceof AskSetupError) setupError = error;
       const splittable = !setupError && !options.signal?.aborted;
@@ -427,15 +462,74 @@ export function allBatchesFailed(report: AskReport) {
   return report.batches.length > 0 && report.batches.every((batch) => batch.error);
 }
 
+export function selectEscalations(report: AskReport, browse: "auto" | "all"): BrowseSelection[] {
+  const review = report.mode === "review";
+  const read = report.batches.filter((batch) => !batch.error);
+  const answers = read.flatMap((batch) => batch.answers);
+  const answered = citedSources(answers);
+  const missing = new Set(read.flatMap((batch) => batch.notFound));
+  const hints = new Map<string, string[]>();
+  for (const escalation of read.flatMap((batch) => batch.escalations ?? [])) hints.set(escalation.source, [...(hints.get(escalation.source) ?? []), escalation.hint]);
+  const selected = new Map<string, BrowseSelection>();
+  for (const source of read.flatMap((batch) => batch.sources)) {
+    if (selected.has(source)) continue;
+    const hint = hints.get(source)?.join("; ");
+    const notFound = !review && missing.has(source) && !answered.has(source);
+    const reason = hint ? (review ? "interaction" : "hidden") : notFound ? "not_found" : browse === "all" ? "all" : undefined;
+    if (!reason) continue;
+    const found = review ? [] : answers.filter((answer) => CITATION.exec(answer)?.[1] === source);
+    selected.set(source, { source, reason, ...(hint ? { hint } : {}), found });
+  }
+  return [...selected.values()];
+}
+
+export function mergeBrowse(report: AskReport, results: BrowseResult[], skipped?: string): AskReport {
+  return { ...report, browse: { results, ...(skipped ? { skipped } : {}) } };
+}
+
+function browsedLines(report: AskReport) {
+  const results = report.browse?.results ?? [];
+  if (report.mode === "review") return results.flatMap((result) => (result.issues ?? []).map((issue) => `- [${issue.severity}] ${result.source}, ${issue.where}: ${issue.issue}`));
+  return results.flatMap((result) => result.lines.map((line) => `- ${line.replace(/^[-*•]\s*/, "")} [${result.source}]`));
+}
+
+function describeBrowsed(result: BrowseResult) {
+  const why = result.how ?? result.error;
+  return `${result.source}: ${result.outcome}, ${result.steps} steps, ${result.toolCalls.length} tool calls${why ? ` (${why})` : ""}`;
+}
+
+export function renderBrowseDetails(results: BrowseResult[]) {
+  if (results.length === 0) return "";
+  const sections = results.map((result) => {
+    const calls = result.toolCalls.map((call) => `- ${call.name}${call.target ? ` ${call.target}` : ""}${call.blocked ? ` (refused: ${call.blocked})` : call.error ? ` (error: ${call.error})` : ""}`);
+    return [
+      `### ${result.source}`,
+      `Outcome: ${result.outcome}${result.how ? ` (${result.how})` : ""}${result.error ? `; ${result.error}` : ""}`,
+      `Start URL: ${result.url}`,
+      ...(result.finalUrl ? [`Final URL: ${result.finalUrl}`] : []),
+      `Steps: ${result.steps}, ${(result.ms / 1000).toFixed(1)} s. Usage: ${result.usage ? describeUsage(result.usage) : "not reported"}.`,
+      `Tool calls (${result.toolCalls.length}):`,
+      ...calls,
+      ...(result.transcript ? [`Transcript: ${result.transcript}`] : []),
+    ].join("\n");
+  });
+  return ["## Browsing", ...sections].join("\n\n");
+}
+
 export function renderAskResults(question: string, report: AskReport, adapter: string, model: string) {
   const results = report.batches;
   const review = report.mode === "review";
+  const browsed = report.browse?.results ?? [];
   const lines = [`${review ? "Review" : "Question"}: ${question}`, ""];
-  const answers = results.flatMap((result) => (result.error ? [] : result.answers));
+  const answers = [...results.flatMap((result) => (result.error ? [] : result.answers)), ...browsedLines(report)];
   lines.push(...(review ? sortIssues(answers) : answers));
   if (answers.length === 0) lines.push(review ? "No page had issues." : "No page had anything relevant.");
-  const answered = review ? new Set<string>() : citedSources(answers);
-  const notFound = [...new Set(results.flatMap((result) => result.notFound))].filter((source) => !answered.has(source));
+  const answered = review ? new Set(browsed.filter((result) => result.issues?.length).map((result) => result.source)) : citedSources(answers);
+  const cleanAfterBrowsing = review ? browsed.filter((result) => result.outcome === "found" && !result.issues?.length).map((result) => result.source) : [];
+  const outcomes = new Map(browsed.map((result) => [result.source, result.outcome]));
+  const notFound = [...new Set([...results.flatMap((result) => result.notFound), ...cleanAfterBrowsing])]
+    .filter((source) => !answered.has(source))
+    .map((source) => (!review && outcomes.has(source) ? `${source} (browsed: ${outcomes.get(source)})` : source));
   if (notFound.length) lines.push("", `${review ? "No issues in" : "Nothing relevant in"}: ${notFound.join(", ")}`);
   if (report.empty.length) lines.push("", `Empty pages (not sent): ${report.empty.join(", ")}`);
   if (report.clipped.length) lines.push("", `Clipped to their start and end: ${report.clipped.map((entry) => `${entry.source} (${entry.chars} chars)`).join(", ")}`);
@@ -453,6 +547,11 @@ export function renderAskResults(question: string, report: AskReport, adapter: s
   if (failed.length) {
     lines.push("", "Failed calls (their pages were not read):");
     for (const result of failed) lines.push(`call ${result.index} [${result.sources.join(", ")}]: ${result.error}`);
+  }
+  if (report.browse?.skipped) lines.push("", report.browse.skipped);
+  if (browsed.length) {
+    const browseUsage = totalUsage(browsed);
+    lines.push("", `Browsed ${browsed.length} page(s):`, ...browsed.map(describeBrowsed), `Browsing usage: ${browseUsage ? describeUsage(browseUsage) : "not reported"}.`);
   }
   const usage = totalUsage(results);
   const slowest = Math.max(0, ...results.map((result) => result.ms));

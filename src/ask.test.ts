@@ -22,7 +22,15 @@ import {
   sourceNames,
   type AskAdapter,
   type AskDocument,
+  type AskReport,
+  type BatchResult,
+  mergeBrowse,
+  parseEscalations,
+  renderBrowseDetails,
+  selectEscalations,
 } from "./ask.ts";
+import { ASK_BROWSE_NOTE, REVIEW_BROWSE_NOTE } from "./browse-prompt.ts";
+import type { BrowseResult } from "./browse-loop.ts";
 import { describeError, ToolError } from "./errors.ts";
 
 const doc = (source: string, size: number) => ({ source, text: "x".repeat(size) });
@@ -697,4 +705,111 @@ test("askPages keeps the raw reply of every call", async () => {
   const adapter: AskAdapter = { name: "raw", complete: async () => ({ text: "- fact [a.md]\nNOT FOUND: b.md (see below)" }) };
   const report = await askPages(adapter, { question: "q", documents: [doc("a.md", 10), doc("b.md", 10)], batchChars: 1000, concurrency: 1, model: "m", maxTokens: 1000 });
   assert.equal(report.batches[0]?.reply, "- fact [a.md]\nNOT FOUND: b.md (see below)");
+});
+
+const browseOptions = (adapter: AskAdapter, documents: AskDocument[], extra: Partial<Parameters<typeof askPages>[1]> = {}) =>
+  askPages(adapter, { question: "What does each plan cost per year?", documents, batchChars: 100_000, concurrency: 1, model: "m", maxTokens: 100, ...extra });
+
+test("26: browsing off keeps the system prompts byte-identical and HIDDEN lines are plain answers", async () => {
+  const systems: string[] = [];
+  const adapter: AskAdapter = {
+    name: "fake",
+    complete: async ({ system }) => {
+      systems.push(system);
+      return { text: "HIDDEN: a.md: the Yearly switch" };
+    },
+  };
+  const report = await browseOptions(adapter, [{ source: "a.md", text: "plans" }]);
+  await browseOptions(adapter, [{ source: "a.md", text: "plans" }], { mode: "review" });
+  assert.deepEqual(systems, [ASK_SYSTEM, REVIEW_SYSTEM]);
+  assert.deepEqual(report.batches[0]?.answers, ["- HIDDEN: a.md: the Yearly switch"]);
+  assert.equal(report.batches[0]?.escalations, undefined);
+});
+
+test("26: browsing on appends the interaction notes and the example HIDDEN line parses", async () => {
+  const systems: string[] = [];
+  const adapter: AskAdapter = {
+    name: "fake",
+    complete: async ({ system }) => {
+      systems.push(system);
+      return { text: "NOT FOUND: 02-acme-com-pricing.md\nHIDDEN: 02-acme-com-pricing.md: the Yearly switch above the plans shows the yearly prices" };
+    },
+  };
+  const report = await browseOptions(adapter, [{ source: "02-acme-com-pricing.md", text: "plans" }], { browse: true });
+  await browseOptions(adapter, [{ source: "02-acme-com-pricing.md", text: "plans" }], { browse: true, mode: "review" });
+  assert.deepEqual(systems, [`${ASK_SYSTEM}\n\n${ASK_BROWSE_NOTE}`, `${REVIEW_SYSTEM}\n\n${REVIEW_BROWSE_NOTE}`]);
+  assert.deepEqual(report.batches[0]?.escalations, [{ source: "02-acme-com-pricing.md", hint: "the Yearly switch above the plans shows the yearly prices" }]);
+  assert.deepEqual(report.batches[0]?.answers, []);
+  const example = /^Example: (HIDDEN: .+)$/m.exec(ASK_BROWSE_NOTE)?.[1] ?? "";
+  assert.equal(parseEscalations(example, ["02-acme-com-pricing.md"], "answer").escalations[0]?.source, "02-acme-com-pricing.md");
+});
+
+test("27: parseEscalations takes sources with colons, ignores unknown sources and reads NEEDS INTERACTION in review", () => {
+  const sources = ["t3 https://a.test/x", "t4 https://a.test/y"];
+  const parsed = parseEscalations("- Plan A costs 5 € [t4 https://a.test/y]\nHIDDEN: t3 https://a.test/x: Yearly switch\nHIDDEN: t9 https://b.test/: menu", sources, "answer");
+  assert.deepEqual(parsed.escalations, [{ source: "t3 https://a.test/x", hint: "Yearly switch" }]);
+  assert.equal(parsed.text, "- Plan A costs 5 € [t4 https://a.test/y]");
+  const review = parseEscalations('- [low] 01-shop.md, footer: icons low\nNEEDS INTERACTION: 01-shop.md, header: hover over "Products" and check the dropdown', ["01-shop.md"], "review");
+  assert.deepEqual(review.escalations, [{ source: "01-shop.md", hint: 'header: hover over "Products" and check the dropdown' }]);
+  assert.equal(review.text, "- [low] 01-shop.md, footer: icons low");
+  assert.deepEqual(parseEscalations("NEEDS INTERACTION: 01-shop.md, header: x", ["01-shop.md"], "answer").escalations, []);
+});
+
+const reportOf = (batches: Partial<BatchResult>[], mode?: "review"): AskReport => ({
+  ...(mode ? { mode } : {}),
+  batches: batches.map((batch, index) => ({ index: index + 1, sources: [], answers: [], notFound: [], ms: 1, ...batch })),
+  empty: [],
+  clipped: [],
+});
+
+test("28: selectEscalations takes NOT FOUND and HIDDEN pages, skips answered pages and failed calls, and all takes every read page", () => {
+  const report = reportOf([
+    { sources: ["a.md", "b.md", "c.md"], answers: ["- A costs 5 € [a.md]"], notFound: ["b.md", "c.md"], escalations: [{ source: "a.md", hint: "Yearly switch" }] },
+    { sources: ["c.md", "d.md"], answers: ["- C costs 7 € [c.md]"], notFound: [] },
+    { sources: ["e.md"], answers: [], notFound: [], error: "rate limited" },
+  ]);
+  assert.deepEqual(selectEscalations(report, "auto"), [
+    { source: "a.md", reason: "hidden", hint: "Yearly switch", found: ["- A costs 5 € [a.md]"] },
+    { source: "b.md", reason: "not_found", found: [] },
+  ]);
+  assert.deepEqual(
+    selectEscalations(report, "all").map((escalation) => [escalation.source, escalation.reason]),
+    [
+      ["a.md", "hidden"],
+      ["b.md", "not_found"],
+      ["c.md", "all"],
+      ["d.md", "all"],
+    ],
+  );
+  const review = reportOf([{ sources: ["s.md", "t.md"], answers: [], notFound: ["t.md"], escalations: [{ source: "s.md", hint: "header: hover" }] }], "review");
+  assert.deepEqual(selectEscalations(review, "auto"), [{ source: "s.md", reason: "interaction", hint: "header: hover", found: [] }]);
+});
+
+const browsed = (over: Partial<BrowseResult>): BrowseResult => ({ source: "b.md", url: "https://b.test/", outcome: "found", lines: [], steps: 3, toolCalls: [{ name: "find" }, { name: "click" }], ms: 1200, usage: { input_tokens: 300, output_tokens: 40 }, ...over });
+
+test("29: browsed lines cite the original page, which leaves Nothing relevant in, and not_found keeps it there", () => {
+  const report = reportOf([{ sources: ["a.md", "b.md", "c.md"], answers: ["- A costs 5 € [a.md]"], notFound: ["b.md", "c.md"] }]);
+  const merged = mergeBrowse(report, [browsed({ lines: ["B Pro costs 96 € per year when billed yearly"], how: "switched the Yearly toggle" }), browsed({ source: "c.md", outcome: "not_found", lines: [], how: "opened every tab" })]);
+  const text = renderAskResults("Q?", merged, "fake", "m");
+  assert.match(text, /^- B Pro costs 96 € per year when billed yearly \[b\.md\]$/m);
+  assert.match(text, /^Nothing relevant in: c\.md \(browsed: not_found\)$/m);
+  assert.match(text, /^Browsed 2 page\(s\):$/m);
+  assert.match(text, /^b\.md: found, 3 steps, 2 tool calls \(switched the Yearly toggle\)$/m);
+  assert.match(text, /^c\.md: not_found, 3 steps, 2 tool calls \(opened every tab\)$/m);
+  assert.match(text, /^Browsing usage: input tokens 600, output tokens 80\.$/m);
+  assert.match(renderBrowseDetails(merged.browse?.results ?? []), /### b\.md[\s\S]*Outcome: found/);
+});
+
+test("29: browsed review issues are merged by severity and a clean interaction counts as OK", () => {
+  const report = reportOf([{ sources: ["s.md", "t.md"], answers: ["- [low] s.md, footer: icons low"], notFound: [] }], "review");
+  const merged = mergeBrowse(report, [browsed({ source: "s.md", issues: [{ severity: "high", where: "card 2 details (hover)", issue: "text overflows" }] }), browsed({ source: "t.md", issues: [] })]);
+  const text = renderAskResults("Check", merged, "fake", "m");
+  const lines = text.split("\n");
+  assert.ok(lines.indexOf("- [high] s.md, card 2 details (hover): text overflows") < lines.indexOf("- [low] s.md, footer: icons low"));
+  assert.match(text, /^No issues in: t\.md$/m);
+});
+
+test("the skipped note replaces the Browsed block when the adapter cannot use tools", () => {
+  const merged = mergeBrowse(reportOf([{ sources: ["a.md"], answers: [], notFound: ["a.md"] }]), [], "Browsing skipped: the adapter fake does not support tool use (no converse()).");
+  assert.match(renderAskResults("Q?", merged, "fake", "m"), /^Browsing skipped: the adapter fake does not support tool use \(no converse\(\)\)\.$/m);
 });
