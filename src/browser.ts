@@ -74,7 +74,7 @@ export type Tab = {
   events: TabEvent[];
   rules: InterceptRule[];
   ruleCounter: number;
-  document?: { url: string; status: number; redirected: boolean };
+  document?: { url: string; status: number; redirected: boolean; response: Response };
   popupChecks: Set<PopupCheck>;
   downloads: { at: number; name: string; saving: Promise<string> }[];
   openerId?: string;
@@ -413,7 +413,7 @@ export class BrowserManager {
     page.on("response", (response) => {
       const request = response.request();
       if (request.isNavigationRequest() && response.frame() === page.mainFrame()) {
-        tab.document = { url: response.url(), status: response.status(), redirected: request.redirectedFrom() !== null };
+        tab.document = { url: response.url(), status: response.status(), redirected: request.redirectedFrom() !== null, response };
       }
       networkId += 1;
       const entry: NetworkEntry = {

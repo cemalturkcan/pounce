@@ -86,7 +86,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       const read = await pageBound(
         (async (): Promise<{ early: string } | { text: string; frameText: string; body: Awaited<ReturnType<typeof readTabBody>> | undefined }> => {
           const bodyType = input.target ? undefined : await tabBodyType(tab.page);
-          const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab.page, bodyType, store) : undefined;
+          const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab, bodyType, store) : undefined;
           if (body && body.text === undefined) return { early: body.note ?? "" };
           const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
           const text: string = body?.text !== undefined

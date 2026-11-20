@@ -1553,6 +1553,36 @@ test("non-HTML responses", async (t) => {
     }
   });
 
+  await t.test("read_text on a JSON tab returns the body an intercept rule patched, from the tab's one request", async () => {
+    const tab = openedTab(await ok("tab_open", {}));
+    try {
+      const route = `/files/data.json?patched=${Date.now()}`;
+      await ok("intercept", { tab, action: "add", url: route, mode: "patch_response", replacements: [{ find: JSON.parse(CONTENT.json).name, replace: "patched by rule" }] });
+      const before = fixture.requests("/files/data.json");
+      await ok("navigate", { tab, url: `${fixture.url}${route}` });
+      const text = await ok("read_text", { tab });
+      assert.ok(text.includes("patched by rule"), text);
+      assert.equal(fixture.requests("/files/data.json") - before, 1);
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
+  await t.test("read_text on a JSON tab returns an intercept rule's mocked body without asking the server", async () => {
+    const tab = openedTab(await ok("tab_open", {}));
+    try {
+      const route = `/files/data.json?mocked=${Date.now()}`;
+      await ok("intercept", { tab, action: "add", url: route, mode: "mock", mock_body: JSON.stringify({ mocked: "from the rule" }), mock_content_type: "application/json" });
+      const before = fixture.requests("/files/data.json");
+      await ok("navigate", { tab, url: `${fixture.url}${route}` });
+      const text = await ok("read_text", { tab });
+      assert.ok(text.includes('{"mocked":"from the rule"}'), text);
+      assert.equal(fixture.requests("/files/data.json") - before, 0);
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
   await t.test("read_text on an image tab says where the image was saved", async () => {
     const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/pixel.png` }));
     try {

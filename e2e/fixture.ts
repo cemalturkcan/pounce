@@ -144,14 +144,17 @@ const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQ
 export type Fixture = {
   url: string;
   hits: () => number;
+  requests: (pathname: string) => number;
   close: () => Promise<void>;
 };
 
 export async function startFixture(): Promise<Fixture> {
   let hits = 0;
+  const requests = new Map<string, number>();
   const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
   const handler: http.RequestListener = (request, response) => {
     const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+    requests.set(pathname, (requests.get(pathname) ?? 0) + 1);
     if (handleEdgeCase(request, response)) return;
     const content = CONTENT_ROUTES[pathname];
     if (pathname === "/framed") {
@@ -196,6 +199,7 @@ export async function startFixture(): Promise<Fixture> {
   return {
     url: `http://127.0.0.1:${port}`,
     hits: () => hits,
+    requests: (pathname) => requests.get(pathname) ?? 0,
     close: async () => {
       await loopbackV6?.close();
       await new Promise<void>((resolve) => {

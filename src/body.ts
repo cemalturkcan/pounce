@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import type { BrowserContext, Page } from "playwright-core";
 import { TIMED_OUT, withDeadline } from "./async.ts";
+import type { Tab } from "./browser.ts";
 import type { OutputStore } from "./output.ts";
 
 export type BodyKind = "html" | "pdf" | "json" | "csv" | "text" | "image" | "binary";
@@ -68,13 +69,50 @@ export async function tabBodyType(page: Page) {
   return classifyBody(contentType === TIMED_OUT ? undefined : contentType, page.url());
 }
 
-export async function readTabBody(page: Page, type: BodyType, store: OutputStore) {
-  const url = page.url();
-  const fetched = await fetchBody(page.context(), url, FETCH_MS);
-  if (isTextKind(type.kind)) return { text: fetched.body.toString("utf8") };
+const withoutHash = (url: string) => url.replace(/#.*$/, "");
+
+async function documentBody(tab: Tab) {
+  const document = tab.document;
+  if (!document || withoutHash(document.url) !== withoutHash(tab.page.url())) return undefined;
+  return withDeadline(document.response.body(), FETCH_MS)
+    .then((body) => (body === TIMED_OUT ? undefined : body))
+    .catch(() => undefined);
+}
+
+async function renderedText(page: Page) {
+  const text = await withDeadline(page.evaluate(() => document.body?.innerText ?? ""), PROBE_MS).catch(() => undefined);
+  return typeof text === "string" ? text : undefined;
+}
+
+async function pdfFromPage(page: Page) {
+  const data = await withDeadline(
+    page.evaluate(async (url) => {
+      const response = await fetch(url, { cache: "force-cache", credentials: "include" });
+      const blob = await response.blob();
+      return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ""));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+    }, withoutHash(page.url())),
+    FETCH_MS,
+  ).catch(() => undefined);
+  return typeof data === "string" ? Buffer.from(data, "base64") : undefined;
+}
+
+export async function readTabBody(tab: Tab, type: BodyType, store: OutputStore) {
+  const url = tab.page.url();
+  const body = type.kind === "pdf" ? await pdfFromPage(tab.page) : await documentBody(tab);
+  if (isTextKind(type.kind)) {
+    if (body) return { text: body.toString("utf8") };
+    const text = await renderedText(tab.page);
+    if (text !== undefined) return { text, note: "The response body of this tab is no longer available, so this is the text the tab shows." };
+  }
+  if (!body) return { note: `This tab shows ${type.mime}, but the browser no longer holds the response body of ${url}. Load it again with navigate and call read_text again.` };
   const kind = type.kind === "pdf" ? "pages" : "downloads";
-  const file = await store.write(kind, store.uniqueName(url, type.extension), fetched.body);
-  const size = `${fetched.body.length} bytes`;
+  const file = await store.write(kind, store.uniqueName(url, type.extension), body);
+  const size = `${body.length} bytes`;
   if (type.kind !== "pdf") return { note: `This tab shows ${type.mime} (${size}), which has no text to read; it was saved to ${file}. Use screenshot to look at an image.` };
   const extracted = await extractPdfText(file);
   if (extracted.text === undefined) return { note: `This tab shows a PDF (${size}); it was saved to ${file}, but ${extracted.unavailable}.` };
