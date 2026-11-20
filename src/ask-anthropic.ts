@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, hostname, userInfo } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,6 +10,9 @@ import { ToolError } from "./errors.ts";
 const API_ORIGIN = "https://api.anthropic.com";
 const MESSAGES_URL = `${API_ORIGIN}/v1/messages?beta=true`;
 const PROFILE_URL = `${API_ORIGIN}/api/oauth/profile`;
+const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const OAUTH_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
 const ANTHROPIC_VERSION = "2023-06-01";
 const CLAUDE_CODE_VERSION = "2.1.296";
 const CLAUDE_CODE_ENTRYPOINT = "sdk-cli";
@@ -41,11 +44,13 @@ const MAX_RETRIES = 2;
 const MAX_RETRY_DELAY_MS = 60_000;
 const RETRY_JITTER_MS = 250;
 const RETRY_OUTPUT_TOKEN_LIMIT = 4_096;
+const REFRESH_WINDOW_MS = 5 * 60_000;
 
 type ApiError = { type?: unknown; message?: unknown };
 type ClaudeCredentials = {
-  claudeAiOauth?: { accessToken?: unknown; expiresAt?: unknown };
+  claudeAiOauth?: { accessToken?: unknown; refreshToken?: unknown; expiresAt?: unknown; [key: string]: unknown };
   accountUuid?: unknown;
+  [key: string]: unknown;
 };
 
 class RetryableAnthropicError extends ToolError {
@@ -92,13 +97,78 @@ async function readCredentials(credentialsPath: string, signal: AbortSignal) {
   if (typeof oauth?.accessToken !== "string" || !oauth.accessToken.trim()) {
     throw new AskSetupError(`Claude Code credentials at ${credentialsPath} lack a Claude account access token.`, SIGN_IN);
   }
-  if (typeof oauth.expiresAt === "number" && oauth.expiresAt <= Date.now()) {
-    throw new AskSetupError("The local Claude Code session has expired.", SIGN_IN);
-  }
   return {
+    document: credentials,
     accessToken: oauth.accessToken,
+    refreshToken: typeof oauth.refreshToken === "string" ? oauth.refreshToken : undefined,
+    expiresAt: typeof oauth.expiresAt === "number" ? oauth.expiresAt : undefined,
     accountUuid: typeof credentials.accountUuid === "string" ? credentials.accountUuid : undefined,
   };
+}
+
+async function requestTokenRefresh(refreshToken: string, scope: string | undefined, signal: AbortSignal) {
+  const response = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": CLAUDE_CODE_USER_AGENT },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: OAUTH_CLIENT_ID,
+      ...(scope ? { scope } : {}),
+    }),
+    signal,
+  }).catch((error: unknown) => {
+    signal.throwIfAborted();
+    throw new AskSetupError(`Could not refresh the local Claude session${networkErrorDetail(error, refreshToken)}`, SIGN_IN);
+  });
+  const payload = await response.json().catch(() => undefined) as {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    error?: unknown;
+    error_description?: unknown;
+  } | undefined;
+  if (!response.ok) {
+    return { response, payload };
+  }
+  if (typeof payload?.access_token !== "string" || !payload.access_token) {
+    throw new AskSetupError("Claude session refresh returned no access token.", SIGN_IN);
+  }
+  return { response, payload };
+}
+
+async function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal) {
+  const credentials = await readCredentials(credentialsPath, signal);
+  if (credentials.expiresAt === undefined || credentials.expiresAt > Date.now() + REFRESH_WINDOW_MS) return;
+  if (!credentials.refreshToken) throw new AskSetupError("The local Claude Code session expired without a refresh token.", SIGN_IN);
+
+  let answer = await requestTokenRefresh(credentials.refreshToken, OAUTH_SCOPES, signal);
+  if (!answer.response.ok && answer.payload?.error === "invalid_scope") {
+    answer = await requestTokenRefresh(credentials.refreshToken, undefined, signal);
+  }
+  if (!answer.response.ok) {
+    const error = typeof answer.payload?.error === "string" ? answer.payload.error : undefined;
+    const description = typeof answer.payload?.error_description === "string" ? answer.payload.error_description : undefined;
+    throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${errorDetail({ type: error, message: description }, credentials.refreshToken)}`, SIGN_IN);
+  }
+
+  const expiresIn = typeof answer.payload?.expires_in === "number" ? answer.payload.expires_in : 3_600;
+  const oauth = credentials.document.claudeAiOauth ?? {};
+  credentials.document.claudeAiOauth = {
+    ...oauth,
+    accessToken: answer.payload?.access_token,
+    refreshToken: typeof answer.payload?.refresh_token === "string" && answer.payload.refresh_token
+      ? answer.payload.refresh_token
+      : credentials.refreshToken,
+    expiresAt: Date.now() + Math.min(Math.max(expiresIn, 60), 86_400) * 1_000,
+  };
+  const temporaryPath = `${credentialsPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify(credentials.document, null, 2), { mode: 0o600, signal });
+    await rename(temporaryPath, credentialsPath);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
 }
 
 function billingHeader(messageText: string) {
@@ -118,7 +188,7 @@ function deviceId() {
   return createHash("sha256").update(`${hostname()}:${username}`).digest("hex");
 }
 
-function claudeCodeHeaders(token: string, sessionId: string) {
+function claudeCodeHeaders(token: string, sessionId: string, retryCount: number) {
   const architectures: Record<string, string> = { x64: "x64", arm64: "arm64", ia32: "ia32", arm: "arm" };
   const platforms: Record<string, string> = { linux: "Linux", darwin: "MacOS", win32: "Windows" };
   return {
@@ -135,7 +205,7 @@ function claudeCodeHeaders(token: string, sessionId: string) {
     "x-stainless-lang": "js",
     "x-stainless-os": platforms[process.platform] ?? `Other:${process.platform}`,
     "x-stainless-package-version": "0.128.0",
-    "x-stainless-retry-count": "0",
+    "x-stainless-retry-count": String(retryCount),
     "x-stainless-runtime": "node",
     "x-stainless-runtime-version": "v26.3.0",
     "x-stainless-timeout": "600",
@@ -151,6 +221,9 @@ async function readAccountUuid(token: string, signal: AbortSignal) {
       "user-agent": CLAUDE_CODE_USER_AGENT,
     },
     signal,
+  }).catch((error: unknown) => {
+    signal.throwIfAborted();
+    throw new AskSetupError(`Could not read the local Claude account profile${networkErrorDetail(error, token)}`, SIGN_IN);
   });
   const payload = await response.json().catch(() => undefined) as { account?: { uuid?: unknown }; error?: ApiError } | undefined;
   const uuid = payload?.account?.uuid;
@@ -251,7 +324,10 @@ async function readMessage(response: Response, token: string, signal: AbortSigna
           }
           case "message_stop": {
             const text = parts.join("");
-            if (!text.trim() && stopReason !== "refusal" && stopReason !== "max_tokens") {
+            if (!text.trim() && stopReason === "max_tokens") {
+              throw new ToolError("Anthropic Messages reached max_tokens before producing text. Raise max_output_tokens.");
+            }
+            if (!text.trim() && stopReason !== "refusal") {
               throw new ToolError("Anthropic Messages returned no text.");
             }
             return { text, usage, stopReason };
@@ -292,12 +368,12 @@ function retryDelay(response: Response) {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
 }
 
-async function postMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
+async function postMessage(body: string, token: string, sessionId: string, retryCount: number, signal: AbortSignal) {
   signal.throwIfAborted();
   const response = await fetch(MESSAGES_URL, {
     method: "POST",
     redirect: "error",
-    headers: claudeCodeHeaders(token, sessionId),
+    headers: claudeCodeHeaders(token, sessionId, retryCount),
     body,
     signal,
   }).catch((error: unknown) => {
@@ -323,7 +399,7 @@ async function postMessage(body: string, token: string, sessionId: string, signa
 async function completeMessage(body: string, token: string, sessionId: string, signal: AbortSignal) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await readMessage(await postMessage(body, token, sessionId, signal), token, signal);
+      return await readMessage(await postMessage(body, token, sessionId, attempt, signal), token, signal);
     } catch (error) {
       signal.throwIfAborted();
       if (!(error instanceof RetryableAnthropicError)) throw error;
@@ -350,10 +426,19 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
   const localDeviceId = deviceId();
   let profiledToken: string | undefined;
   let profiledAccountUuid: string | undefined;
+  let refreshPromise: Promise<void> | undefined;
   return {
     name: "Anthropic Claude account",
     async complete({ system, prompt, model, maxTokens, images, signal }) {
-      const credentials = await readCredentials(credentialsPath, signal);
+      let credentials = await readCredentials(credentialsPath, signal);
+      if (credentials.expiresAt !== undefined && credentials.expiresAt <= Date.now() + REFRESH_WINDOW_MS) {
+        refreshPromise ??= refreshCredentialsFile(credentialsPath, AbortSignal.timeout(30_000)).finally(() => {
+          refreshPromise = undefined;
+        });
+        await refreshPromise;
+        signal.throwIfAborted();
+        credentials = await readCredentials(credentialsPath, signal);
+      }
       const token = credentials.accessToken;
       let accountUuid = credentials.accountUuid;
       if (!accountUuid && profiledToken === token) accountUuid = profiledAccountUuid;

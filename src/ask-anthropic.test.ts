@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -17,9 +17,17 @@ const input = {
 async function credentialFixture(t: TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "web-agent-ask-test-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const writeSession = (accessToken: string, expiresAt = Date.now() + 60_000, accountUuid: string | null = "account-test") =>
-    writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken, expiresAt }, ...(accountUuid ? { accountUuid } : {}) }));
-  return { adapter: anthropicAskAdapter(dir), writeSession };
+  const credentialsPath = path.join(dir, ".credentials.json");
+  const writeSession = (
+    accessToken: string,
+    expiresAt = Date.now() + 10 * 60_000,
+    accountUuid: string | null = "account-test",
+    refreshToken?: string,
+  ) => writeFile(credentialsPath, JSON.stringify({
+    claudeAiOauth: { accessToken, expiresAt, ...(refreshToken ? { refreshToken } : {}) },
+    ...(accountUuid ? { accountUuid } : {}),
+  }));
+  return { adapter: anthropicAskAdapter(dir), credentialsPath, writeSession };
 }
 
 function encodeEvents(events: Array<Record<string, unknown>>) {
@@ -109,7 +117,7 @@ test("Anthropic adapter forwards the prompt, Haiku model, token limit and abort 
 
 test("Anthropic adapter resolves and caches the account UUID from the Claude profile", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
-  await writeSession("test-token", Date.now() + 60_000, null);
+  await writeSession("test-token", Date.now() + 10 * 60_000, null);
   const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {
     if (url.endsWith("/api/oauth/profile")) return Response.json({ account: { uuid: "profile-account" } });
     return streamReply("OK");
@@ -120,6 +128,48 @@ test("Anthropic adapter resolves and caches the account UUID from the Claude pro
   const messageCall = fetch.mock.calls.find((call) => String(call.arguments[0]).includes("/v1/messages"));
   const body = JSON.parse(String(messageCall?.arguments[1]?.body));
   assert.equal(JSON.parse(body.metadata.user_id).account_uuid, "profile-account");
+});
+
+test("Anthropic adapter refreshes an expiring session once and atomically saves the rotated tokens", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const fetch = t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      const body = JSON.parse(String(request?.body));
+      assert.equal(body.refresh_token, "old-refresh");
+      assert.equal(body.client_id, "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+      assert.match(body.scope, /user:inference/);
+      return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 7200 });
+    }
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer new-access");
+    return streamReply("OK");
+  });
+  const [first, second] = await Promise.all([adapter.complete(input), adapter.complete(input)]);
+  assert.equal(first.text, "OK");
+  assert.equal(second.text, "OK");
+  assert.equal(fetch.mock.calls.filter((call) => String(call.arguments[0]).includes("/v1/oauth/token")).length, 1);
+  const saved = JSON.parse(await readFile(credentialsPath, "utf8"));
+  assert.equal(saved.claudeAiOauth.accessToken, "new-access");
+  assert.equal(saved.claudeAiOauth.refreshToken, "new-refresh");
+  assert.ok(saved.claudeAiOauth.expiresAt > Date.now() + 60 * 60_000);
+});
+
+test("Anthropic adapter retries token refresh without scopes when the endpoint rejects the scope", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  let refreshCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      refreshCalls += 1;
+      const body = JSON.parse(String(request?.body));
+      if (refreshCalls === 1) return Response.json({ error: "invalid_scope" }, { status: 400 });
+      assert.equal(body.scope, undefined);
+      return Response.json({ access_token: "new-access", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(refreshCalls, 2);
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {
@@ -161,12 +211,19 @@ test("Anthropic adapter sends ordered base64 image blocks and preserves stop rea
   }]);
 });
 
+test("Anthropic adapter rejects an output limit reached before any text", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  t.mock.method(globalThis, "fetch", async () => streamReply("", "max_tokens"));
+  await assert.rejects(adapter.complete(input), /reached max_tokens before producing text/);
+});
+
 test("missing or expired session is reported before sending the prompt", async (t) => {
   const { adapter, writeSession } = await credentialFixture(t);
   const fetch = t.mock.method(globalThis, "fetch", async () => new Response());
   await assert.rejects(adapter.complete(input), AskSetupError);
   await writeSession("expired-token", Date.now() - 1);
-  await assert.rejects(adapter.complete(input), /local Claude Code session has expired/);
+  await assert.rejects(adapter.complete(input), /expired without a refresh token/);
   assert.equal(fetch.mock.callCount(), 0);
 });
 
@@ -214,6 +271,7 @@ test("Anthropic retries 429 twice and obeys the abort signal during backoff", as
   const fetch = t.mock.method(globalThis, "fetch", async () => responses.shift() ?? throttled());
   assert.equal((await adapter.complete(input)).text, "OK");
   assert.equal(fetch.mock.callCount(), 3);
+  assert.deepEqual(fetch.mock.calls.slice(0, 3).map((call) => new Headers(call.arguments[1]?.headers).get("x-stainless-retry-count")), ["0", "1", "2"]);
   await assert.rejects(adapter.complete(input), {
     message: "Anthropic Messages returned HTTP 429.",
   });
@@ -422,4 +480,18 @@ test("Anthropic exposes masked network causes for request and stream failures", 
   })));
   await assert.rejects(adapter.complete(input), /while reading the Anthropic Messages stream: HPE_INVALID_HEADER_TOKEN: Invalid header \[REDACTED\]/);
   assert.equal(fetch.mock.callCount(), 6);
+});
+
+test("Anthropic wraps profile network failures with their cause and masks the token", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token", Date.now() + 10 * 60_000, null);
+  t.mock.method(globalThis, "fetch", async () => {
+    const cause = Object.assign(new Error("DNS failed for test-token"), { code: "ENOTFOUND" });
+    throw new TypeError("fetch failed", { cause });
+  });
+  await assert.rejects(adapter.complete(input), (error: unknown) => {
+    assert.ok(error instanceof AskSetupError);
+    assert.match(error.message, /profile: ENOTFOUND: DNS failed for \[REDACTED\]/);
+    return true;
+  });
 });
