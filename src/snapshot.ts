@@ -86,8 +86,12 @@ export function buildMatcher(query: string, useRegex: boolean) {
     const expression = new RegExp(query, "i");
     return (line: string) => expression.test(line);
   }
-  const needle = query.toLowerCase();
-  return (line: string) => line.toLowerCase().includes(needle);
+  const needle = foldCase(query);
+  return (line: string) => foldCase(line).includes(needle);
+}
+
+function foldCase(text: string) {
+  return text.toLowerCase().replace(/\u0307/g, "").replace(/ı/g, "i");
 }
 
 export type FindResult = {

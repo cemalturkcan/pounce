@@ -1108,6 +1108,85 @@ test("browser edge cases", async (t) => {
     assert.match(result.text, new RegExp(`^Tab ${other} was closed outside this session\\.`));
   });
 
+  await t.test("fill picks the matching option of a custom combobox", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    await ok("fill", { tab, target: "#fruit", text: "Banana" });
+    assert.match(await ok("read_text", { tab, target: "#fruit-state" }), /Banana/);
+  });
+
+  await t.test("fill on a custom combobox lists the options when none matches", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    const result = await call("fill", { tab, target: "#fruit", text: "Mango" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Apple, Banana, Cherry/);
+  });
+
+  await t.test("fill on a read-only date input fails with the steps to pick a date", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    const result = await call("fill", { tab, target: "#date", text: "2026-11-21" });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /Click the control, take a snapshot, then click the option/);
+  });
+
+  await t.test("fill keeps line breaks in a contenteditable editor", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/widgets` });
+    await ok("fill", { tab, target: "#editor", text: "Line one\nLine two\nLine three" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.split('\\n').filter(Boolean))" }), /\["Line one","Line two","Line three"\]/);
+  });
+
+  await t.test("fill replaces the content of a contenteditable editor", async () => {
+    await ok("fill", { tab, target: "#editor", text: "Fresh" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.trim())" }), /"Fresh"/);
+  });
+
+  await t.test("fill writes into an editor iframe and keeps line breaks", async () => {
+    await ok("fill", { tab, target: "iframe[title=\"Rich editor\"]", text: "Top\nBottom" });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('iframe').contentDocument.body.innerText.split('\\n').filter(Boolean))" }), /\["Top","Bottom"\]/);
+  });
+
+  await t.test("fill slowly keeps line breaks in a contenteditable editor", async () => {
+    await ok("fill", { tab, target: "#editor", text: "Slow one\nSlow two", slowly: true });
+    assert.match(await ok("evaluate", { tab, expression: "JSON.stringify(document.querySelector('#editor').innerText.split('\\n').filter(Boolean))" }), /\["Slow one","Slow two"\]/);
+  });
+
+  await t.test("fill stores Turkish, emoji and RTL text exactly", async () => {
+    await ok("navigate", { tab, url: `${fixture.url}/text` });
+    await ok("fill", { tab, target: "#note", text: MIXED_TEXT });
+    assert.ok((await ok("evaluate", { tab, expression: "document.querySelector('#note').value" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("fill slowly stores Turkish, emoji and RTL text exactly", async () => {
+    await ok("fill", { tab, target: "#body", text: MIXED_TEXT, slowly: true });
+    assert.ok((await ok("evaluate", { tab, expression: "document.querySelector('#body').value" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("fill reports no mismatch for mixed-script text", async () => {
+    assert.doesNotMatch(await ok("fill", { tab, target: "#note", text: MIXED_TEXT }), /reformatted or rejected/);
+  });
+
+  await t.test("read_text returns mixed-script text unchanged", async () => {
+    assert.ok((await ok("read_text", { tab, target: "#sample" })).includes(MIXED_TEXT));
+  });
+
+  await t.test("snapshot keeps mixed-script text", async () => {
+    assert.ok((await ok("snapshot", { tab })).includes(MIXED_TEXT));
+  });
+
+  await t.test("find matches Turkish text regardless of dotted capital I", async () => {
+    assert.match(await ok("find", { tab, query: "çağrı istanbul" }), /Çağrı İstanbul/);
+  });
+
+  await t.test("find matches an emoji ZWJ sequence", async () => {
+    assert.match(await ok("find", { tab, query: "👩🏽‍💻" }), /^\d+ matches/m);
+  });
+
+  await t.test("find matches RTL text", async () => {
+    assert.match(await ok("find", { tab, query: "שלום עולם" }), /^\d+ matches/m);
+  });
+
+  await t.test("find matches an accessible name with an emoji", async () => {
+    assert.match(await ok("find", { tab, query: "gönder 👍" }), /button "Gönder 👍"/);
+  });
 
   await ok("tab_close", { tab });
 });
