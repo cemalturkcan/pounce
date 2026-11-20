@@ -12,6 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
+import { CONTENT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -934,4 +935,89 @@ test("ask_pages edge cases through the tool", async (t) => {
     failAll = false;
     deps.ask = saved;
   }
+});
+
+test("non-HTML responses", async (t) => {
+  const routes = ["/files/report.pdf", "/files/data.json", "/files/notes.txt", "/files/table.csv", "/files/pixel.png", "/files/blob.bin"];
+  const index = await ok("collect_pages", { urls: routes.map((route) => fixture.url + route), include: ["text", "links", "screenshot"], settle_ms: 0, label: "non-html" });
+  const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+  const files = await readdir(dir);
+  const saved = (number: string, extension: string) => {
+    const name = files.find((file) => file.startsWith(`${number}-`) && file.endsWith(`.${extension}`));
+    assert.ok(name, `no ${number}-*.${extension} in ${files.join(", ")}`);
+    return path.join(dir, name);
+  };
+
+  await t.test("collect_pages collects every type without failing", async () => {
+    assert.match(index, /Collected 6 of 6 pages/);
+  });
+
+  await t.test("collect_pages extracts PDF text into a .txt file", async () => {
+    assert.match(await readFile(saved("01", "txt"), "utf8"), new RegExp(CONTENT.pdfText));
+  });
+
+  await t.test("collect_pages keeps the raw PDF", async () => {
+    assert.equal((await readFile(saved("01", "pdf"))).subarray(0, 5).toString("latin1"), "%PDF-");
+  });
+
+  await t.test("collect_pages saves JSON as .json", async () => {
+    assert.equal(await readFile(saved("02", "json"), "utf8"), CONTENT.json);
+  });
+
+  await t.test("collect_pages saves plain text as .txt", async () => {
+    assert.equal(await readFile(saved("03", "txt"), "utf8"), CONTENT.text);
+  });
+
+  await t.test("collect_pages saves a CSV that the browser would download", async () => {
+    assert.equal(await readFile(saved("04", "csv"), "utf8"), CONTENT.csv);
+  });
+
+  await t.test("collect_pages saves an image as .png", async () => {
+    assert.equal((await readFile(saved("05", "png"))).subarray(1, 4).toString("latin1"), "PNG");
+  });
+
+  await t.test("collect_pages saves other binaries byte for byte", async () => {
+    assert.deepEqual(await readFile(saved("06", "bin")), CONTENT.binary);
+  });
+
+  await t.test("the index line names the content type", async () => {
+    assert.match(index, /^01 200 \S+\/files\/report\.pdf \[application\/pdf\]/m);
+  });
+
+  await t.test("the index previews JSON content", async () => {
+    assert.ok(index.includes(JSON.parse(CONTENT.json).name), index);
+  });
+
+  await t.test("the index counts the characters of text content", async () => {
+    assert.match(index, new RegExp(`^03 .* ${CONTENT.text.length} chars`, "m"));
+  });
+
+  await t.test("read_text returns the text of a PDF tab", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/report.pdf` }));
+    try {
+      assert.match(await ok("read_text", { tab }), new RegExp(CONTENT.pdfText));
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
+  await t.test("read_text returns the raw body of a JSON tab", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/data.json` }));
+    try {
+      assert.ok((await ok("read_text", { tab, format: "markdown" })).includes(CONTENT.json));
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
+
+  await t.test("read_text on an image tab says where the image was saved", async () => {
+    const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/files/pixel.png` }));
+    try {
+      const text = await ok("read_text", { tab });
+      const file = /saved to (\S+\.png)/.exec(text)?.[1] ?? "";
+      assert.equal((await readFile(file)).subarray(1, 4).toString("latin1"), "PNG");
+    } finally {
+      await ok("tab_close", { tab });
+    }
+  });
 });

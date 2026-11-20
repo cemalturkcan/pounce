@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readTabBody, tabBodyType } from "../body.ts";
 import { extractPage, summarizeStructured, toCsv } from "../extract.ts";
 import { elementMarkdown, pageMarkdown } from "../markdown.ts";
 import { clipWindow, untrusted } from "../output.ts";
@@ -64,7 +65,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     name: "read_text",
     title: "Read page text",
     description:
-      "Return the visible text of the page or of one element, as plain text or as Markdown, without refs. Use it to read articles, documentation, tables or results; use snapshot when you need to act on elements. Markdown keeps headings, lists, links with their URLs, code blocks and tables, and leaves out navigation, footers, sidebars, scripts and hidden elements. Long text is paged: the result says how many characters exist and the offset to pass for the next page.",
+      "Return the visible text of the page or of one element, as plain text or as Markdown, without refs. Use it to read articles, documentation, tables or results; use snapshot when you need to act on elements. Markdown keeps headings, lists, links with their URLs, code blocks and tables, and leaves out navigation, footers, sidebars, scripts and hidden elements. Long text is paged: the result says how many characters exist and the offset to pass for the next page. On a tab showing a PDF, JSON, plain text or CSV file it returns the file's text (PDF text via pdftotext when installed); for images and other files it saves the file and says where.",
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Read only this element's text (ref or selector)."),
@@ -77,9 +78,13 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const scope = input.scope ?? "page";
+      const bodyType = input.target ? undefined : await tabBodyType(tab.page);
+      const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab.page, bodyType, store) : undefined;
+      if (body && body.text === undefined) return body.note ?? "";
       const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
-      const text =
-        input.format === "markdown"
+      const text = body?.text !== undefined
+        ? body.text
+        : input.format === "markdown"
           ? locator
             ? await elementMarkdown(locator)
             : await pageMarkdown(tab.page, scope)
@@ -90,7 +95,8 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       const footer = window.hasMore
         ? `\n[chars ${window.start}-${window.end} of ${window.totalChars}; pass offset=${window.end} for more]`
         : `\n[chars ${window.start}-${window.end} of ${window.totalChars}; end of text]`;
-      return untrusted(tab.page.url(), window.text + footer);
+      const note = body?.note ? `\n${body.note}` : "";
+      return untrusted(tab.page.url(), window.text + footer + note);
     },
   });
 

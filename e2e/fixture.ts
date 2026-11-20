@@ -151,7 +151,10 @@ export async function startFixture(): Promise<Fixture> {
   const pages: Record<string, string> = { "/counter": COUNTER, "/frames": FRAMES, "/checkout": CHECKOUT, "/media": MEDIA, "/sse": SSE, "/hang": HANG };
   const server = http.createServer((request, response) => {
     const pathname = (request.url ?? "/").split("?")[0] ?? "/";
-    if (pages[pathname]) {
+    const content = CONTENT_ROUTES[pathname];
+    if (content) {
+      response.writeHead(200, { "content-type": content.type }).end(content.body());
+    } else if (pages[pathname]) {
       response.writeHead(200, { "content-type": "text/html" }).end(pages[pathname]);
     } else if (pathname === "/pixel.png") {
       response.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" }).end(PIXEL);
@@ -194,3 +197,43 @@ export async function startFixture(): Promise<Fixture> {
       }),
   };
 }
+
+export function tinyPdf(text: string) {
+  const content = `BT /F1 18 Tf 20 100 Td (${text}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xref = body.length;
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}`;
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(body, "latin1");
+}
+
+const contentToken = () => Math.random().toString(36).slice(2, 10);
+
+export const CONTENT = {
+  pdfText: `Quarterly total ${contentToken()}`,
+  json: JSON.stringify({ name: `json-${contentToken()}`, items: [1, 2, 3] }),
+  text: `plain notes ${contentToken()}\nsecond line`,
+  csv: `name,value\nrow-${contentToken()},7\n`,
+  binary: Buffer.from(Array.from({ length: 64 }, (_value, index) => (index * 37) % 256)),
+};
+
+export const CONTENT_ROUTES: Record<string, { type: string; body: () => Buffer | string }> = {
+  "/files/report.pdf": { type: "application/pdf", body: () => tinyPdf(CONTENT.pdfText) },
+  "/files/data.json": { type: "application/json; charset=utf-8", body: () => CONTENT.json },
+  "/files/notes.txt": { type: "text/plain; charset=utf-8", body: () => CONTENT.text },
+  "/files/table.csv": { type: "text/csv", body: () => CONTENT.csv },
+  "/files/pixel.png": { type: "image/png", body: () => PIXEL },
+  "/files/blob.bin": { type: "application/octet-stream", body: () => CONTENT.binary },
+};

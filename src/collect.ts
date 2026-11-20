@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runPool, TIMED_OUT, withDeadline } from "./async.ts";
+import { type BodyType, classifyBody, extractPdfText, fetchBody, isDownloadError, isTextKind } from "./body.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { describeError } from "./errors.ts";
 import { extractPage, summarizeStructured } from "./extract.ts";
@@ -30,6 +31,9 @@ export type CollectedPage = {
   finalUrl?: string;
   status?: number;
   title?: string;
+  type?: string;
+  bytes?: number;
+  note?: string;
   chars?: number;
   links?: number;
   files: string[];
@@ -61,7 +65,7 @@ export function normalizeUrl(url: string) {
 
 async function collectOne(
   manager: BrowserManager,
-  owner: string,
+  openTab: () => Promise<Tab>,
   dir: string,
   input: CollectInput,
   url: string,
@@ -69,7 +73,7 @@ async function collectOne(
 ): Promise<CollectedPage> {
   const base = `${String(index + 1).padStart(2, "0")}-${slugify(url)}`;
   const result: CollectedPage = { index: index + 1, url, files: [] };
-  const tab = await manager.openTab(owner);
+  const tab = await openTab();
 
   try {
     const limit = 2 * input.timeoutMs + input.settleMs;
@@ -93,7 +97,23 @@ async function saveOne(
   result: CollectedPage,
 ) {
   const { page } = tab;
-  const response = await page.goto(url, { waitUntil: input.waitUntil, timeout: input.timeoutMs });
+  let response;
+  try {
+    response = await page.goto(url, { waitUntil: input.waitUntil, timeout: input.timeoutMs });
+  } catch (error) {
+    if (!isDownloadError(error)) throw error;
+    const fetched = await fetchBody(page.context(), url, input.timeoutMs);
+    result.status = fetched.status;
+    result.finalUrl = fetched.url;
+    return saveBody(dir, base, classifyBody(fetched.contentType, fetched.url), fetched.body, input, result);
+  }
+  const bodyType = classifyBody(response?.headers()["content-type"], page.url());
+  if (response && bodyType.kind !== "html") {
+    result.status = response.status();
+    result.finalUrl = response.url();
+    const body = bodyType.kind === "pdf" ? (await fetchBody(page.context(), response.url(), input.timeoutMs)).body : await response.body();
+    return saveBody(dir, base, bodyType, body, input, result);
+  }
   if (input.settleMs > 0) await sleep(input.settleMs);
   result.status = response?.status();
   result.finalUrl = page.url();
@@ -140,10 +160,39 @@ async function saveOne(
   }
 }
 
+function keepText(result: CollectedPage, text: string, previewChars: number) {
+  result.chars = text.length;
+  result.preview = text.slice(0, previewChars).replace(/\s+/g, " ");
+}
+
+async function saveBody(dir: string, base: string, type: BodyType, body: Buffer, input: CollectInput, result: CollectedPage) {
+  result.type = type.mime;
+  result.bytes = body.length;
+  const raw = `${base}.${type.extension}`;
+  await writeFile(path.join(dir, raw), body);
+  result.files.push(raw);
+  if (isTextKind(type.kind)) keepText(result, body.toString("utf8"), input.previewChars);
+  if (type.kind !== "pdf") return;
+  const extracted = await extractPdfText(path.join(dir, raw));
+  if (extracted.text === undefined) {
+    result.note = extracted.unavailable;
+    return;
+  }
+  await writeFile(path.join(dir, `${base}.txt`), extracted.text);
+  result.files.push(`${base}.txt`);
+  keepText(result, extracted.text, input.previewChars);
+}
+
 export async function collectPages(manager: BrowserManager, store: OutputStore, owner: string, input: CollectInput) {
   const dir = await store.dir("collect", `${timestampSlug()}-${slugify(input.label ?? "pages", 40)}`);
   const urls = input.urls.map(normalizeUrl);
-  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, owner, dir, input, url, index), input.signal);
+  let opening: Promise<unknown> = Promise.resolve();
+  const openTab = () => {
+    const next = opening.then(() => manager.openTab(owner));
+    opening = next.catch(() => undefined);
+    return next;
+  };
+  const collected = await runPool(urls, input.concurrency, (url, index) => collectOne(manager, openTab, dir, input, url, index), input.signal);
   const results = collected.map((result, index): CollectedPage => result ?? { index: index + 1, url: urls[index] ?? "", files: [], error: "not started: the call was cancelled" });
 
   await writeFile(path.join(dir, "index.json"), JSON.stringify(results, null, 2));
@@ -154,7 +203,7 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
   const failed = results.filter((result) => result.error).length;
   const lines = [
     `Collected ${results.length - failed} of ${results.length} pages into ${dir}`,
-    "Each line: number, HTTP status, final URL, title, text length, files. Read or grep the files for the content; index.json has the same list.",
+    "Each line: number, HTTP status, final URL, title (or [content type] for PDFs, JSON, images and other files, which are saved as they are), text length, files. Read or grep the files for the content; index.json has the same list.",
   ];
   for (const result of results) {
     const number = String(result.index).padStart(2, "0");
@@ -162,8 +211,10 @@ export function renderCollectIndex(dir: string, results: CollectedPage[]) {
       lines.push(`${number} FAILED ${result.url} — ${result.error}`);
       continue;
     }
-    const size = result.chars === undefined ? "" : ` ${result.chars} chars`;
-    lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} "${result.title ?? ""}"${size} → ${result.files.join(", ")}`);
+    const size = result.chars !== undefined ? ` ${result.chars} chars` : result.bytes !== undefined ? ` ${result.bytes} bytes` : "";
+    const label = result.type ? `[${result.type}]` : `"${result.title ?? ""}"`;
+    lines.push(`${number} ${result.status ?? "-"} ${result.finalUrl} ${label}${size} → ${result.files.join(", ")}`);
+    if (result.note) lines.push(`   ${result.note}`);
     if (result.data) lines.push(`   ${result.data}`);
     if (result.preview) lines.push(`   ${result.preview}`);
   }
