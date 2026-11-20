@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { type AskAdapter, type AskInput, AskSetupError } from "../src/ask.ts";
 import { loadConfig } from "../src/config.ts";
-import { createImage, resize } from "../src/pixels.ts";
+import { createImage, fillRect, resize } from "../src/pixels.ts";
 import { decodePng, encodePng } from "../src/png.ts";
 import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
@@ -98,6 +98,7 @@ before(async () => {
   server = http.createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://fixture");
     if (url.pathname === "/design") response.writeHead(200, { "content-type": "text/html" }).end(designPage(url.searchParams.get("v") ?? "a"));
+    else if (url.pathname === "/tall") response.writeHead(200, { "content-type": "text/html" }).end('<!doctype html><html><head><title>Tall</title></head><body style="margin:0;background:#fff"><div style="height:8000px"></div></body></html>');
     else response.writeHead(404).end();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -275,4 +276,35 @@ return shot.data;`,
     const tabsAfter = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
     assert.equal(tabsAfter, tabsBefore);
   });
+});
+
+test("a large speckled comparison keeps the server answering", async () => {
+  const reference = createImage(1440, 8000, [255, 255, 255, 255]);
+  let seed = 11;
+  const random = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let y = 5; y < 8000 - 22; y += 22) {
+    for (let x = 5; x < 1440 - 22; x += 22) fillRect(reference, { x: x + Math.floor(random() * 8), y: y + Math.floor(random() * 8), width: 3, height: 3 }, [0, 0, 0, 255]);
+  }
+  const file = path.join(workDir, "speckled-1440x8000.png");
+  await writeFile(file, await encodePng(reference));
+  const tab = /Opened (t\d+)/.exec(await ok("tab_open", { url: `${base}/tall` }))?.[1] ?? "";
+  const started = Date.now();
+  let done = false;
+  const comparing = ok("compare_design", { tab, reference: file, full_page: true, model: "none" }).finally(() => (done = true));
+  let slowest = 0;
+  let answered = 0;
+  while (!done) {
+    const asked = Date.now();
+    await ok("tabs_list");
+    slowest = Math.max(slowest, Date.now() - asked);
+    answered += 1;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const text = await comparing;
+  const elapsed = Date.now() - started;
+  assert.match(text, /Reference 1440x8000, page capture 1440x8000/);
+  assert.match(text, /region\(s\) differ/);
+  assert.ok(elapsed < 20_000, `compare_design took ${elapsed} ms`);
+  assert.ok(answered > 1 && slowest < 1500, `tabs_list answered ${answered} time(s), slowest ${slowest} ms`);
+  await ok("tab_close", { tab });
 });
