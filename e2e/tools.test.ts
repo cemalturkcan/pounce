@@ -1372,6 +1372,15 @@ test("ask_pages edge cases through the tool", async (t) => {
       assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);
     });
 
+    await t.test("the raw reply of every call is saved next to the answers", async () => {
+      const text = await ok("ask_pages", { question: "What is here?", files });
+      const dir = /^Raw model replies: (\S+)$/m.exec(text)?.[1] ?? "";
+      assert.ok(dir, text);
+      const names = (await readdir(dir)).sort();
+      assert.deepEqual(names, ["call-1.txt"]);
+      assert.match(await readFile(path.join(dir, "call-1.txt"), "utf8"), /^- seen \[/m);
+    });
+
     await t.test("urls that fail to load are reported as not loaded", async () => {
       const dead = "http://127.0.0.1:9/";
       const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`, dead], images: "none" });

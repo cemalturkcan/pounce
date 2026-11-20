@@ -157,9 +157,17 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       const imageFooter = imageLines.length || prepared.length ? `\n\nScreenshots (${prepared.length} sent${imageDir && prepared.length ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}${sentLine}` : "";
       const notLoadedBlock = notLoaded.length ? `\n\n${notLoaded.join("\n")}` : "";
       const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${notLoadedBlock}${imageFooter}`;
-      const file = await store.write("ask", store.uniqueName(input.question, "md"), `${rendered}\n\n<!-- raw -->\n${JSON.stringify(report, null, 2)}\n`);
-      if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${rendered}`, `Full report: ${file}`);
-      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}\nFull answers: ${file}`;
+      const answersName = store.uniqueName(input.question, "md");
+      const rawName = answersName.replace(/\.md$/, ".raw");
+      const replies = report.batches.filter((batch) => batch.reply !== undefined);
+      if (replies.length) await store.dir("ask", rawName);
+      for (const batch of replies) await store.write("ask", path.join(rawName, `call-${batch.index}.txt`), batch.reply ?? "");
+      const rawLine = replies.length ? `\nRaw model replies: ${path.join(store.root, "ask", rawName)}` : "";
+      const withRaw = `${rendered}${rawLine}`;
+      const reportJson = JSON.stringify({ ...report, batches: report.batches.map(({ reply: _reply, ...batch }) => batch) }, null, 2);
+      const file = await store.write("ask", answersName, `${withRaw}\n\n<!-- raw -->\n${reportJson}\n`);
+      if (allBatchesFailed(report)) throw new ToolError(`Every model call failed, so no page was read.\n${withRaw}`, `Full report: ${file}`);
+      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}${rawLine}\nFull answers: ${file}`;
       return untrusted(`${documents.length} page(s), answered by ${adapter.name}`, body);
     },
   });
