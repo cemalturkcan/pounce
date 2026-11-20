@@ -81,13 +81,23 @@ export type Tab = {
   lastSeenUrl?: string;
   title?: string;
   closingByTool?: boolean;
+  actions: TabAction[];
   captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
 };
 
 type PopupCheck = { done: Promise<void>; finish: (blocked: boolean) => void };
 
-export type TabEvent = { at: number; text: string | (() => string) };
+export type TabEvent = { at: number; text: string | (() => string); stamped?: boolean };
+
+export type TabAction = { tool: string; owner: string };
+
+const clockTime = (at: number) => new Date(at).toISOString().slice(11, 19);
+
+export function runningActions(id: string, actions: TabAction[]) {
+  const tools = [...new Set(actions.map((action) => action.tool))];
+  return tools.length ? `during ${tools.join(", ")} on ${id}` : `with no tool call running on ${id}`;
+}
 
 export type ConsoleHookMode = "local" | "all" | "off";
 
@@ -110,8 +120,8 @@ export function shouldRetainBody(tab: Pick<Tab, "owner" | "captureBodies">, head
   return !(Number.isFinite(length) && length > BODY_ENTRY_LIMIT);
 }
 
-export function pushEvent(tab: Tab, text: string | (() => string)) {
-  pushBounded(tab.events, { at: Date.now(), text }, EVENT_LIMIT);
+export function pushEvent(tab: Tab, text: string | (() => string), options: { at?: number; stamped?: boolean } = {}) {
+  pushBounded(tab.events, { at: options.at ?? Date.now(), text, stamped: options.stamped }, EVENT_LIMIT);
 }
 
 function pushBounded<T>(list: T[], entry: T, limit: number) {
@@ -330,11 +340,14 @@ export class BrowserManager {
       ruleCounter: 0,
       popupChecks: new Set(),
       downloads: [],
+      actions: [],
     };
     this.tabs.set(tab.id, tab);
     this.byPage.set(page, tab);
     this.attach(tab);
 
+    const openedAt = Date.now();
+    const running = new Map([...this.tabs.values()].map((candidate) => [candidate, [...candidate.actions]]));
     void page
       .opener()
       .then((opener) => {
@@ -342,7 +355,8 @@ export class BrowserManager {
         if (!parent) return;
         if (tab.owner === UNCLAIMED_OWNER) tab.owner = parent.owner;
         tab.openerId = parent.id;
-        pushEvent(parent, `opened new tab ${tab.id}`);
+        const during = runningActions(parent.id, running.get(parent) ?? []);
+        pushEvent(parent, `opened new tab ${tab.id} from ${parent.id} (${parent.page.url()}), ${during}`, { at: openedAt, stamped: true });
       })
       .catch(() => undefined);
 
@@ -449,7 +463,10 @@ export class BrowserManager {
     if (!tab.closingByTool && !this.shuttingDown) logEvent("tab_closed_outside", { tab: tab.id, owner: tab.owner, url: tab.page.url() });
     this.history.closed({ id: tab.id, url: tab.page.url(), title: tab.title }, this.shuttingDown ? "restart" : tab.closingByTool ? "closed" : "closed-outside");
     const opener = tab.openerId ? this.tabs.get(tab.openerId) : undefined;
-    if (opener && !opener.page.isClosed()) pushEvent(opener, () => `tab ${tab.id} (popup) closed; this tab is at ${opener.page.url()}`);
+    if (opener && !opener.page.isClosed()) {
+      const during = runningActions(opener.id, opener.actions);
+      pushEvent(opener, () => `tab ${tab.id} (popup) closed, ${during}; this tab ${opener.id} is at ${opener.page.url()}`, { stamped: true });
+    }
   }
 
   private answerBeforeUnload(tab: Tab, dialog: Dialog) {
@@ -515,6 +532,15 @@ export class BrowserManager {
       1500,
     ).catch(() => TIMED_OUT);
     if (Array.isArray(calls) && calls.length) pushEvent(tab, "the page requested a passkey or security key; use handoff");
+  }
+
+  beginAction(tab: Tab, tool: string, owner: string) {
+    const action: TabAction = { tool, owner };
+    tab.actions.push(action);
+    return () => {
+      const index = tab.actions.indexOf(action);
+      if (index !== -1) tab.actions.splice(index, 1);
+    };
   }
 
   peekTab(id: string) {
@@ -718,9 +744,8 @@ export class BrowserManager {
   drainEvents(tab: Tab, since?: number) {
     return tab.events.splice(0, tab.events.length).map((event) => {
       const text = typeof event.text === "function" ? event.text() : event.text;
-      return since === undefined || event.at >= since
-        ? `Event: ${text}`
-        : `Earlier event (${new Date(event.at).toISOString().slice(11, 19)}, before this call): ${text}`;
+      if (since !== undefined && event.at < since) return `Earlier event (${clockTime(event.at)}, before this call): ${text}`;
+      return event.stamped ? `Event (${clockTime(event.at)}): ${text}` : `Event: ${text}`;
     });
   }
 

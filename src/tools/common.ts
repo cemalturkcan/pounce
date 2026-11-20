@@ -100,6 +100,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
           ...fields,
           input: summarizeInput(input),
         });
+      const endAction = tab ? deps.manager.beginAction(tab, spec.name, owner) : undefined;
       try {
         if (typeof tabId === "string") deps.manager.claimIfOrphaned(tabId, owner);
         const output = await spec.handler(input as z.infer<z.ZodObject<Shape>>, owner, extra.signal);
@@ -121,6 +122,7 @@ export function defineTool<Shape extends z.ZodRawShape>(server: McpServer, deps:
         });
         return { content: [{ type: "text", text: `${withNote(described)} [req ${requestId}]` }], isError: true };
       } finally {
+        endAction?.();
         if (tab) deps.manager.markSeen(tab);
       }
     },

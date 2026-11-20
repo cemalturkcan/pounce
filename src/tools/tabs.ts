@@ -95,39 +95,48 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     },
     handler: async (input, owner) => {
       const tab = await manager.openTab(owner);
-      if (!input.url) {
-        manager.markSeen(tab);
-        return `Opened ${tab.id} (blank).`;
-      }
-      const startedAt = Date.now();
-      let response: Response | null;
+      const endAction = manager.beginAction(tab, "tab_open", owner);
       try {
-        response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
-      } catch (error) {
-        let text: string;
-        try {
-          text = await downloadInstead(manager, tab, startedAt, error);
-        } catch (failure) {
-          manager.markSeen(tab);
-          throw new ToolError(
-            `${describeError(failure)}\nTab ${tab.id} was opened and stays open at ${tab.page.isClosed() ? "a closed page" : tab.page.url()} so the error page can be inspected.`,
-            `Use navigate on ${tab.id} to try again, or tab_close to close it.`,
-          );
-        }
-        manager.markSeen(tab);
-        return `Opened ${tab.id}.\n${text}`;
+        return await openIn(tab, input);
+      } finally {
+        endAction();
       }
-      manager.markSeen(tab);
-      await watchConsent(tab, manager.config.autoConsent);
-      const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
-      lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
-      lines.push(...manager.drainEvents(tab, startedAt));
-      const notes = await siteNotesHint(manager.config.sitesDir, tab.page.url());
-      if (notes) lines.push(notes);
-      if (input.include_snapshot) lines.push("", await renderSnapshot(manager, store, tab, { maxChars: 12_000 }));
-      return lines.join("\n");
     },
   });
+
+  async function openIn(tab: Tab, input: { url?: string; wait_until?: "commit" | "domcontentloaded" | "load"; include_snapshot?: boolean }) {
+    if (!input.url) {
+      manager.markSeen(tab);
+      return `Opened ${tab.id} (blank).`;
+    }
+    const startedAt = Date.now();
+    let response: Response | null;
+    try {
+      response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
+    } catch (error) {
+      let text: string;
+      try {
+        text = await downloadInstead(manager, tab, startedAt, error);
+      } catch (failure) {
+        manager.markSeen(tab);
+        throw new ToolError(
+          `${describeError(failure)}\nTab ${tab.id} was opened and stays open at ${tab.page.isClosed() ? "a closed page" : tab.page.url()} so the error page can be inspected.`,
+          `Use navigate on ${tab.id} to try again, or tab_close to close it.`,
+        );
+      }
+      manager.markSeen(tab);
+      return `Opened ${tab.id}.\n${text}`;
+    }
+    manager.markSeen(tab);
+    await watchConsent(tab, manager.config.autoConsent);
+    const lines = [`Opened ${tab.id}: ${await describePage(tab.page)} (HTTP ${response?.status() ?? "-"})`, ...authChallengeLine(response)];
+    lines.push(...(await landingLines(manager, tab, { previousUrl: "about:blank", status: response?.status() })));
+    lines.push(...manager.drainEvents(tab, startedAt));
+    const notes = await siteNotesHint(manager.config.sitesDir, tab.page.url());
+    if (notes) lines.push(notes);
+    if (input.include_snapshot) lines.push("", await renderSnapshot(manager, store, tab, { maxChars: 12_000 }));
+    return lines.join("\n");
+  }
 
   defineTool(server, deps, {
     name: "tab_close",

@@ -144,3 +144,31 @@ test("acting on a tab of another live session is allowed and noted at the start 
   assert.doesNotMatch(await ok(owner, "read_text", { tab, max_chars: 200 }), /belongs to another session/);
   await stopDaemon(daemon);
 });
+
+const EVENT_PREFIX = String.raw`(?:Event \(\d\d:\d\d:\d\d\)|Earlier event \(\d\d:\d\d:\d\d, before this call\)): `;
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("tabs that open or close outside a tool action name the opener, the time and any running tool", async () => {
+  const daemon = await startDaemon(path.join(workDir, "events"));
+  const client = await connect(daemon);
+  const tab = openedId(await ok(client, "tab_open", { url: `${fixture.url}/popups` }));
+  const opener = escaped(`${fixture.url}/popups`);
+
+  const clicked = await ok(client, "click", { tab, target: "#open-popup" });
+  const events = /opened new tab t\d+/.test(clicked) ? clicked : `${clicked}\n${await ok(client, "press", { tab, key: "Shift" })}`;
+  const popup = /opened new tab (t\d+)/.exec(events)?.[1] ?? "";
+  assert.ok(popup, events);
+  assert.match(events, new RegExp(`^${EVENT_PREFIX}opened new tab ${popup} from ${tab} \\(${opener}\\), during click on ${tab}$`, "m"));
+
+  await ok(client, "click", { tab: popup, target: "#finish" });
+  await pause(300);
+  const closed = await ok(client, "press", { tab, key: "Shift" });
+  assert.match(closed, new RegExp(`^${EVENT_PREFIX}tab ${popup} \\(popup\\) closed, with no tool call running on ${tab}; this tab ${tab} is at ${opener}$`, "m"));
+
+  await ok(client, "evaluate", { tab, expression: `document.body.insertAdjacentHTML("beforeend", '<button id="later" onclick="setTimeout(() => window.open(\\'/article\\', \\'_blank\\'), 2500)">Later</button>'); "added"` });
+  await ok(client, "click", { tab, target: "#later" });
+  await pause(4000);
+  const later = await ok(client, "press", { tab, key: "Shift" });
+  assert.match(later, new RegExp(`^Earlier event \\(\\d\\d:\\d\\d:\\d\\d, before this call\\): opened new tab t\\d+ from ${tab} \\(${opener}\\), with no tool call running on ${tab}$`, "m"));
+  await stopDaemon(daemon);
+});

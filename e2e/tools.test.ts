@@ -1190,7 +1190,7 @@ test("browser edge cases", async (t) => {
     assert.ok(popup, opened);
     await ok("click", { tab: popup, target: "#finish" });
     await pause(200);
-    assert.match(await ok("press", { tab, key: "Shift" }), new RegExp(`tab ${popup} \\(popup\\) closed; this tab is at ${fixture.url.replace(/[.]/g, "\\.")}/popups`));
+    assert.match(await ok("press", { tab, key: "Shift" }), new RegExp(`tab ${popup} \\(popup\\) closed, with no tool call running on ${tab}; this tab ${tab} is at ${fixture.url.replace(/[.]/g, "\\.")}/popups`));
   });
 
   await t.test("a popup opened by a click is not reported as blocked", async () => {
