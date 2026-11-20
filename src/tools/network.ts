@@ -99,7 +99,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "network_requests",
     title: "Network requests",
     description: [
-      "List a tab's recent network responses and failures (id, method, status, resource type, URL), newest last, or with id return one request in full: request headers and body, response headers and response body. Use it to find the API call behind a page, a table, a search or an infinite list and read its JSON directly, to see which requests failed (failed_only), or to debug a local app. Credential headers are masked. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for.",
+      "List a tab's recent network responses and failures (id, method, status, resource type, URL), newest last, or with id return one request in full: request headers and body, response headers and response body. Use it to find the API call behind a page, a table, a search or an infinite list and read its JSON directly, to see which requests failed (failed_only), or to debug a local app. Credential headers are masked. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for. Text bodies up to 1 MB are kept as they arrive on tabs an agent opened; on a tab the user opened, they are kept only from the first network_requests or network_export call on it, and earlier bodies are read on demand and may no longer be available.",
       "Once you know the endpoint, request calls it again with other parameters or pages and from_request replays a captured one; network_export writes the whole capture to a HAR file; intercept changes requests and responses.",
     ].join("\n"),
     input: {
@@ -114,6 +114,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
+      tab.captureBodies = true;
       if (input.id !== undefined) {
         const entry = tab.network.find((candidate) => candidate.id === input.id);
         if (!entry) throw new ToolError(`Request ${input.id} is no longer in the buffer of ${tab.id}.`, "List requests again; only the most recent ones are kept.");
@@ -160,6 +161,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
+      tab.captureBodies = true;
       const pattern = input.pattern?.toLowerCase();
       const entries = tab.network
         .filter((entry) => !pattern || entry.url.toLowerCase().includes(pattern))

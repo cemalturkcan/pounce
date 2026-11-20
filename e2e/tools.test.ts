@@ -965,6 +965,25 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab: kept });
   });
 
+  await t.test("response bodies of a user tab are fetched only after a network tool asked for it", async () => {
+    const context = await deps.manager.ensureContext();
+    const page = await context.newPage();
+    try {
+      await page.goto(fixture.url);
+      await page.click("#load");
+      await pause(600);
+      const tab = deps.manager.tabOf(page);
+      assert.ok(tab && tab.network.length > 0);
+      assert.equal(tab.network.filter((entry) => entry.body).length, 0);
+      assert.match(await ok("network_requests", { tab: tab.id }), /GET 200/);
+      await page.reload();
+      await pause(600);
+      assert.ok(tab.network.some((entry) => entry.body), "no body was kept after network_requests asked for the tab");
+    } finally {
+      await page.close();
+    }
+  });
+
   await t.test("tab_open does not take over an unclaimed popup", async () => {
     const context = await deps.manager.ensureContext();
     const parent = await context.newPage();

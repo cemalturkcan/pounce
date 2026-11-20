@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { runPool, TIMED_OUT, untilAborted, withDeadline } from "./async.ts";
-import { sandboxLaunchError } from "./browser.ts";
+import { sandboxLaunchError, shouldRetainBody } from "./browser.ts";
 import { normalizeUrl } from "./collect.ts";
 import { loadConfig, parseLaunchArgs } from "./config.ts";
 import { isAllowedHost, isAllowedOrigin, isDaemonProcess } from "./daemon.ts";
@@ -352,4 +352,25 @@ test("the default ask adapter file is ~/.config/web-agent-mcp/ask-adapter.mjs an
   assert.equal(fallback.askAdapterPath, path.join(home, ".config", "web-agent-mcp", "ask-adapter.mjs"));
   assert.equal(fallback.askAdapter, undefined);
   assert.equal(loadConfig({ HOME: home, WEB_AGENT_ASK_ADAPTER: " /opt/adapters/mine.mjs " }).askAdapter, "/opt/adapters/mine.mjs");
+});
+
+test("response bodies are fetched for agent tabs and watched tabs, never above the size limit", () => {
+  const html = { "content-type": "text/html" };
+  assert.equal(shouldRetainBody({ owner: "session-1" }, html), true);
+  assert.equal(shouldRetainBody({ owner: "orphaned" }, html), true);
+  assert.equal(shouldRetainBody({ owner: "browser" }, html), false);
+  assert.equal(shouldRetainBody({ owner: "browser", captureBodies: true }, html), true);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { ...html, "content-length": String(2 * 1024 * 1024) }), false);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { "content-type": "image/png" }), false);
+  assert.equal(shouldRetainBody({ owner: "session-1" }, { "content-type": "text/event-stream" }), false);
+});
+
+test("pruning runs at start and again on every interval", async () => {
+  const { startPruning } = await import("./server.ts");
+  let store = 0;
+  let log = 0;
+  const stop = startPruning({ store: { prune: async () => void (store += 1) }, log: { prune: async () => ((log += 1), 0), log: () => undefined } }, 40);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  stop();
+  assert.ok(store >= 3 && log >= 3, `store ${store}, log ${log}`);
 });

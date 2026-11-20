@@ -80,6 +80,7 @@ export type Tab = {
   openerId?: string;
   lastSeenUrl?: string;
   closingByTool?: boolean;
+  captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
 };
 
@@ -98,6 +99,14 @@ function evictBodies(entries: NetworkEntry[], keep: NetworkEntry, budget: number
     total -= candidate.body.length;
     candidate.body = undefined;
   }
+}
+
+export function shouldRetainBody(tab: Pick<Tab, "owner" | "captureBodies">, headers: Record<string, string>) {
+  if (tab.owner === UNCLAIMED_OWNER && !tab.captureBodies) return false;
+  const contentType = headers["content-type"];
+  if (!isTextualMime(contentType) || isStreamingMime(contentType)) return false;
+  const length = Number(headers["content-length"]);
+  return !(Number.isFinite(length) && length > BODY_ENTRY_LIMIT);
 }
 
 export function pushEvent(tab: Tab, text: string | (() => string)) {
@@ -383,8 +392,7 @@ export class BrowserManager {
         response,
       };
       pushBounded(tab.network, entry, NETWORK_LIMIT);
-      const contentType = response.headers()["content-type"];
-      if (isTextualMime(contentType) && !isStreamingMime(contentType)) {
+      if (shouldRetainBody(tab, response.headers())) {
         void response
           .body()
           .then((body) => this.retainBody(tab, entry, body))
