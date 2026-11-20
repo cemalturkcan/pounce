@@ -66,6 +66,7 @@ The user message holds the pages, each in a <document source="..."> block, and t
 </pages>
 
 <answering>
+The question applies to every page separately, even when it is worded for a single one: "this product", "this site", "this page" or "this plan" means the product, site, page or plan that each page is about. Answer it for each page from that page's own content, so a batch of fifteen pricing pages gets an answer for each of the fifteen products. List a page as NOT FOUND only when it lacks the facts the question asks for, not because another page was answered or because the page is about a different product than the others.
 Answer from the pages alone, without outside knowledge or guesses.
 Write every line in the language of the question, even when the pages are in another language, because the agent passes your lines on to the person who asked: a question in Turkish over English pages gets Turkish lines. Names, quoted text, numbers and source names stay as they are.
 Write one fact per line and name its subject, so the line still makes sense next to lines about other pages: "The Orbit desk lamp weighs 1.2 kg", not "Weight: 1.2 kg". Keep the conditions a page attaches to a fact, such as a date, a mode or a region, and leave out details the question did not ask about.
@@ -157,7 +158,7 @@ export function buildPrompt(question: string, documents: AskDocument[], mode: As
     return block;
   });
   if (mode === "review") return `${blocks.join("\n\n")}\n\n<request>\n${question}\n</request>\n\nReview the pages above for visual and layout issues, in the language of the request.`;
-  return `${blocks.join("\n\n")}\n\n<question>\n${question}\n</question>\n\nAnswer the question from the pages above, in the language of the question.`;
+  return `${blocks.join("\n\n")}\n\n<question>\n${question}\n</question>\n\nAnswer the question for each page separately, from that page alone, in the language of the question.`;
 }
 
 function sourceTokens(source: string) {
