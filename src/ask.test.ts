@@ -8,6 +8,7 @@ import {
   askPages,
   buildPrompt,
   AskAdapterSource,
+  exceedsContextWindow,
   clipDocument,
   loadAdapterModule,
   packBatches,
@@ -425,4 +426,85 @@ test("an empty reply cut off at the output limit or refused is reported, not rea
   const text = renderAskResults("q", report, "empty", "m");
   assert.match(text, /call 1 \[cut\.md\]: answer cut off at the output limit/);
   assert.match(text, /call 2 \[refused\.md\]: the model refused to answer/);
+});
+
+test("askPages sets no time limit by default, so a slow call is not cut off", async () => {
+  const adapter: AskAdapter = {
+    name: "slow but answering",
+    complete: async ({ signal, prompt }) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(signal.aborted, false);
+      return { text: `- ok [${promptSources(prompt)[0]}]` };
+    },
+  };
+  const { timeoutMs: _unused, ...withoutTimeout } = askOptions([doc("a.md", 10)]);
+  const report = await askPages(adapter, withoutTimeout);
+  assert.deepEqual(report.batches[0]?.answers, ["- ok [a.md]"]);
+});
+
+test("askPages ends its calls when the caller's signal aborts", async () => {
+  const controller = new AbortController();
+  let aborted = false;
+  const adapter: AskAdapter = {
+    name: "hanging",
+    complete: ({ signal }) =>
+      new Promise((_resolve, reject) =>
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(signal.reason as Error);
+        }),
+      ),
+  };
+  setTimeout(() => controller.abort(), 50);
+  const { timeoutMs: _unused, ...withoutTimeout } = askOptions([doc("a.md", 10)]);
+  await assert.rejects(askPages(adapter, { ...withoutTimeout, signal: controller.signal }), /cancelled/);
+  assert.equal(aborted, true);
+});
+
+test("exceedsContextWindow recognises Anthropic prompt-too-long errors only", () => {
+  const yes = [
+    "Anthropic Messages returned HTTP 400: invalid_request_error: prompt is too long: 1052114 tokens > 1000000 maximum",
+    "Anthropic Messages returned HTTP 400: invalid_request_error: input length and `max_tokens` exceed context limit: 990000 + 128000 > 1000000, decrease input length or `max_tokens` and try again",
+    "Anthropic Messages stream error: invalid_request_error: Prompt is too long",
+    "invalid_request_error: The request exceeds the model's context window",
+  ];
+  const no = [
+    "Anthropic Messages returned HTTP 400: invalid_request_error: max_tokens: 200000 > 128000, which is the maximum allowed number of output tokens",
+    "Anthropic Messages returned HTTP 429: rate_limit_error: prompt is too long for this rate limit",
+    "Anthropic Messages returned HTTP 413: request_too_large: Request exceeds the maximum allowed number of bytes",
+    "prompt is too long",
+    "rate limited",
+  ];
+  for (const message of yes) assert.equal(exceedsContextWindow(new Error(message)), true, message);
+  for (const message of no) assert.equal(exceedsContextWindow(new Error(message)), false, message);
+  assert.equal(exceedsContextWindow(yes[0]), true);
+});
+
+test("a batch that exceeds the context window is split in half until it fits, and a page that never fits fails alone", async () => {
+  const seen: string[] = [];
+  const adapter: AskAdapter = {
+    name: "small context",
+    complete: async ({ prompt }) => {
+      const sources = promptSources(prompt);
+      seen.push(sources.join(","));
+      const size = [...prompt.matchAll(/">\n(x*)\n<\/document>/g)].reduce((total, match) => total + (match[1]?.length ?? 0), 0);
+      if (size > 250) throw new Error(`Anthropic Messages returned HTTP 400: invalid_request_error: prompt is too long: ${size} tokens > 250 maximum`);
+      return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
+    },
+  };
+  const report = await askPages(adapter, askOptions([doc("a.md", 100), doc("b.md", 100), doc("c.md", 100), doc("d.md", 50), doc("huge.md", 900)], { concurrency: 1 }));
+  assert.deepEqual(seen, ["a.md,b.md,c.md,d.md,huge.md", "a.md,b.md,c.md", "a.md,b.md", "c.md", "d.md,huge.md", "d.md", "huge.md"]);
+  assert.deepEqual(report.batches.map((batch) => batch.sources.join(",")), ["a.md,b.md", "c.md", "d.md", "huge.md"]);
+  assert.deepEqual(report.batches.map((batch) => batch.index), [1, 2, 3, 4]);
+  assert.deepEqual(report.batches.flatMap((batch) => batch.answers), ["- seen [a.md]", "- seen [b.md]", "- seen [c.md]", "- seen [d.md]"]);
+  const failed = report.batches.at(-1);
+  assert.match(failed?.error ?? "", /^the page does not fit the model's context window on its own: .*prompt is too long/);
+  const text = renderAskResults("q", report, adapter.name, "m");
+  assert.match(text, /call 4 \[huge\.md\]: the page does not fit the model's context window on its own/);
+});
+
+test("failures other than a context overflow are not split", async () => {
+  const adapter: AskAdapter = { name: "broken", complete: async () => { throw new Error("upstream down"); } };
+  const report = await askPages(adapter, askOptions([doc("a.md", 10), doc("b.md", 10)]));
+  assert.deepEqual(report.batches.map((batch) => [batch.sources.join(","), batch.error]), [["a.md,b.md", "upstream down"]]);
 });

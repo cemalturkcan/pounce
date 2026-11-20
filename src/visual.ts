@@ -53,7 +53,7 @@ export type CompareReport = {
   text: string;
 };
 
-export const DEFAULTS = { tolerance: 0.1, minRegionArea: 64, maxRegions: 10, mergeGap: 12, concurrency: 4, timeoutMs: 180_000, fullPageViewportHeight: 1080 };
+export const DEFAULTS = { tolerance: 0.1, minRegionArea: 64, maxRegions: 10, mergeGap: 12, concurrency: 4, fullPageViewportHeight: 1080 };
 const STEP_TIMEOUT_MS = 20_000;
 const CAPTURE_TIMEOUT_MS = 60_000;
 const MAX_CAPTURE_PIXELS_HIGH = 16_384;
@@ -261,7 +261,7 @@ async function runModel(deps: CompareDeps, page: Page, options: CompareOptions, 
     model: id,
     maxTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     concurrency: options.concurrency ?? DEFAULTS.concurrency,
-    timeoutMs: options.timeoutMs ?? DEFAULTS.timeoutMs,
+    timeoutMs: options.timeoutMs,
     deviceScaleFactor,
     transcode: browserTranscoder(page),
     signal: options.signal,

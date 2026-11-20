@@ -18,7 +18,7 @@ export type ModelLayerOptions = {
   model: string;
   maxTokens: number;
   concurrency: number;
-  timeoutMs: number;
+  timeoutMs?: number;
   deviceScaleFactor: number;
   transcode: Transcode;
   signal?: AbortSignal;
@@ -116,7 +116,7 @@ function overviewPrompt(reference: RgbaImage, page: RgbaImage) {
   return `Image 1 is the whole design (${reference.width} x ${reference.height} px), image 2 is the whole page (${page.width} x ${page.height} px). List the design elements that are missing on the page.`;
 }
 
-function failureReason(error: unknown, timeoutMs: number) {
+function failureReason(error: unknown, timeoutMs: number | undefined) {
   if (error instanceof Error && error.name === "TimeoutError") return `no answer within ${timeoutMs} ms`;
   const message = error instanceof Error ? error.message : String(error);
   const line = message.split("\n")[0] ?? "";
@@ -144,9 +144,9 @@ export async function describeDifferences(adapter: AskAdapter, options: ModelLay
   const ask = async (system: string, prompt: string, prepared: PreparedImage[], call: string) => {
     sent.push(...prepared);
     const images: AskImage[] = prepared.map((entry) => entry.image);
-    const signals = [AbortSignal.timeout(options.timeoutMs), ...(options.signal ? [options.signal] : [])];
+    const signals = [...(options.timeoutMs === undefined ? [] : [AbortSignal.timeout(options.timeoutMs)]), ...(options.signal ? [options.signal] : [])];
     calls += 1;
-    const reply: AskReply = await completeLogged(adapter, { system, prompt, model: options.model, maxTokens: options.maxTokens, images, signal: AbortSignal.any(signals) }, { tool: "compare_design", call });
+    const reply: AskReply = await completeLogged(adapter, { system, prompt, model: options.model, maxTokens: options.maxTokens, images, signal: signals.length ? AbortSignal.any(signals) : new AbortController().signal }, { tool: "compare_design", call });
     if (typeof reply?.text !== "string") throw new Error(`${adapter.name} returned no text.`);
     addUsage(usage, reply.usage);
     if (reply.stopReason === "refusal") throw new Error("the model refused to answer (stop reason refusal)");

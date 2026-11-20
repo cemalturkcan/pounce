@@ -1274,6 +1274,50 @@ test("ask_pages edge cases through the tool", async (t) => {
       assert.deepEqual(models, ["claude-opus-5-5 128000", "local-llm-7b 2000"]);
     });
 
+    await t.test("a client cancellation ends the model calls, which have no time limit of their own", async () => {
+      let aborted = false;
+      deps.ask = new AskAdapterSource({
+        adapter: {
+          name: "hanging adapter",
+          complete: ({ signal }) =>
+            new Promise((_resolve, reject) =>
+              signal.addEventListener("abort", () => {
+                aborted = true;
+                reject(signal.reason as Error);
+              }),
+            ),
+        },
+      });
+      const controller = new AbortController();
+      const pending = client.callTool({ name: "ask_pages", arguments: { question: "What is here?", files: [files[0]] } }, undefined, { signal: controller.signal, timeout: 600_000 });
+      setTimeout(() => controller.abort(), 300);
+      await assert.rejects(pending);
+      for (let waited = 0; !aborted && waited < 3000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+      deps.ask = new AskAdapterSource({ adapter: scripted });
+      assert.equal(aborted, true);
+    });
+
+    await t.test("a call that exceeds the context window is split and retried per page", async () => {
+      const prompts: number[] = [];
+      deps.ask = new AskAdapterSource({
+        adapter: {
+          name: "one page context",
+          complete: async ({ prompt }) => {
+            const sources = [...prompt.matchAll(/<document source="([^"]+)">/g)].map((match) => match[1] ?? "");
+            prompts.push(sources.length);
+            if (sources.length > 1) throw new Error("Anthropic Messages returned HTTP 400: invalid_request_error: prompt is too long: 1200000 tokens > 1000000 maximum");
+            return { text: `- seen [${sources[0]}]` };
+          },
+        },
+      });
+      const text = await ok("ask_pages", { question: "What is here?", files });
+      deps.ask = new AskAdapterSource({ adapter: scripted });
+      assert.deepEqual(prompts, [2, 1, 1]);
+      assert.match(text, new RegExp(`^- seen \\[${left}/`, "m"));
+      assert.match(text, new RegExp(`^- seen \\[${right}/`, "m"));
+      assert.doesNotMatch(text, /Failed calls/);
+    });
+
     await t.test("urls are collected and sent through the injected adapter", async () => {
       const text = await ok("ask_pages", { question: "What is here?", urls: [`${fixture.url}/doc`] });
       assert.match(text, /^- seen \[01-127-0-0-1-\d+-doc\.md\]$/m);

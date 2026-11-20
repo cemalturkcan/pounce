@@ -50,7 +50,8 @@ export type AskOptions = {
   concurrency: number;
   model: string;
   maxTokens: number;
-  timeoutMs: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 export const ASK_SYSTEM = `You answer one question from a set of web pages for a research agent. The agent never sees the pages: it reads only your reply, merged line by line with the replies of other calls like this one over other pages, so every line has to stand on its own and say which page it came from.
@@ -225,12 +226,28 @@ export function describeUsage(usage: AskUsage) {
     .join(", ");
 }
 
-function failureReason(error: unknown, timeoutMs: number) {
+function failureReason(error: unknown, timeoutMs: number | undefined) {
   if (error instanceof Error && error.name === "TimeoutError") return `no answer within ${timeoutMs} ms`;
   const message = error instanceof Error ? error.message : String(error);
   const line = message.split("\n")[0] ?? "";
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
+
+const CONTEXT_OVERFLOW = /prompt is too long|exceeds? (?:the )?(?:model'?s? )?context (?:window|limit|length)/i;
+
+export function exceedsContextWindow(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\binvalid_request_error\b/.test(message) && CONTEXT_OVERFLOW.test(message);
+}
+
+export const TOO_LARGE_FOR_CONTEXT = "the page does not fit the model's context window on its own";
+
+function callSignal(options: AskOptions) {
+  const signals = [...(options.timeoutMs === undefined ? [] : [AbortSignal.timeout(options.timeoutMs)]), ...(options.signal ? [options.signal] : [])];
+  return signals.length ? AbortSignal.any(signals) : new AbortController().signal;
+}
+
+type BatchOutcome = Omit<BatchResult, "index">;
 
 export async function askPages(adapter: AskAdapter, options: AskOptions): Promise<AskReport> {
   const named = uniqueSources(options.documents);
@@ -245,39 +262,51 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
       return kept;
     });
   const batches = packBatches(documents, options.batchChars, options.maxPagesPerBatch);
-  const results: BatchResult[] = new Array(batches.length);
+  const outcomes: BatchOutcome[][] = new Array(batches.length);
   let cursor = 0;
   let setupError: unknown;
 
+  const run = async (batch: AskDocument[], call: string): Promise<BatchOutcome[]> => {
+    const sources = batch.map((document) => document.source);
+    const started = Date.now();
+    try {
+      const images = batch.flatMap((document) => document.images ?? []);
+      const reply = await completeLogged(
+        adapter,
+        { system: ASK_SYSTEM, prompt: buildPrompt(options.question, batch), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal: callSignal(options) },
+        { tool: "ask_pages", call, pages: batch.length },
+      );
+      if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
+      if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
+      const parsed = parseReply(reply.text, sources);
+      const truncated = reply.stopReason === "max_tokens" ? { truncated: true } : {};
+      const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
+      return [{ sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, ms: Date.now() - started }];
+    } catch (error) {
+      if (error instanceof AskSetupError) setupError = error;
+      const overflow = !setupError && !options.signal?.aborted && exceedsContextWindow(error);
+      if (overflow && batch.length > 1) {
+        const half = Math.ceil(batch.length / 2);
+        const first = await run(batch.slice(0, half), `${call}.1`);
+        const second = await run(batch.slice(half), `${call}.2`);
+        return [...first, ...second];
+      }
+      const reason = failureReason(error, options.timeoutMs);
+      return [{ sources, answers: [], notFound: [], error: overflow ? `${TOO_LARGE_FOR_CONTEXT}: ${reason}` : reason, ms: Date.now() - started }];
+    }
+  };
+
   const worker = async () => {
-    while (cursor < batches.length && !setupError) {
+    while (cursor < batches.length && !setupError && !options.signal?.aborted) {
       const index = cursor;
       cursor += 1;
-      const batch = batches[index] ?? [];
-      const sources = batch.map((document) => document.source);
-      const started = Date.now();
-      try {
-        const signal = AbortSignal.timeout(options.timeoutMs);
-        const images = batch.flatMap((document) => document.images ?? []);
-        const reply = await completeLogged(
-          adapter,
-          { system: ASK_SYSTEM, prompt: buildPrompt(options.question, batch), model: options.model, maxTokens: options.maxTokens, ...(images.length ? { images } : {}), signal },
-          { tool: "ask_pages", call: index + 1, pages: batch.length },
-        );
-        if (typeof reply?.text !== "string") throw new ToolError(`${adapter.name} returned no text.`);
-        if (reply.stopReason === "refusal") throw new ToolError("the model refused to answer (stop reason refusal)");
-        const parsed = parseReply(reply.text, sources);
-        const truncated = reply.stopReason === "max_tokens" ? { truncated: true } : {};
-        const interrupted = reply.stopReason === "interrupted" ? { interrupted: true } : {};
-        results[index] = { index: index + 1, sources, ...parsed, ...truncated, ...interrupted, usage: reply.usage, ms: Date.now() - started };
-      } catch (error) {
-        if (error instanceof AskSetupError) setupError = error;
-        results[index] = { index: index + 1, sources, answers: [], notFound: [], error: failureReason(error, options.timeoutMs), ms: Date.now() - started };
-      }
+      outcomes[index] = await run(batches[index] ?? [], String(index + 1));
     }
   };
   await Promise.all(Array.from({ length: Math.min(options.concurrency, batches.length) }, worker));
   if (setupError) throw setupError;
+  if (options.signal?.aborted) throw new ToolError("The call was cancelled before every model call finished.");
+  const results = outcomes.flat().map((outcome, index) => ({ index: index + 1, ...outcome }));
   return { batches: results, empty, clipped };
 }
 

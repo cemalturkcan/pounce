@@ -142,3 +142,18 @@ test("a region call that never answers is cut at the timeout", async () => {
   clearTimeout(keepAlive);
   assert.equal(result.regions[0]?.error, "no answer within 60 ms");
 });
+
+test("region calls have no time limit by default", async () => {
+  const adapter: AskAdapter = {
+    name: "slow",
+    complete: async ({ signal }) => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      assert.equal(signal.aborted, false);
+      return { text: "SAME" };
+    },
+  };
+  const { timeoutMs: _unused, ...withoutTimeout } = baseOptions;
+  const result = await describeDifferences(adapter, { ...withoutTimeout, crops: crops(1), overview: undefined });
+  assert.equal(result.regions[0]?.error, undefined);
+  assert.equal(result.regions[0]?.same, true);
+});

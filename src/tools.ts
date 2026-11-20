@@ -60,9 +60,9 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
       regions: z.array(z.object({ target: z.string().min(1).describe("Ref or selector of an element to capture on every page, such as a chart or a price box.") })).max(50).optional().describe("Element screenshots to send with each tab or url, in addition to images."),
       concurrency: z.number().int().min(1).max(8).optional().describe("Model calls running at once. Default 4."),
       model: z.string().optional().describe("haiku (default), sonnet or opus, sent to the adapter as claude-haiku-5-5, claude-sonnet-5-5 or claude-opus-5-5; any other string is passed to the adapter unchanged."),
-      timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. Default 180000."),
+      timeout_ms: z.number().int().min(10_000).max(900_000).optional().describe("Time limit per model call in milliseconds. No limit by default; a call still ends when the client cancels the request."),
     },
-    handler: async (input, owner) => {
+    handler: async (input, owner, signal) => {
       const given = [input.files, input.dir, input.urls, input.tabs].filter((value) => value !== undefined).length;
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
       const adapter = await deps.ask.get();
@@ -140,7 +140,8 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
         concurrency: input.concurrency ?? 4,
         model,
         maxTokens: input.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-        timeoutMs: input.timeout_ms ?? 180_000,
+        timeoutMs: input.timeout_ms,
+        signal,
       });
       const prepared = [...shots.values()].flatMap((captured) => captured.prepared);
       const sentLine = prepared.length ? `\n${describeSent(prepared)}` : "";
