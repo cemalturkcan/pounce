@@ -118,6 +118,17 @@ test("a tab id from before a daemon restart is not open afterwards and never nam
   assert.notEqual(fresh, old);
   const stale = await call(after, "snapshot", { tab: old });
   assert.equal(stale.isError, true, stale.text);
-  assert.match(stale.text, new RegExp(`Tab ${old} is not open`));
+  assert.match(stale.text, new RegExp(`Tab ${old} is not open \\(it was at ${fixture.url}/article "Fixture Article"\\); it was open before the daemon restarted`));
   await stopDaemon(second);
+});
+
+test("a tab closed in this daemon is described with its last url and title", async () => {
+  const daemon = await startDaemon(path.join(workDir, "closed"));
+  const client = await connect(daemon);
+  const tab = openedId(await ok(client, "tab_open", { url: `${fixture.url}/doc` }));
+  await ok(client, "tab_close", { tab });
+  const gone = await call(client, "snapshot", { tab });
+  assert.equal(gone.isError, true);
+  assert.match(gone.text, new RegExp(`^Tab ${tab} is not open \\(it was at ${fixture.url}/doc "Fixture Doc"\\); it was closed\\.`));
+  await stopDaemon(daemon);
 });

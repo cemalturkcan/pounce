@@ -10,7 +10,7 @@ import { timestampSlug } from "./output.ts";
 import { clearStaleProfileLock } from "./profile-lock.ts";
 import { ProfileSettings } from "./profile-settings.ts";
 import { parseRef } from "./snapshot.ts";
-import { TabCounter } from "./tab-ids.ts";
+import { describeMissingTab, TabCounter, TabHistory } from "./tab-ids.ts";
 
 const CONSOLE_LIMIT = 300;
 const NETWORK_LIMIT = 1000;
@@ -27,7 +27,6 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 const POPUP_GRACE_MS = 600;
 const DOWNLOAD_START_MS = 3000;
 const DOWNLOAD_SAVE_MS = 60_000;
-const CLOSED_OUTSIDE_LIMIT = 200;
 export const LEAVE_CANCELLED = "the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
 const PASSKEY_KEY = "webAgent.passkey";
 const ISOLATED_WORLD = "web-agent-isolated";
@@ -80,6 +79,7 @@ export type Tab = {
   downloads: { at: number; name: string; saving: Promise<string> }[];
   openerId?: string;
   lastSeenUrl?: string;
+  title?: string;
   closingByTool?: boolean;
   captureBodies?: boolean;
   unload?: { force: boolean; onBlocked?: () => void };
@@ -221,7 +221,7 @@ export class BrowserManager {
   private context?: BrowserContext;
   private readonly tabs = new Map<string, Tab>();
   private readonly byPage = new WeakMap<Page, Tab>();
-  private readonly closedOutside = new Set<string>();
+  private readonly history: TabHistory;
   private readonly recentPages: { at: number; page: Page }[] = [];
   private readonly ids: TabCounter;
   private browserVersion?: string;
@@ -232,6 +232,7 @@ export class BrowserManager {
   constructor(config: Config) {
     this.config = config;
     this.ids = new TabCounter(config.dataDir);
+    this.history = new TabHistory(config.dataDir, () => this.listTabs().map((tab) => ({ id: tab.id, url: tab.page.url(), title: tab.title })));
     setInterval(() => {
       if (this.running) void this.closeIdleOrphans().catch(() => undefined);
     }, ORPHAN_SWEEP_MS).unref();
@@ -306,6 +307,7 @@ export class BrowserManager {
     else logEvent("browser_closed", { reason: "unexpected", tabs: this.tabs.size }, "warn");
     this.context = undefined;
     this.contextPromise = undefined;
+    for (const tab of this.tabs.values()) this.history.closed({ id: tab.id, url: tab.page.url(), title: tab.title }, this.shuttingDown ? "restart" : "closed-outside");
     this.tabs.clear();
   }
 
@@ -352,6 +354,18 @@ export class BrowserManager {
     let networkId = 0;
 
     page.on("close", () => this.onClose(tab));
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) this.history.changed();
+    });
+    page.on("load", () => {
+      void page
+        .title()
+        .then((title) => {
+          tab.title = title;
+          this.history.changed();
+        })
+        .catch(() => undefined);
+    });
     page.on("crash", () => {
       logEvent("tab_crash", { tab: tab.id, owner: tab.owner, url: page.url() }, "warn");
       pushEvent(tab, "the page crashed; reload it with navigate or close the tab");
@@ -432,11 +446,8 @@ export class BrowserManager {
   private onClose(tab: Tab) {
     this.tabs.delete(tab.id);
     for (const check of [...tab.popupChecks]) check.finish(false);
-    if (!tab.closingByTool) {
-      if (!this.shuttingDown) logEvent("tab_closed_outside", { tab: tab.id, owner: tab.owner, url: tab.page.url() });
-      this.closedOutside.add(tab.id);
-      if (this.closedOutside.size > CLOSED_OUTSIDE_LIMIT) this.closedOutside.delete(this.closedOutside.values().next().value ?? "");
-    }
+    if (!tab.closingByTool && !this.shuttingDown) logEvent("tab_closed_outside", { tab: tab.id, owner: tab.owner, url: tab.page.url() });
+    this.history.closed({ id: tab.id, url: tab.page.url(), title: tab.title }, this.shuttingDown ? "restart" : tab.closingByTool ? "closed" : "closed-outside");
     const opener = tab.openerId ? this.tabs.get(tab.openerId) : undefined;
     if (opener && !opener.page.isClosed()) pushEvent(opener, () => `tab ${tab.id} (popup) closed; this tab is at ${opener.page.url()}`);
   }
@@ -539,12 +550,11 @@ export class BrowserManager {
   getTab(id: string) {
     const tab = this.tabs.get(id.trim());
     if (tab && !tab.page.isClosed()) return tab;
-    const closedOutside = this.closedOutside.has(id.trim());
     const open = this.listTabs()
       .map((candidate) => `${candidate.id} (${candidate.page.url()})`)
       .join(", ");
     throw new ToolError(
-      closedOutside ? `Tab ${id} was closed outside this session.` : `Tab ${id} is not open.`,
+      describeMissingTab(id.trim(), this.history.find(id.trim())),
       open ? `Open tabs: ${open}.` : "No tabs are open. Use tab_open to create one.",
     );
   }
@@ -718,9 +728,11 @@ export class BrowserManager {
     const context = this.context;
     if (!context) return;
     this.shuttingDown = true;
+    this.history.flush();
     await Promise.race([
       context.close().catch(() => undefined),
       new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
     ]);
+    this.history.flush();
   }
 }

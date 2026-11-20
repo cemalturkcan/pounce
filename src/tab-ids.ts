@@ -58,3 +58,91 @@ export class TabCounter {
     }
   }
 }
+
+export const TAB_HISTORY_FILE = "tab-history.json";
+const HISTORY_LIMIT = 200;
+const HISTORY_SAVE_DELAY_MS = 1000;
+
+export type TabEnd = "closed" | "closed-outside" | "restart";
+export type TabSighting = { id: string; url: string; title?: string };
+export type KnownTab = TabSighting & { end: TabEnd };
+
+const END_TEXT: Record<TabEnd, string> = {
+  closed: "it was closed",
+  "closed-outside": "it was closed outside this session",
+  restart: "it was open before the daemon restarted, and tab ids are never reused",
+};
+
+export function describeMissingTab(id: string, known: KnownTab | undefined) {
+  if (!known) return `Tab ${id} is not open.`;
+  const title = known.title ? ` ${JSON.stringify(known.title)}` : "";
+  return `Tab ${id} is not open (it was at ${known.url}${title}); ${END_TEXT[known.end]}.`;
+}
+
+function isKnownTab(value: unknown): value is KnownTab {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.id === "string" && typeof entry.url === "string" && (entry.title === undefined || typeof entry.title === "string") && typeof entry.end === "string" && entry.end in END_TEXT;
+}
+
+type HistoryOptions = { limit?: number; delayMs?: number };
+
+export class TabHistory {
+  private readonly file: string;
+  private readonly limit: number;
+  private readonly delayMs: number;
+  private readonly live: () => TabSighting[];
+  private entries?: Map<string, KnownTab>;
+  private timer?: NodeJS.Timeout;
+
+  constructor(dataDir: string, live: () => TabSighting[], options: HistoryOptions = {}) {
+    this.file = path.join(dataDir, TAB_HISTORY_FILE);
+    this.live = live;
+    this.limit = Math.max(1, options.limit ?? HISTORY_LIMIT);
+    this.delayMs = options.delayMs ?? HISTORY_SAVE_DELAY_MS;
+  }
+
+  find(id: string) {
+    return this.loaded().get(id);
+  }
+
+  closed(tab: TabSighting, end: TabEnd) {
+    const entries = this.loaded();
+    entries.delete(tab.id);
+    entries.set(tab.id, { id: tab.id, url: tab.url, title: tab.title || undefined, end });
+    while (entries.size > this.limit) entries.delete(entries.keys().next().value ?? "");
+    this.changed();
+  }
+
+  changed() {
+    if (this.timer) return;
+    this.timer = setTimeout(() => this.flush(), this.delayMs);
+    this.timer.unref();
+  }
+
+  flush() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    const open = this.live().map((tab): KnownTab => ({ id: tab.id, url: tab.url, title: tab.title || undefined, end: "restart" }));
+    const openIds = new Set(open.map((tab) => tab.id));
+    const closed = [...this.loaded().values()].filter((entry) => !openIds.has(entry.id));
+    try {
+      writeJsonAtomic(this.file, { tabs: [...closed, ...open].slice(-this.limit) });
+    } catch {
+      return;
+    }
+  }
+
+  private loaded() {
+    if (this.entries) return this.entries;
+    this.entries = new Map();
+    try {
+      const parsed = JSON.parse(readFileSync(this.file, "utf8")) as { tabs?: unknown };
+      const tabs = Array.isArray(parsed.tabs) ? parsed.tabs.filter(isKnownTab) : [];
+      for (const tab of tabs.slice(-this.limit)) this.entries.set(tab.id, { id: tab.id, url: tab.url, title: tab.title, end: tab.end });
+    } catch {
+      return this.entries;
+    }
+    return this.entries;
+  }
+}

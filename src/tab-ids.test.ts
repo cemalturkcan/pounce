@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { RANDOM_BASE_MIN, TabCounter } from "./tab-ids.ts";
+import { describeMissingTab, RANDOM_BASE_MIN, TabCounter, TabHistory } from "./tab-ids.ts";
 
 async function withDir(run: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(path.join(tmpdir(), "web-agent-tab-ids-"));
@@ -57,5 +57,46 @@ test("a counter whose file cannot be written still hands out unique ids", async 
     const counter = new TabCounter(path.join(dir, "missing", "\0bad"), { block: 2 });
     const ids = new Set(Array.from({ length: 7 }, () => counter.next()));
     assert.equal(ids.size, 7);
+  });
+});
+
+test("a missing tab is described with its last known url and title and how it ended", () => {
+  assert.equal(describeMissingTab("t5", undefined), "Tab t5 is not open.");
+  assert.equal(
+    describeMissingTab("t5", { id: "t5", url: "https://shop.test/cart", title: "Cart", end: "closed" }),
+    'Tab t5 is not open (it was at https://shop.test/cart "Cart"); it was closed.',
+  );
+  assert.equal(
+    describeMissingTab("t6", { id: "t6", url: "https://shop.test/", end: "closed-outside" }),
+    "Tab t6 is not open (it was at https://shop.test/); it was closed outside this session.",
+  );
+  assert.match(describeMissingTab("t7", { id: "t7", url: "about:blank", title: "", end: "restart" }), /^Tab t7 is not open \(it was at about:blank\); it was open before the daemon restarted, and tab ids are never reused\.$/);
+});
+
+test("tab history keeps the most recent tabs in memory and across restarts", async () => {
+  await withDir(async (dir) => {
+    let live = [{ id: "t900", url: "https://live.test/", title: "Live" }];
+    const history = new TabHistory(dir, () => live, { limit: 3 });
+    for (const index of [1, 2, 3, 4]) history.closed({ id: `t${index}`, url: `https://x.test/${index}`, title: `Page ${index}` }, "closed");
+    assert.equal(history.find("t1"), undefined);
+    assert.deepEqual(history.find("t4"), { id: "t4", url: "https://x.test/4", title: "Page 4", end: "closed" });
+    history.flush();
+    live = [];
+    const reloaded = new TabHistory(dir, () => live, { limit: 3 });
+    assert.equal(reloaded.find("t2"), undefined);
+    assert.equal(reloaded.find("t3")?.end, "closed");
+    assert.deepEqual(reloaded.find("t900"), { id: "t900", url: "https://live.test/", title: "Live", end: "restart" });
+    const saved = JSON.parse(await readFile(path.join(dir, "tab-history.json"), "utf8")) as { tabs: unknown[] };
+    assert.equal(saved.tabs.length, 3);
+  });
+});
+
+test("a corrupt tab history file is ignored", async () => {
+  await withDir(async (dir) => {
+    await writeFile(path.join(dir, "tab-history.json"), "[1,");
+    const history = new TabHistory(dir, () => []);
+    assert.equal(history.find("t1"), undefined);
+    history.closed({ id: "t1", url: "https://x.test/" }, "closed-outside");
+    assert.equal(history.find("t1")?.end, "closed-outside");
   });
 });

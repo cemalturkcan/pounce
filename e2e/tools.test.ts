@@ -1225,7 +1225,7 @@ test("browser edge cases", async (t) => {
     await deps.manager.getTab(other).page.close();
     const result = await call("snapshot", { tab: other });
     assert.equal(result.isError, true);
-    assert.match(result.text, new RegExp(`^Tab ${other} was closed outside this session\\.`));
+    assert.match(result.text, new RegExp(`^Tab ${other} is not open \\(it was at ${fixture.url}/ "Fixture Home"\\); it was closed outside this session\\.`));
   });
 
   await t.test("fill picks the matching option of a custom combobox", async () => {
