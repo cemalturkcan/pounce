@@ -29,6 +29,8 @@ const DOWNLOAD_SAVE_MS = 60_000;
 const CLOSED_OUTSIDE_LIMIT = 200;
 export const LEAVE_CANCELLED = "the page asked to confirm leaving (unsaved changes); navigation was cancelled. Call navigate again with force: true to leave anyway.";
 const PASSKEY_KEY = "webAgent.passkey";
+export const ORPHAN_IDLE_MS = 30 * 60 * 1000;
+const ORPHAN_SWEEP_MS = 5 * 60 * 1000;
 
 export type ConsoleEntry = {
   level: string;
@@ -64,6 +66,8 @@ export type Tab = {
   page: Page;
   owner: string;
   createdAt: number;
+  lastUsedAt: number;
+  orphanedAt?: number;
   console: ConsoleEntry[];
   network: NetworkEntry[];
   events: TabEvent[];
@@ -197,6 +201,9 @@ export class BrowserManager {
 
   constructor(config: Config) {
     this.config = config;
+    setInterval(() => {
+      if (this.running) void this.closeIdleOrphans().catch(() => undefined);
+    }, ORPHAN_SWEEP_MS).unref();
   }
 
   get running() {
@@ -297,6 +304,7 @@ export class BrowserManager {
       page,
       owner: UNCLAIMED_OWNER,
       createdAt: Date.now(),
+      lastUsedAt: Date.now(),
       console: [],
       network: [],
       events: [],
@@ -494,6 +502,7 @@ export class BrowserManager {
   }
 
   markSeen(tab: Tab) {
+    tab.lastUsedAt = Date.now();
     if (!tab.page.isClosed()) tab.lastSeenUrl = tab.page.url();
   }
 
@@ -592,7 +601,9 @@ export class BrowserManager {
 
   claimIfOrphaned(id: string, owner: string) {
     const tab = this.tabs.get(id.trim());
-    if (tab?.owner === ORPHANED_OWNER) tab.owner = owner;
+    if (tab?.owner !== ORPHANED_OWNER) return;
+    tab.owner = owner;
+    tab.orphanedAt = undefined;
   }
 
   orphanTabsOf(owner: string) {
@@ -600,9 +611,27 @@ export class BrowserManager {
     for (const tab of this.tabs.values()) {
       if (tab.owner !== owner) continue;
       tab.owner = ORPHANED_OWNER;
+      tab.orphanedAt = Date.now();
       count += 1;
     }
     return count;
+  }
+
+  async closeIdleOrphans(now = Date.now()) {
+    const idle = this.listTabs().filter((tab) => tab.owner === ORPHANED_OWNER && now - Math.max(tab.orphanedAt ?? 0, tab.lastUsedAt) > ORPHAN_IDLE_MS);
+    let closed = 0;
+    for (const tab of idle) {
+      const url = tab.page.url();
+      const idleMinutes = Math.round((now - Math.max(tab.orphanedAt ?? 0, tab.lastUsedAt)) / 60_000);
+      try {
+        await this.closeTab(tab.id);
+        closed += 1;
+        logEvent("orphan_tab_closed", { tab: tab.id, url, idleMinutes });
+      } catch (error) {
+        logEvent("orphan_tab_close_failed", { tab: tab.id, url, error: error instanceof Error ? error.message : String(error) }, "warn");
+      }
+    }
+    return closed;
   }
 
   locate(tab: Tab, target: string): Locator {

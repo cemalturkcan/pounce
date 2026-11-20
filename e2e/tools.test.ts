@@ -12,7 +12,7 @@ import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
-import { CONTENT, FEED_TOTAL, FRAME_TEXT, hangRequests, SPA_TEXT } from "./fixture.ts";
+import { CONTENT, FEED_TOTAL, FRAME_TEXT, stallRequests, SPA_TEXT } from "./fixture.ts";
 
 const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
 
@@ -897,6 +897,27 @@ test("review regressions", async (t) => {
     await ok("tab_close", { tab });
   });
 
+  await t.test("a failed tab_open names the tab it opened and keeps it", async () => {
+    const failed = await call("tab_open", { url: "http://127.0.0.1:9/" });
+    assert.equal(failed.isError, true);
+    const tab = /Tab (t\d+) was opened/.exec(failed.text)?.[1] ?? "";
+    assert.ok(tab, failed.text);
+    assert.match(await ok("tabs_list"), new RegExp(`^${tab} \\[yours\\]`, "m"));
+    await ok("tab_close", { tab });
+  });
+
+  await t.test("orphaned tabs close after 30 idle minutes", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    const kept = openedTab(await ok("tab_open", { url: fixture.url }));
+    assert.ok(deps.manager.orphanTabsOf("stdio") >= 2);
+    for (const other of deps.manager.listTabs()) if (other.id !== tab) deps.manager.claimIfOrphaned(other.id, "stdio");
+    assert.equal(await deps.manager.closeIdleOrphans(Date.now() + 10 * 60_000), 0);
+    assert.equal(await deps.manager.closeIdleOrphans(Date.now() + 31 * 60_000), 1);
+    assert.doesNotMatch(await ok("tabs_list"), new RegExp(`^${tab} `, "m"));
+    assert.match(await ok("tabs_list"), new RegExp(`^${kept} \\[yours\\]`, "m"));
+    await ok("tab_close", { tab: kept });
+  });
+
   await t.test("tab_open does not take over an unclaimed popup", async () => {
     const context = await deps.manager.ensureContext();
     const parent = await context.newPage();
@@ -1396,7 +1417,7 @@ test("ask_pages edge cases through the tool", async (t) => {
     await t.test("cancelling ask_pages with urls stops the collection", async () => {
       const before = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
       const controller = new AbortController();
-      const urls = Array.from({ length: 12 }, (_value, index) => `${fixture.url}/hang?${index}`);
+      const urls = Array.from({ length: 12 }, (_value, index) => `${fixture.url}/stall?${index}`);
       const pending = client.callTool({ name: "ask_pages", arguments: { question: "What is here?", urls, images: "none" } }, undefined, { signal: controller.signal, timeout: 120_000 });
       await pause(1500);
       controller.abort();
@@ -1404,7 +1425,7 @@ test("ask_pages edge cases through the tool", async (t) => {
       await pause(1500);
       const after = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
       assert.ok(after <= before, `tabs still open: ${after} > ${before}`);
-      assert.ok(hangRequests() <= 6, `collection kept going: ${hangRequests()} hanging requests`);
+      assert.ok(stallRequests() <= 6, `collection kept going: ${stallRequests()} stalled requests`);
     });
   } finally {
     failAll = false;

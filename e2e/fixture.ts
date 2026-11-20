@@ -352,16 +352,16 @@ function edgeAuthPage(request: http.IncomingMessage, response: http.ServerRespon
     .end(EDGE_HTML("Auth OK", `<p id="auth-state">authorized ${realm}</p><p id="api-state">pending</p><script>fetch("api").then((r) => r.json()).then((d) => { document.getElementById("api-state").textContent = "api " + d.realm; }, () => { document.getElementById("api-state").textContent = "api failed"; });</script>`));
 }
 
-let hanging = 0;
+let stalled = 0;
 
-export const hangRequests = () => hanging;
+export const stallRequests = () => stalled;
 
 function handleEdgeCase(request: http.IncomingMessage, response: http.ServerResponse) {
   const pathname = (request.url ?? "/").split("?")[0] ?? "/";
-  if (pathname === "/hang") {
-    hanging += 1;
+  if (pathname === "/stall") {
+    stalled += 1;
     response.writeHead(200, { "content-type": "text/html" });
-    response.write("<!doctype html><title>Hang</title>");
+    response.write("<!doctype html><title>Stall</title>");
     return true;
   }
   const realm = /^\/(auth-[a-z])\//.exec(pathname)?.[1];

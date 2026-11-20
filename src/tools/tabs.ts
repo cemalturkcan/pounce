@@ -3,7 +3,7 @@ import type { Response } from "playwright-core";
 import { z } from "zod";
 import { type BrowserManager, LEAVE_CANCELLED, pushEvent, type Tab } from "../browser.ts";
 import { normalizeUrl } from "../collect.ts";
-import { recentFaults } from "../errors.ts";
+import { describeError, recentFaults, ToolError } from "../errors.ts";
 import { describeEmulation, emulate, resetEmulation, VIEWPORT_PRESETS } from "../emulate.ts";
 import { RETENTION_NOTE } from "../output.ts";
 import { describePage, landingLines, pageTitle, renderSnapshot } from "../page.ts";
@@ -57,7 +57,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tabs_list",
     title: "List tabs",
     description:
-      "Show the open tabs of the shared browser and the state of the server. Returns every tab with its id, whose it is, its URL and title, then the browser status (engine, Chrome version, profile), the output directory where results and files are saved, the secret store, the model adapter that ask_pages and compare_design use, the log directory with the number of errors logged in the last hour (read them with server_log), and recent background errors. Use it to find a tab id again, to see what another session or the user has open, or to learn where output files go. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours. A tab whose page does not answer is listed with (unresponsive) instead of its title. It does not start the browser.",
+      "Show the open tabs of the shared browser and the state of the server. Returns every tab with its id, whose it is, its URL and title, then the browser status (engine, Chrome version, profile), the output directory where results and files are saved, the secret store, the model adapter that ask_pages and compare_design use, the log directory with the number of errors logged in the last hour (read them with server_log), and recent background errors. Use it to find a tab id again, to see what another session or the user has open, or to learn where output files go. Tabs marked \"other client\" belong to another agent session and \"unclaimed\" ones were opened by the browser or the user; leave both alone unless the task is about them. \"orphaned\" tabs belonged to a session that has ended: any session may use or close them, and using one makes it yours; an orphaned tab nobody uses for 30 minutes is closed. A tab whose page does not answer is listed with (unresponsive) instead of its title. It does not start the browser.",
     input: {},
     readOnly: true,
     handler: async (_input, owner) => {
@@ -86,7 +86,7 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
     name: "tab_open",
     title: "Open tab",
     description:
-      "Open a new tab for this session, optionally load a URL in it, and return the tab id that every page tool takes as tab. This is where work on any web page starts, local development servers included: the browser renders JavaScript and carries the user's cookies and sign-ins from earlier sessions, which a plain HTTP fetch does not. With a URL, the result gives the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path instead. Starts the browser on first use. To load another URL in a tab you already have, use navigate; to load many URLs at once, collect_pages.",
+      "Open a new tab for this session, optionally load a URL in it, and return the tab id that every page tool takes as tab. This is where work on any web page starts, local development servers included: the browser renders JavaScript and carries the user's cookies and sign-ins from earlier sessions, which a plain HTTP fetch does not. With a URL, the result gives the final URL, title and HTTP status, flags a CAPTCHA or bot wall (a Challenge: line, for handoff), an HTTP login dialog (for http_auth) and a sign-in page that suggests an expired session, says when site notes exist for the host, and for a URL that downloads a file gives the saved path instead. When the URL fails to load, the call fails but the tab stays open on the error page and the error names its id, so navigate can retry in it or tab_close can close it. Starts the browser on first use. To load another URL in a tab you already have, use navigate; to load many URLs at once, collect_pages.",
     input: {
       url: z.string().optional().describe("URL to load. https:// is assumed when no scheme is given. Omit for a blank tab."),
       wait_until: waitUntilParam,
@@ -103,7 +103,16 @@ export function registerTabTools(server: McpServer, deps: ToolDeps) {
       try {
         response = await tab.page.goto(normalizeUrl(input.url), { waitUntil: input.wait_until ?? "domcontentloaded" });
       } catch (error) {
-        const text = await downloadInstead(manager, tab, startedAt, error);
+        let text: string;
+        try {
+          text = await downloadInstead(manager, tab, startedAt, error);
+        } catch (failure) {
+          manager.markSeen(tab);
+          throw new ToolError(
+            `${describeError(failure)}\nTab ${tab.id} was opened and stays open at ${tab.page.isClosed() ? "a closed page" : tab.page.url()} so the error page can be inspected.`,
+            `Use navigate on ${tab.id} to try again, or tab_close to close it.`,
+          );
+        }
         manager.markSeen(tab);
         return `Opened ${tab.id}.\n${text}`;
       }
