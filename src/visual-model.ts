@@ -1,4 +1,4 @@
-import type { AskAdapter, AskImage, AskReply, AskUsage } from "./ask-adapter.ts";
+import { type AskAdapter, type AskImage, type AskReply, type AskUsage, completeLogged } from "./ask-adapter.ts";
 import { AskSetupError } from "./ask.ts";
 import { runPool } from "./async.ts";
 import { type Box, type Region, type RgbaImage, scaleForModel } from "./pixels.ts";
@@ -141,12 +141,12 @@ export async function describeDifferences(adapter: AskAdapter, options: ModelLay
   const regions = new Map<string, RegionVerdict>();
   let overview: OverviewVerdict | undefined;
 
-  const ask = async (system: string, prompt: string, prepared: PreparedImage[]) => {
+  const ask = async (system: string, prompt: string, prepared: PreparedImage[], call: string) => {
     sent.push(...prepared);
     const images: AskImage[] = prepared.map((entry) => entry.image);
     const signals = [AbortSignal.timeout(options.timeoutMs), ...(options.signal ? [options.signal] : [])];
     calls += 1;
-    const reply: AskReply = await adapter.complete({ system, prompt, model: options.model, maxTokens: options.maxTokens, images, signal: AbortSignal.any(signals) });
+    const reply: AskReply = await completeLogged(adapter, { system, prompt, model: options.model, maxTokens: options.maxTokens, images, signal: AbortSignal.any(signals) }, { tool: "compare_design", call });
     if (typeof reply?.text !== "string") throw new Error(`${adapter.name} returned no text.`);
     addUsage(usage, reply.usage);
     if (reply.stopReason === "refusal") throw new Error("the model refused to answer (stop reason refusal)");
@@ -160,11 +160,11 @@ export async function describeDifferences(adapter: AskAdapter, options: ModelLay
       if (job.kind === "region") {
         const { crop } = job;
         const images = [await cropImage(crop.reference, `${crop.region.id} design`, options.transcode), await cropImage(crop.page, `${crop.region.id} page`, options.transcode)];
-        const parsed = await ask(REGION_SYSTEM, regionPrompt(crop, options.deviceScaleFactor), images);
+        const parsed = await ask(REGION_SYSTEM, regionPrompt(crop, options.deviceScaleFactor), images, crop.region.id);
         regions.set(crop.region.id, { id: crop.region.id, findings: parsed.findings, ...(parsed.same ? { same: true } : {}), ...(parsed.truncated ? { truncated: true } : {}), ms: Date.now() - started });
       } else {
         const images = [await overviewImage(job.reference, "whole design", options.transcode), await overviewImage(job.page, "whole page", options.transcode)];
-        const parsed = await ask(MISSING_SYSTEM, overviewPrompt(job.reference, job.page), images);
+        const parsed = await ask(MISSING_SYSTEM, overviewPrompt(job.reference, job.page), images, "overview");
         overview = { findings: parsed.findings, ...(parsed.truncated ? { truncated: true } : {}), ms: Date.now() - started };
       }
     } catch (error) {

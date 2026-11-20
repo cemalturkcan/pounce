@@ -1503,6 +1503,7 @@ test("the debug log records every call without secret values", async () => {
   const raw = (await Promise.all(files.map((name) => readFile(path.join(dir, name), "utf8")))).join("");
   assert.ok(raw.includes('"tool":"fill"'), "fill calls are not logged");
   assert.ok(raw.includes('"result":'), "debug level does not log result text");
+  assert.ok(raw.includes('"event":"model_call","tool":"ask_pages","adapter":"fixture adapter"'), "ask_pages model calls are not logged");
   assert.ok(!raw.includes(TEST_SECRET), "secret leaked into the log");
   assert.ok(!raw.includes(encodeURIComponent(TEST_SECRET)), "url-encoded secret leaked into the log");
 });
