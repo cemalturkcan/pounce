@@ -845,6 +845,25 @@ test("review regressions", async (t) => {
     assert.equal(deps.manager.listTabs().length, before);
   });
 
+  await t.test("page reads on a hung tab fail instead of waiting forever", async () => {
+    const tab = openedTab(await ok("tab_open", { url: fixture.url }));
+    await ok("evaluate", { tab, expression: "setTimeout(() => { for (;;) {} }, 50); 'armed'" });
+    await pause(300);
+    const started = Date.now();
+    const results = await Promise.all([
+      call("read_text", { tab }),
+      call("extract", { tab }),
+      call("storage", { tab, action: "list", area: "local" }),
+      call("scroll", { tab, direction: "bottom" }),
+    ]);
+    assert.ok(Date.now() - started < 40_000, `took ${Date.now() - started} ms`);
+    for (const result of results) {
+      assert.equal(result.isError, true, result.text);
+      assert.match(result.text, /did not finish within \d+ s/);
+    }
+    await ok("tab_close", { tab, force: true });
+  });
+
   await t.test("streaming responses do not hang network tools", async () => {
     const tab = openedTab(await ok("tab_open", { url: `${fixture.url}/sse` }));
     await ok("wait_for", { tab, text: "streamed hello" });

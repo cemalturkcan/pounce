@@ -8,7 +8,7 @@ import { elementMarkdown, pageMarkdown } from "../markdown.ts";
 import { clipWindow, untrusted } from "../output.ts";
 import { pageText, rawSnapshot, renderSnapshot } from "../page.ts";
 import { buildMatcher, findInSnapshot } from "../snapshot.ts";
-import { clipToFile, defineTool, INLINE_SCREENSHOT_MAX_HEIGHT, tabParam, targetParam, type ToolDeps } from "./common.ts";
+import { clipToFile, defineTool, INLINE_SCREENSHOT_MAX_HEIGHT, pageBound, tabParam, targetParam, type ToolDeps } from "./common.ts";
 
 export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
   const { manager, store } = deps;
@@ -82,20 +82,28 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const scope = input.scope ?? "page";
-      const bodyType = input.target ? undefined : await tabBodyType(tab.page);
-      const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab.page, bodyType, store) : undefined;
-      if (body && body.text === undefined) return body.note ?? "";
-      const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
-      const text = body?.text !== undefined
-        ? body.text
-        : input.format === "markdown"
-          ? locator
-            ? await elementMarkdown(locator)
-            : await pageMarkdown(tab.page, scope)
-          : locator
-            ? await locator.innerText()
-            : await pageText(tab.page, scope);
-      const frameText = input.frames && !locator && body === undefined ? await framesText(tab.page, input.format ?? "text") : "";
+      const read = await pageBound(
+        (async (): Promise<{ early: string } | { text: string; frameText: string; body: Awaited<ReturnType<typeof readTabBody>> | undefined }> => {
+          const bodyType = input.target ? undefined : await tabBodyType(tab.page);
+          const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab.page, bodyType, store) : undefined;
+          if (body && body.text === undefined) return { early: body.note ?? "" };
+          const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
+          const text: string = body?.text !== undefined
+            ? body.text
+            : input.format === "markdown"
+              ? locator
+                ? await elementMarkdown(locator)
+                : await pageMarkdown(tab.page, scope)
+              : locator
+                ? await locator.innerText()
+                : await pageText(tab.page, scope);
+          const frameText = input.frames && !locator && body === undefined ? await framesText(tab.page, input.format ?? "text") : "";
+          return { text, frameText, body };
+        })(),
+        "read_text",
+      );
+      if ("early" in read) return read.early;
+      const { text, frameText, body } = read;
       const window = clipWindow(frameText ? `${text}\n\n${frameText}` : text, input.offset ?? 0, input.max_chars ?? 12_000);
       const footer = window.hasMore
         ? `\n[chars ${window.start}-${window.end} of ${window.totalChars}; pass offset=${window.end} for more]`
@@ -170,7 +178,7 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
-      const data = await extractPage(tab.page);
+      const data = await pageBound(extractPage(tab.page), "extract");
       const tables = [];
       for (const [index, table] of data.tables.entries()) {
         const file = await store.write("extract", store.uniqueName(`${tab.id}-table-${index + 1}`, "csv"), toCsv(table.rows));

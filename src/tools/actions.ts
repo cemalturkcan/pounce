@@ -10,7 +10,7 @@ import { describePage, runAction } from "../page.ts";
 import { registerSecret } from "../script.ts";
 import type { SecretField } from "../secrets.ts";
 import { describeOverlayClicks, dismissOverlays } from "../overlays.ts";
-import { cancelled, defineTool, includeDiffParam, includeSnapshotParam, NO_DOM_CHANGE, tabParam, targetParam, timeoutParam, type ToolDeps } from "./common.ts";
+import { cancelled, defineTool, includeDiffParam, includeSnapshotParam, NO_DOM_CHANGE, pageBound, tabParam, targetParam, timeoutParam, type ToolDeps } from "./common.ts";
 
 export function registerActionTools(server: McpServer, deps: ToolDeps) {
   const { manager, store, secrets, redactor } = deps;
@@ -358,7 +358,7 @@ export function registerActionTools(server: McpServer, deps: ToolDeps) {
             return `Scrolled ${input.target} into view.`;
           }
           if (direction === "top" || direction === "bottom") {
-            await tab.page.evaluate((toBottom) => window.scrollTo(0, toBottom ? document.documentElement.scrollHeight : 0), direction === "bottom");
+            await pageBound(tab.page.evaluate((toBottom) => window.scrollTo(0, toBottom ? document.documentElement.scrollHeight : 0), direction === "bottom"), "scroll");
             return `Scrolled to the ${direction}.`;
           }
           const horizontal = direction === "left" ? -amount : direction === "right" ? amount : 0;

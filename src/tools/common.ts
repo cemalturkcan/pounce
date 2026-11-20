@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AskAdapterSource } from "../ask.ts";
 import { type BrowserManager, ORPHANED_OWNER, type Tab, UNCLAIMED_OWNER } from "../browser.ts";
+import { withTimeout } from "../async.ts";
 import { describeError, ToolError } from "../errors.ts";
 import type { JobRunner } from "../jobs.ts";
 import { type Logger, newRequestId, summarizeInput } from "../log.ts";
@@ -137,4 +138,14 @@ export async function clipToFile(store: OutputStore, kind: string, label: string
 export function tabLine(tab: Tab, owner: string) {
   const ownership = tab.owner === owner ? "yours" : tab.owner === UNCLAIMED_OWNER ? "unclaimed" : tab.owner === ORPHANED_OWNER ? "orphaned" : "other client";
   return `${tab.id} [${ownership}] ${tab.page.url()}`;
+}
+
+export const PAGE_READ_TIMEOUT_MS = 15_000;
+
+export function pageBound<T>(promise: Promise<T>, what: string, ms = PAGE_READ_TIMEOUT_MS) {
+  return withTimeout(
+    promise,
+    ms,
+    () => new ToolError(`${what} did not finish within ${ms / 1000} s; the page is not answering, so a script in it may be stuck.`, "Reload the tab with navigate, or close it with tab_close (force: true) and open a new one."),
+  );
 }

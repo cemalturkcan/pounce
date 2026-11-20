@@ -7,7 +7,7 @@ import { ToolError } from "../errors.ts";
 import { untrusted } from "../output.ts";
 import { appendSiteNote, readSiteNotes, siteHost, siteNotesPath } from "../sites.ts";
 import { exportIndexedDb, listIndexedDb, readIndexedDbStore, readWebStorage, splitStoreKey, storageOrigin } from "../storage.ts";
-import { clipToFile, defineTool, tabParam, type ToolDeps, type ToolInput, waitUntilParam } from "./common.ts";
+import { clipToFile, defineTool, pageBound, tabParam, type ToolDeps, type ToolInput, waitUntilParam } from "./common.ts";
 
 export function cookieDomainMatches(cookieDomain: string, wanted: string) {
   const domain = cookieDomain.toLowerCase();
@@ -197,7 +197,7 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
       "Read the localStorage, sessionStorage or IndexedDB of the origin a tab is on. list shows keys with value sizes (for IndexedDB: database/store names with record counts); get returns one value (for IndexedDB: every record of one store) clipped to max_chars with the full value saved to a file; export writes the whole area to a JSON file with raw, unmasked values and returns its path. Use it to see what a site or single-page app keeps in the browser: tokens, user settings, cached data and app state. It only reads; to change storage use evaluate. Cookies are read with cookies.",
     input: storageInput,
     readOnly: true,
-    handler: (input) => readStorage(deps, input),
+    handler: (input) => pageBound(readStorage(deps, input), "storage"),
   });
 
   defineTool(server, deps, {
