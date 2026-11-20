@@ -4,6 +4,7 @@ import type { AskImage } from "./ask-adapter.ts";
 import { withTimeout } from "./async.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
 import { capture } from "./capture.ts";
+import { MAX_IMAGES_PER_CALL } from "./ask.ts";
 import { ToolError } from "./errors.ts";
 import { browserTranscoder, imageSize, JPEG_QUALITY, type PreparedImage, prepareModelImage } from "./model-images.ts";
 
@@ -12,8 +13,9 @@ export type RegionRequest = { target: string };
 export type PageVisualStats = { textChars: number; viewport: { width: number; height: number }; pageHeight: number; mediaArea: number };
 export type PageImages = { images: AskImage[]; prepared: PreparedImage[]; files: string[]; kind: "none" | "viewport" | "tiles"; tiles: number; regions: number; notes: string[] };
 
-export const TILE_HEIGHT = 1600;
 export const TILE_OVERLAP = 80;
+const SCREEN_SETTLE_MS = 1500;
+const SCREEN_QUIET_MS = 200;
 const MEDIA_SHARE = 0.4;
 const CHARS_PER_10K_PX = 2;
 const STEP_MS = 20_000;
@@ -26,14 +28,46 @@ export function looksVisual(stats: PageVisualStats) {
   return pageArea > 0 && stats.textChars / (pageArea / 10_000) < CHARS_PER_10K_PX;
 }
 
-export function planTiles(pageHeight: number, tileHeight = TILE_HEIGHT, overlap = TILE_OVERLAP) {
-  const tiles: { y: number; height: number }[] = [];
-  let y = 0;
-  for (;;) {
-    tiles.push({ y, height: Math.min(tileHeight, pageHeight - y) });
-    if (y + tileHeight >= pageHeight) return tiles;
-    y += tileHeight - overlap;
-  }
+type ScreenPosition = { x: number; y: number; viewport: number; height: number };
+
+function scrollToTop(top: number): ScreenPosition {
+  window.scrollTo({ left: 0, top, behavior: "instant" });
+  const root = document.scrollingElement ?? document.documentElement;
+  return { x: window.scrollX, y: window.scrollY, viewport: window.innerHeight, height: root.scrollHeight };
+}
+
+function restoreScroll(position: { x: number; y: number }) {
+  window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
+}
+
+async function settleScreen(options: { maxMs: number; quietMs: number }) {
+  const deadline = performance.now() + options.maxMs;
+  const remaining = () => Math.max(0, deadline - performance.now());
+  const within = (promise: Promise<unknown>) => Promise.race([promise, new Promise((resolve) => setTimeout(resolve, remaining()))]);
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const onScreen = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+  };
+  const images = [...document.images].filter(onScreen);
+  await within(Promise.allSettled(images.map((image) => image.decode())));
+  const finite = document.getAnimations().filter((animation) => animation.playState === "running" && Number.isFinite(Number(animation.effect?.getComputedTiming().endTime)));
+  await within(Promise.allSettled(finite.map((animation) => animation.finished)));
+  await within(
+    new Promise<void>((resolve) => {
+      let timer = setTimeout(done, options.quietMs);
+      const observer = new MutationObserver(() => {
+        clearTimeout(timer);
+        timer = setTimeout(done, options.quietMs);
+      });
+      function done() {
+        observer.disconnect();
+        resolve();
+      }
+      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    }),
+  );
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
 
 const bounded = <T>(promise: Promise<T>, label: string) =>
@@ -64,6 +98,28 @@ export function measurePage(tab: Tab) {
   );
 }
 
+async function captureScreens(page: Tab["page"]) {
+  const shots: Buffer[] = [];
+  const start = await bounded(page.evaluate(() => ({ x: window.scrollX, y: window.scrollY })), "reading the scroll position");
+  try {
+    let top = 0;
+    let previous = Number.NEGATIVE_INFINITY;
+    while (shots.length < MAX_IMAGES_PER_CALL) {
+      const at = await bounded(page.evaluate(scrollToTop, top), "scrolling the page");
+      if (at.y <= previous) break;
+      previous = at.y;
+      await bounded(page.evaluate(settleScreen, { maxMs: SCREEN_SETTLE_MS, quietMs: SCREEN_QUIET_MS }), "waiting for the page to settle");
+      shots.push(await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS }));
+      const height = await bounded(page.evaluate(() => (document.scrollingElement ?? document.documentElement).scrollHeight), "measuring the page");
+      if (at.y + at.viewport >= height - 1) break;
+      top = at.y + Math.max(1, at.viewport - TILE_OVERLAP);
+    }
+  } finally {
+    await bounded(page.evaluate(restoreScroll, start), "restoring the scroll position").catch(() => undefined);
+  }
+  return shots;
+}
+
 export async function capturePageImages(
   manager: BrowserManager,
   tab: Tab,
@@ -88,14 +144,10 @@ export async function capturePageImages(
     await keep(await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS }), "viewport", `${options.source} viewport`);
     result.kind = "viewport";
   } else if (mode === "full") {
-    const size = await bounded(page.evaluate(() => ({ width: window.innerWidth, height: (document.scrollingElement ?? document.documentElement).scrollHeight })), "measuring the page");
-    const tiles = planTiles(Math.max(1, size.height));
-    for (const [index, tile] of tiles.entries()) {
-      const shot = await capture(page, { format: "jpeg", quality: JPEG_QUALITY, timeoutMs: STEP_MS, clip: { x: 0, y: tile.y, width: size.width, height: tile.height } });
-      await keep(shot, `tile-${index + 1}`, `${options.source} tile ${index + 1}/${tiles.length}`);
-    }
+    const screens = await captureScreens(page);
+    for (const [index, shot] of screens.entries()) await keep(shot, `tile-${index + 1}`, `${options.source} tile ${index + 1}/${screens.length}`);
     result.kind = "tiles";
-    result.tiles = tiles.length;
+    result.tiles = screens.length;
   }
   for (const [index, region] of options.regions.entries()) {
     try {

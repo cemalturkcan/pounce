@@ -415,3 +415,46 @@ CONTENT_ROUTES["/ticker"] = {
   body: () => `<!doctype html><html><head><title>Fixture Ticker</title></head><body><main><p id="tick">0</p></main>
 <script>let ticks = 0; setInterval(() => { ticks += 1; document.getElementById("tick").textContent = "tick " + ticks + " ".repeat(ticks % 7); }, 100);</script></body></html>`,
 };
+
+export const REVEAL_COLORS = { reveal: [0, 170, 0], image: [220, 0, 0], bar: [255, 136, 0], footer: [0, 0, 255] } as const;
+
+const filler = (from: number, count: number) => Array.from({ length: count }, (_value, index) => `<p style="margin:0;padding:8px 24px;font:16px sans-serif">Line ${from + index} of the reveal page describes the product in plain words.</p>`).join("");
+
+CONTENT_ROUTES["/reveal"] = {
+  type: "text/html",
+  body: () => `<!doctype html><html><head><meta charset="utf-8"><title>Fixture Reveal</title>
+<style>body{margin:0;background:#fff}.reveal{opacity:0;transform:translateY(40px);transition:opacity .5s,transform .5s}.reveal.shown{opacity:1;transform:none}</style></head><body>
+<header style="height:80px;background:#222;color:#fff;font:24px sans-serif;padding:24px">Reveal shop</header>
+${filler(1, 30)}
+<div class="reveal" style="height:300px;background:rgb(${REVEAL_COLORS.reveal.join(",")})"></div>
+${filler(31, 30)}
+<img loading="lazy" alt="Swatch" src="/files/swatch.svg" width="600" height="300" style="display:block;margin:0 24px">
+${filler(61, 30)}
+<p id="count" style="font:32px sans-serif;margin:24px">0+</p><div id="bar" style="height:40px;width:0;background:rgb(${REVEAL_COLORS.bar.join(",")})"></div>
+${filler(91, 30)}
+<footer style="height:200px;background:rgb(${REVEAL_COLORS.footer.join(",")})"></footer>
+<script>
+const seen = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    seen.unobserve(entry.target);
+    if (entry.target.id === "count") {
+      const started = performance.now();
+      const step = (now) => {
+        const value = Math.min(500, Math.round(((now - started) / 800) * 500));
+        entry.target.textContent = value + "+";
+        document.getElementById("bar").style.width = (value / 500) * 600 + "px";
+        if (value < 500) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    } else entry.target.classList.add("shown");
+  }
+});
+document.querySelectorAll(".reveal, #count").forEach((element) => seen.observe(element));
+</script></body></html>`,
+};
+
+CONTENT_ROUTES["/files/swatch.svg"] = {
+  type: "image/svg+xml",
+  body: () => `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><rect width="600" height="300" fill="rgb(${REVEAL_COLORS.image.join(",")})"/></svg>`,
+};

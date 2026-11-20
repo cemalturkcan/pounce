@@ -12,6 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import type { SecretStore } from "../src/secrets.ts";
 import { createDeps, createServer } from "../src/server.ts";
 import type { ToolDeps } from "../src/tools.ts";
+import { REVEAL_COLORS, startFixture, type Fixture } from "./fixture.ts";
 
 const PAGES: Record<string, string> = {
   "/text": `<!doctype html><title>Text</title><main>${Array.from({ length: 60 }, (_value, index) => `<p>Paragraph ${index} explains the lamp in plain words, with enough text to read.</p>`).join("")}</main>`,
@@ -31,6 +32,7 @@ const recorder: AskAdapter = {
 };
 
 let server: http.Server;
+let fixture: Fixture;
 let base = "";
 let workDir = "";
 let deps: ToolDeps;
@@ -42,6 +44,45 @@ async function ok(name: string, args: Record<string, unknown>) {
   assert.equal(result.isError === true, false, `${name} failed: ${text}`);
   assert.ok((result.content as { type: string }[]).every((part) => part.type === "text"), "no inline images in the result");
   return text;
+}
+
+type TileStats = { dark: number; dominant: number; matches: Record<string, number> };
+
+async function tileStats(images: { data: string }[]) {
+  const opened = await ok("tab_open", {});
+  const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
+  const page = deps.manager.getTab(tab).page;
+  const stats = await page.evaluate(
+    async ({ tiles, colors }) =>
+      Promise.all(
+        tiles.map(async (data) => {
+          const image = new Image();
+          image.src = `data:image/jpeg;base64,${data}`;
+          await image.decode();
+          const canvas = document.createElement("canvas");
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          const context = canvas.getContext("2d") as CanvasRenderingContext2D;
+          context.drawImage(image, 0, 0);
+          const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+          const total = pixels.length / 4;
+          const buckets = new Map<number, number>();
+          const matches: Record<string, number> = Object.fromEntries(Object.keys(colors).map((name) => [name, 0]));
+          let dark = 0;
+          for (let index = 0; index < pixels.length; index += 4) {
+            const [red = 0, green = 0, blue = 0] = [pixels[index], pixels[index + 1], pixels[index + 2]];
+            if (red + green + blue < 60) dark += 1;
+            const bucket = ((red >> 4) << 8) | ((green >> 4) << 4) | (blue >> 4);
+            buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+            for (const [name, [r = 0, g = 0, b = 0]] of Object.entries(colors)) if (Math.abs(red - r) < 40 && Math.abs(green - g) < 40 && Math.abs(blue - b) < 40) matches[name] = (matches[name] ?? 0) + 1;
+          }
+          return { dark: dark / total, dominant: Math.max(...buckets.values()) / total, matches };
+        }),
+      ),
+    { tiles: images.map((image) => image.data), colors: REVEAL_COLORS as unknown as Record<string, number[]> },
+  );
+  await ok("tab_close", { tab });
+  return stats as TileStats[];
 }
 
 const lastCall = () => {
@@ -58,6 +99,7 @@ before(async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  fixture = await startFixture();
   workDir = await mkdtemp(path.join(tmpdir(), "web-agent-ask-images-"));
   const config = loadConfig({ HOME: workDir, WEB_AGENT_DATA_DIR: workDir, WEB_AGENT_HEADLESS: "true", WEB_AGENT_PASSWORD_STORE: "basic", WEB_AGENT_ENGINE: process.env.WEB_AGENT_ENGINE });
   deps = createDeps(config, noSecrets, recorder);
@@ -70,6 +112,7 @@ before(async () => {
 after(async () => {
   await client?.close();
   await deps?.manager.shutdown();
+  await fixture?.close();
   await new Promise<void>((resolve) => {
     server?.closeAllConnections();
     server?.close(() => resolve());
@@ -99,18 +142,16 @@ test("ask_pages images", async (t) => {
     assert.equal(lastCall().images, undefined);
   });
 
-  await t.test("full sends a tall page as overlapping tiles and reports the count", async () => {
+  await t.test("full sends a tall page as overlapping screen-sized tiles and reports the count", async () => {
     const text = await ok("ask_pages", { question: "What is at the top?", urls: [`${base}/tall`], images: "full" });
     const call = lastCall();
-    assert.deepEqual(call.images?.map((image) => image.label?.replace(/^.*\.md /, "")), ["tile 1/4", "tile 2/4", "tile 3/4", "tile 4/4"]);
-    assert.match(text, /tall\.md: 4 tile\(s\)/);
-    const heights = call.images?.map((image) => {
-      const jpeg = Buffer.from(image.data, "base64");
-      let offset = 2;
-      while (offset < jpeg.length && !(jpeg[offset] === 0xff && (jpeg[offset + 1] === 0xc0 || jpeg[offset + 1] === 0xc2))) offset += 2 + jpeg.readUInt16BE(offset + 2);
-      return jpeg.readUInt16BE(offset + 5);
-    });
-    assert.deepEqual(heights, [1600, 1600, 1600, 440]);
+    const { imageSize } = await import("../src/model-images.ts");
+    const heights = (call.images ?? []).map((image) => imageSize(Buffer.from(image.data, "base64"))?.height ?? 0);
+    const screen = heights[0] ?? 0;
+    const count = 1 + Math.ceil((5000 - screen) / (screen - 80));
+    assert.ok(screen > 100 && heights.every((height) => height === screen), JSON.stringify(heights));
+    assert.deepEqual(call.images?.map((image) => image.label?.replace(/^.*\.md /, "")), Array.from({ length: count }, (_value, index) => `tile ${index + 1}/${count}`));
+    assert.match(text, new RegExp(`tall\\.md: ${count} tile\\(s\\)`));
   });
 
   await t.test("tabs send viewport and region screenshots labelled with the tab source; files are saved", async () => {
@@ -133,8 +174,8 @@ test("ask_pages images", async (t) => {
     const text = await ok("ask_pages", { question: "What is at the top?", tabs: [tab], images: "full" });
     const { imageSize } = await import("../src/model-images.ts");
     const sizes = lastCall().images?.map((image) => [image.mediaType, imageSize(Buffer.from(image.data, "base64"))?.width]);
-    assert.deepEqual(sizes, [["image/jpeg", 2000], ["image/jpeg", 2000], ["image/jpeg", 2000], ["image/jpeg", 2000]]);
-    assert.match(text, /^4 image\(s\) sent to the model, \d+\.\d\d MB as base64\.$/m);
+    assert.ok((sizes?.length ?? 0) > 1 && sizes?.every(([type, width]) => type === "image/jpeg" && width === 2000), JSON.stringify(sizes));
+    assert.match(text, new RegExp(`^${sizes?.length} image\\(s\\) sent to the model, \\d+\\.\\d\\d MB as base64\\.$`, "m"));
     assert.ok(!/downscaled/.test(text));
   });
 
@@ -143,10 +184,32 @@ test("ask_pages images", async (t) => {
     const text = await ok("ask_pages", { question: "Check for broken layouts", urls: [`${base}/tall`, `${base}/text`], mode: "review" });
     const call = lastCall();
     assert.equal(call.system, REVIEW_SYSTEM);
-    assert.ok((call.images ?? []).filter((image) => /tall\.md tile \d\/4$/.test(image.label ?? "")).length === 4, JSON.stringify(call.images?.map((image) => image.label)));
+    const tall = (call.images ?? []).map((image) => /tall\.md tile \d+\/(\d+)$/.exec(image.label ?? "")?.[1]).filter((total) => total !== undefined);
+    assert.ok(tall.length > 1 && tall.every((total) => Number(total) === tall.length), JSON.stringify(call.images?.map((image) => image.label)));
     assert.ok((call.images ?? []).some((image) => /text\.md tile 1\/\d$/.test(image.label ?? "")));
     assert.match(call.prompt, /<request>\nCheck for broken layouts\n<\/request>/);
     assert.match(text, /^Review: Check for broken layouts$/m);
+  });
+
+  await t.test("full tiles show lazy images, scroll reveals and finished counters, and no tile is blank", async () => {
+    const opened = await ok("tab_open", { url: `${fixture.url}/reveal` });
+    const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
+    const page = deps.manager.getTab(tab).page;
+    await page.evaluate(() => window.scrollTo(0, 400));
+    await ok("ask_pages", { question: "Check the page", tabs: [tab], mode: "review" });
+    const images = lastCall().images ?? [];
+    assert.ok(images.length >= 3, `only ${images.length} tile(s)`);
+    const stats = await tileStats(images);
+    for (const [index, tile] of stats.entries()) {
+      assert.ok(tile.dark < 0.5, `tile ${index + 1} is mostly black: ${JSON.stringify(tile)}`);
+      assert.ok(tile.dominant < 0.97, `tile ${index + 1} is blank: ${JSON.stringify(tile)}`);
+    }
+    const best = (name: string) => Math.max(...stats.map((tile) => tile.matches[name] ?? 0));
+    assert.ok(best("reveal") > 600 * 250, `the reveal block was not shown: ${best("reveal")}`);
+    assert.ok(best("image") > 500 * 250, `the lazy image was not painted: ${best("image")}`);
+    assert.ok(best("bar") > 560 * 35, `the counter bar did not finish: ${best("bar")}`);
+    assert.ok(best("footer") > 0, "the footer is missing");
+    assert.equal(await page.evaluate(() => window.scrollY), 400);
   });
 
   await t.test("review mode keeps an explicit images choice", async () => {

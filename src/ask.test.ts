@@ -588,6 +588,14 @@ test("the review system prompt states the line format and its example parses", (
   assert.deepEqual(parsed.notFound, ["03-shop-about.md"]);
 });
 
+test("the review prompt describes screen-sized tiles and keeps tile artefacts out of the issues", () => {
+  assert.match(REVIEW_SYSTEM, /each one screen of the browser window, captured after scrolling to it/);
+  assert.doesNotMatch(REVIEW_SYSTEM, /1600 px/);
+  assert.match(REVIEW_SYSTEM, /A fixed or sticky header, footer or banner appears on every tile by design/);
+  assert.match(REVIEW_SYSTEM, /counter caught mid-animation, a marquee or a carousel cut at the edge of a tile is not a defect unless it is clearly broken/);
+  assert.match(REVIEW_SYSTEM, /Keep high for unmistakable breakage: overlapping or cut text, broken images, error messages, or blank areas that should hold content/);
+});
+
 test("parseReview matches sources exactly, normalises severities and keeps lines it cannot read", () => {
   const sources = ["t1 https://shop.test/a,b", "t10 https://shop.test/c", "02-x.md"];
   const parsed = parseReview(
