@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, symlink, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, rmdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -17,7 +18,7 @@ const input = {
 
 async function credentialFixture(t: TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "web-agent-ask-test-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => Promise.all([rm(dir, { recursive: true, force: true }), rm(`${dir}.lock`, { recursive: true, force: true })]));
   const credentialsPath = path.join(dir, ".credentials.json");
   const writeSession = (
     accessToken: string,
@@ -475,6 +476,115 @@ test("Anthropic parses LF-framed streams", async (t) => {
   ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
   t.mock.method(globalThis, "fetch", async () => new Response(frames, { headers: { "content-type": "text/event-stream" } }));
   assert.equal((await adapter.complete(input)).text, "Hello");
+});
+
+test("Anthropic adapter does not spin on a stale lock it cannot remove", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  const lock = path.join(path.dirname(credentialsPath), ".oauth_refresh.lock");
+  await writeFile(lock, "not a directory");
+  const old = new Date(Date.now() - 120_000);
+  await utimes(lock, old, old);
+  t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  const controller = new AbortController();
+  const started = process.cpuUsage();
+  const pending = adapter.complete({ ...input, signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  const used = process.cpuUsage(started);
+  controller.abort(new Error("caller cancelled"));
+  await assert.rejects(pending, /caller cancelled/);
+  assert.ok(used.user + used.system < 300_000, `${used.user + used.system} µs of CPU while waiting`);
+});
+
+test("Anthropic adapter refreshes without the legacy lock when it cannot be created", async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "web-agent-ask-parent-"));
+  t.after(async () => {
+    await chmod(parent, 0o755);
+    await rm(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "claude");
+  await mkdir(dir);
+  await writeFile(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() - 1 }, accountUuid: "account-test" }));
+  await chmod(parent, 0o555);
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    assert.equal(new Headers(request?.headers).get("authorization"), "Bearer new-access");
+    return streamReply("OK");
+  });
+  assert.equal((await anthropicAskAdapter(dir).complete(input)).text, "OK");
+});
+
+test("Anthropic adapter refreshes a session the API reports as revoked", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("revoked-access", Date.now() + 60 * 60_000, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    if (new Headers(request?.headers).get("authorization") === "Bearer revoked-access") {
+      return Response.json({ error: { type: "permission_error", message: "OAuth token has been revoked. Please obtain a new token." } }, { status: 403 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+});
+
+test("Anthropic adapter fingerprints the first text block it sends", async (t) => {
+  const { adapter, writeSession } = await credentialFixture(t);
+  await writeSession("test-token");
+  const fetch = t.mock.method(globalThis, "fetch", async () => streamReply("OK"));
+  await adapter.complete({ ...input, images: [{ mediaType: "image/png", data: "aGVsbG8=", label: "home.png" }] });
+  const body = JSON.parse(String(fetch.mock.calls[0]?.arguments[1]?.body));
+  const firstText = "Screenshot: home.png";
+  const suffix = createHash("sha256").update(`59cf53e54c78${firstText[4]}${firstText[7]}${firstText[20] ?? "0"}2.1.296`).digest("hex").slice(0, 3);
+  assert.equal(body.system[0].text, `x-anthropic-billing-header: cc_version=2.1.296.${suffix}; cc_entrypoint=sdk-cli;`);
+});
+
+test("Anthropic adapter does not sign back in when the session was logged out during its refresh", async (t) => {
+  const { adapter, credentialsPath, writeSession } = await credentialFixture(t);
+  await writeSession("old-access", Date.now() - 1, "account-test", "old-refresh");
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("/v1/oauth/token")) {
+      await writeFile(credentialsPath, JSON.stringify({ mcpOAuth: {} }));
+      return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  await assert.rejects(adapter.complete(input), AskSetupError);
+  assert.equal(JSON.parse(await readFile(credentialsPath, "utf8")).claudeAiOauth, undefined);
+});
+
+test("Anthropic adapter reports a credentials file holding null as a sign-in problem", async (t) => {
+  const { adapter, credentialsPath } = await credentialFixture(t);
+  await writeFile(credentialsPath, "null");
+  await assert.rejects(adapter.complete(input), AskSetupError);
+});
+
+test("Anthropic adapter keeps the session's extra scopes when refreshing and saves the granted ones", async (t) => {
+  const { adapter, credentialsPath } = await credentialFixture(t);
+  await writeFile(credentialsPath, JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() - 1, scopes: ["user:inference", "user:projects:read"] }, accountUuid: "account-test" }));
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      assert.match(JSON.parse(String(request?.body)).scope, /(^| )user:projects:read( |$)/);
+      return Response.json({ access_token: "new-access", expires_in: 3600, scope: "user:inference user:projects:read user:profile" });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.deepEqual(JSON.parse(await readFile(credentialsPath, "utf8")).claudeAiOauth.scopes, ["user:inference", "user:projects:read", "user:profile"]);
+});
+
+test("Anthropic adapter falls back to the session's stored scopes when the defaults are rejected", async (t) => {
+  const { adapter, credentialsPath } = await credentialFixture(t);
+  await writeFile(credentialsPath, JSON.stringify({ claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() - 1, scopes: ["user:inference"] }, accountUuid: "account-test" }));
+  const scopes: unknown[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string, request?: RequestInit) => {
+    if (url.includes("/v1/oauth/token")) {
+      scopes.push(JSON.parse(String(request?.body)).scope);
+      return scopes.length === 1 ? Response.json({ error: "invalid_scope" }, { status: 400 }) : Response.json({ access_token: "new-access", expires_in: 3600 });
+    }
+    return streamReply("OK");
+  });
+  assert.equal((await adapter.complete(input)).text, "OK");
+  assert.equal(scopes[1], "user:inference");
 });
 
 test("Anthropic adapter sends ordered base64 image blocks and preserves stop reasons", async (t) => {

@@ -13,7 +13,7 @@ const MESSAGES_URL = `${API_ORIGIN}/v1/messages?beta=true`;
 const PROFILE_URL = `${API_ORIGIN}/api/oauth/profile`;
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const OAUTH_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
+const OAUTH_SCOPES = ["user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload", "user:plugins"];
 const ANTHROPIC_VERSION = "2023-06-01";
 const CLAUDE_CODE_VERSION = "2.1.296";
 const CLAUDE_CODE_ENTRYPOINT = "sdk-cli";
@@ -94,12 +94,16 @@ function networkErrorDetail(error: unknown, token: string | string[]) {
 }
 
 async function readCredentialsDocument(credentialsPath: string, signal?: AbortSignal) {
+  let document: unknown;
   try {
-    return JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal })) as ClaudeCredentials;
+    document = JSON.parse(await readFile(credentialsPath, { encoding: "utf8", signal }));
   } catch {
     signal?.throwIfAborted();
+  }
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
     throw new AskSetupError(`Could not read Claude Code credentials at ${credentialsPath}.`, SIGN_IN);
   }
+  return document as ClaudeCredentials;
 }
 
 async function readCredentials(credentialsPath: string, signal: AbortSignal) {
@@ -113,9 +117,14 @@ async function readCredentials(credentialsPath: string, signal: AbortSignal) {
     accessToken: oauth.accessToken,
     refreshToken: typeof oauth.refreshToken === "string" ? oauth.refreshToken : undefined,
     clientId: typeof oauth.clientId === "string" && oauth.clientId ? oauth.clientId : OAUTH_CLIENT_ID,
+    scopes: Array.isArray(oauth.scopes) ? oauth.scopes.filter((scope): scope is string => typeof scope === "string" && scope.length > 0) : [],
     expiresAt: typeof oauth.expiresAt === "number" ? oauth.expiresAt : undefined,
     accountUuid: typeof credentials.accountUuid === "string" ? credentials.accountUuid : undefined,
   };
+}
+
+function rejectsSession(status: number, error: ApiError | undefined) {
+  return status === 401 || (status === 403 && typeof error?.message === "string" && error.message.includes("OAuth token has been revoked"));
 }
 
 function shouldRetry(response: Response) {
@@ -168,6 +177,7 @@ async function requestTokenRefresh(tokens: { accessToken: string; refreshToken: 
     access_token?: unknown;
     refresh_token?: unknown;
     expires_in?: unknown;
+    scope?: unknown;
     error?: unknown;
     error_description?: unknown;
   } | undefined;
@@ -212,15 +222,17 @@ async function acquireLock(lockPath: string, signal: AbortSignal) {
   while (true) {
     try {
       await mkdir(lockPath);
-      return () => rmdir(lockPath).catch(() => undefined);
+      const { birthtimeMs } = await lstat(lockPath);
+      return async () => {
+        const lock = await lstat(lockPath).catch(() => undefined);
+        if (lock?.birthtimeMs === birthtimeMs) await rmdir(lockPath).catch(() => undefined);
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     const lock = await lstat(lockPath).catch(() => undefined);
-    if (lock && Date.now() - lock.mtimeMs > REFRESH_LOCK_STALE_MS) {
-      await rmdir(lockPath).catch(() => undefined);
-      continue;
-    }
+    const stale = lock !== undefined && Date.now() - lock.mtimeMs > REFRESH_LOCK_STALE_MS;
+    if (stale && await rmdir(lockPath).then(() => true, () => false)) continue;
     await delay(REFRESH_RACE_POLL_MS, undefined, { signal });
   }
 }
@@ -229,7 +241,11 @@ async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal,
   const configDir = path.dirname(credentialsPath);
   const releaseLock = await acquireLock(path.join(configDir, ".oauth_refresh.lock"), signal);
   try {
-    const releaseLegacyLock = await acquireLock(`${await realpath(configDir).catch(() => configDir)}.lock`, signal);
+    const releaseLegacyLock = await acquireLock(`${await realpath(configDir).catch(() => configDir)}.lock`, signal).catch((error: unknown) => {
+      signal.throwIfAborted();
+      if (error instanceof Error && "code" in error && typeof error.code === "string") return async () => undefined;
+      throw error;
+    });
     try {
       return await run();
     } finally {
@@ -240,9 +256,10 @@ async function withRefreshLocks<T>(credentialsPath: string, signal: AbortSignal,
   }
 }
 
-async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number }) {
+async function saveRefreshedTokens(credentialsPath: string, stale: { accessToken: string; refreshToken: string }, tokens: { accessToken: string; refreshToken: string; expiresAt: number; scopes?: string[] }) {
   const document = await readCredentialsDocument(credentialsPath);
-  const oauth = document.claudeAiOauth ?? {};
+  const oauth = document.claudeAiOauth;
+  if (!oauth || typeof oauth !== "object") return;
   const blank = typeof oauth.accessToken !== "string" || !oauth.accessToken.trim();
   if (!blank && (oauth.accessToken !== stale.accessToken || oauth.refreshToken !== stale.refreshToken)) return;
   document.claudeAiOauth = { ...oauth, ...tokens };
@@ -264,8 +281,9 @@ function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, re
 
     const tokens = { accessToken: credentials.accessToken, refreshToken: credentials.refreshToken, clientId: credentials.clientId };
     const refresh = (scope: string | undefined) => withRetries(signal, () => requestTokenRefresh(tokens, scope, signal));
-    let answer = await refresh(OAUTH_SCOPES);
-    if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(undefined);
+    const storedScopes = credentials.scopes.length ? credentials.scopes.join(" ") : undefined;
+    let answer = await refresh([...new Set([...OAUTH_SCOPES, ...credentials.scopes])].join(" "));
+    if (!answer.response.ok && answer.payload?.error === "invalid_scope") answer = await refresh(storedScopes);
     if (!answer.response.ok) {
       if (await waitForNewerCredentials(credentialsPath, credentials.accessToken, signal)) return;
       throw new AskSetupError(`Claude session refresh failed (HTTP ${answer.response.status})${refreshErrorDetail(answer.payload, [tokens.accessToken, tokens.refreshToken])}`, SIGN_IN);
@@ -278,6 +296,7 @@ function refreshCredentialsFile(credentialsPath: string, signal: AbortSignal, re
         ? answer.payload.refresh_token
         : tokens.refreshToken,
       expiresAt: Date.now() + Math.min(Math.max(expiresIn, 60), 86_400) * 1_000,
+      ...(typeof answer.payload?.scope === "string" && answer.payload.scope.trim() ? { scopes: answer.payload.scope.trim().split(/\s+/) } : {}),
     });
   });
 }
@@ -341,9 +360,14 @@ async function readAccountUuid(token: string, signal: AbortSignal) {
   const uuid = payload?.account?.uuid;
   if (response.ok && typeof uuid === "string" && uuid) return uuid;
   const message = `Could not read the local Claude account profile (HTTP ${response.status})${errorDetail(payload?.error, token)}`;
-  if (response.status === 401) throw new RejectedSessionError(message, SIGN_IN);
+  if (rejectsSession(response.status, payload?.error)) throw new RejectedSessionError(message, SIGN_IN);
   if (shouldRetry(response)) throw new RetryableAnthropicError(new ToolError(message), retryDelay(response));
   throw new AskSetupError(message, SIGN_IN);
+}
+
+function firstText(prompt: string, images?: AskImage[]) {
+  const label = images?.find((image) => image.label)?.label;
+  return label ? `Screenshot: ${label}` : prompt;
 }
 
 function messageContent(prompt: string, images?: AskImage[]) {
@@ -503,8 +527,8 @@ async function postMessage(body: string, token: string, sessionId: string, retry
   const payload = await response.json().catch(() => undefined) as { error?: ApiError } | undefined;
   signal.throwIfAborted();
   const detail = errorDetail(payload?.error, token);
-  const failure = response.status === 401
-    ? new RejectedSessionError(`Anthropic rejected the local Claude Code session (HTTP 401)${detail}`, SIGN_IN)
+  const failure = rejectsSession(response.status, payload?.error)
+    ? new RejectedSessionError(`Anthropic rejected the local Claude Code session (HTTP ${response.status})${detail}`, SIGN_IN)
     : new ToolError(`Anthropic Messages returned HTTP ${response.status}${detail}`);
   if (shouldRetry(response)) throw new RetryableAnthropicError(failure, retryDelay(response));
   throw failure;
@@ -558,7 +582,7 @@ export function anthropicAskAdapter(configDir = process.env.CLAUDE_CONFIG_DIR?.t
           max_tokens: maxTokens,
           stream: true,
           system: [
-            { type: "text", text: billingHeader(prompt) },
+            { type: "text", text: billingHeader(firstText(prompt, images)) },
             { type: "text", text: CLAUDE_CODE_IDENTITY },
             { type: "text", text: system },
           ],
