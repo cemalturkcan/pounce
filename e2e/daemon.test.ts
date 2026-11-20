@@ -142,6 +142,22 @@ test("the daemon survives failures that used to be unhandled rejections", async 
     assert.match(stderr, /unhandled rejection kept the server running/);
   });
 
+  await t.test("a script listener that throws synchronously", async () => {
+    const other = await connect();
+    const otherTab = /Opened (t\d+)/.exec(await ok(other, "tab_open", { url: fixture.url }))?.[1] ?? "";
+    const result = await ok(session, "run_script", {
+      tab,
+      code: `page.on("framenavigated", (frame) => { JSON.parse(frame.url()); }); await page.goto(${JSON.stringify(`${fixture.url}/article`)}); await sleep(500); return "alive";`,
+    });
+    assert.match(result, /Returned: alive/);
+    assert.match(result, /Error in a framenavigated callback: .*JSON/);
+    await pause(500);
+    await assertAlive();
+    assert.match(await ok(other, "tabs_list"), new RegExp(`${otherTab} \\[yours\\]`));
+    assert.match(await ok(other, "tabs_list"), /Recent background errors[\s\S]*run_script callback/);
+    await ok(other, "tab_close", { tab: otherTab });
+  });
+
   await t.test("a job whose result file cannot be written", async () => {
     const started = await ok(session, "run_script", { background: true, code: "await sleep(1500); return 'value';" });
     const id = /job (j\d+)/.exec(started)?.[1] ?? "";

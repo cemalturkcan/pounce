@@ -2,7 +2,7 @@ import vm from "node:vm";
 import type { Locator, Page } from "playwright-core";
 import type { AskAdapterSource } from "./ask.ts";
 import type { BrowserManager, Tab } from "./browser.ts";
-import { ToolError } from "./errors.ts";
+import { recordFault, ToolError } from "./errors.ts";
 import { extractPage } from "./extract.ts";
 import type { OutputStore, Redactor } from "./output.ts";
 import { pageLinks, pageText, rawSnapshot } from "./page.ts";
@@ -62,6 +62,8 @@ const WRAPPED_CLASSES = new Set([
   "Page", "BrowserContext", "Frame", "Locator", "FrameLocator", "ElementHandle", "JSHandle", "Keyboard", "Mouse", "Touchscreen",
   "APIRequestContext", "APIResponse", "Response", "Request", "Route", "Download", "Dialog", "FileChooser", "Clock", "Tracing", "Worker",
 ]);
+const SERIALIZED_ARGUMENT_METHODS = new Set(["evaluate", "evaluateHandle", "$eval", "$$eval", "evaluateAll", "addInitScript", "waitForFunction"]);
+const LISTENER_METHODS = new Set(["on", "once", "addListener", "prependListener", "prependOnceListener"]);
 const IGNORED_ABORT_CALLS = 20;
 const ABORTED_CALL_DELAY_MS = 50;
 
@@ -71,8 +73,10 @@ class ScriptGuard {
   readonly controller = new AbortController();
   private readonly proxies = new WeakMap<object, object>();
   private readonly targets = new WeakMap<object, object>();
+  private readonly callbacks = new WeakMap<object, (...args: unknown[]) => unknown>();
   private rejectedCalls = 0;
   stop?: ScriptStop;
+  onCallbackError: (label: string, error: unknown) => void = () => undefined;
 
   get stopped() {
     return this.stop !== undefined;
@@ -99,6 +103,36 @@ class ScriptGuard {
     return value;
   }
 
+  private callback(label: string, fn: (...args: unknown[]) => unknown) {
+    const existing = this.callbacks.get(fn);
+    if (existing) return existing;
+    const wrapped = (...args: unknown[]) => {
+      const failed = (error: unknown) => {
+        this.onCallbackError(label, error);
+        if (label === "route") void (args[0] as { fallback?: () => Promise<void> } | undefined)?.fallback?.().catch(() => undefined);
+        return undefined;
+      };
+      try {
+        const result = fn(...args.map((arg) => this.wrap(arg)));
+        if (isThenable(result)) return Promise.resolve(result).catch(failed);
+        return result;
+      } catch (error) {
+        return failed(error);
+      }
+    };
+    this.callbacks.set(fn, wrapped);
+    return wrapped;
+  }
+
+  private prepare(method: string, args: unknown[]) {
+    const label = LISTENER_METHODS.has(method) && typeof args[0] === "string" ? args[0] : method;
+    return args.map((arg) => {
+      if (typeof arg === "function" && !SERIALIZED_ARGUMENT_METHODS.has(method)) return this.callback(label, arg as (...input: unknown[]) => unknown);
+      if (isPlainObject(arg) && typeof arg.predicate === "function") return { ...arg, predicate: this.callback(label, arg.predicate as (...input: unknown[]) => unknown) };
+      return this.unwrap(arg);
+    });
+  }
+
   wrap<T>(value: T): T {
     if (Array.isArray(value)) return value.map((item) => this.wrap(item)) as T;
     if (!value || typeof value !== "object") return value;
@@ -114,7 +148,7 @@ class ScriptGuard {
         if (typeof member !== "function") return this.wrap(member);
         return (...args: unknown[]) => {
           if (this.stopped && !SYNC_METHODS.has(property)) return this.refused();
-          const result = (member as (...input: unknown[]) => unknown).apply(object, args.map((arg) => this.unwrap(arg)));
+          const result = (member as (...input: unknown[]) => unknown).apply(object, this.prepare(property, args));
           if (result instanceof Promise) return result.then((resolved) => this.wrap(resolved));
           return this.wrap(result);
         };
@@ -128,6 +162,21 @@ class ScriptGuard {
   guard<A extends unknown[], R>(fn: (...args: A) => Promise<R>) {
     return (...args: A): Promise<R> => (this.stopped ? this.refused<R>() : fn(...(args.map((arg) => this.unwrap(arg)) as A)));
   }
+}
+
+function errorMessage(error: unknown) {
+  if (error && typeof error === "object" && "message" in error) return String((error as { message: unknown }).message);
+  return formatLogPart(error);
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return Boolean(value) && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  return prototype === null || Object.getPrototypeOf(prototype) === null;
 }
 
 function abortableSleep(ms: number, signal: AbortSignal) {
@@ -171,10 +220,14 @@ export async function runScript(
   const safely = (callback: (...args: unknown[]) => unknown) => (...args: unknown[]) => {
     try {
       const result = callback(...args);
-      if (result instanceof Promise) result.catch((error: unknown) => log(`Error in a timer callback: ${formatLogPart(error instanceof Error ? error.message : error)}`));
+      if (isThenable(result)) Promise.resolve(result).catch((error: unknown) => log(`Error in a timer callback: ${errorMessage(error)}`));
     } catch (error) {
-      log(`Error in a timer callback: ${formatLogPart(error instanceof Error ? error.message : error)}`);
+      log(`Error in a timer callback: ${errorMessage(error)}`);
     }
+  };
+  guard.onCallbackError = (label, error) => {
+    log(`Error in a ${label} callback: ${errorMessage(error)}`);
+    recordFault("run_script callback", error);
   };
   const track = (timer: NodeJS.Timeout) => {
     timers.add(timer);
