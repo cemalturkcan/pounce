@@ -324,7 +324,7 @@ export function exceedsContextWindow(error: unknown) {
 export const TOO_LARGE_FOR_CONTEXT = "the page does not fit the model's context window on its own";
 
 export function exceedsRequestSize(error: unknown) {
-  return /\brequest_too_large\b/.test(error instanceof Error ? error.message : String(error));
+  return /\brequest_too_large\b|\bHTTP 413\b/.test(error instanceof Error ? error.message : String(error));
 }
 
 export const TOO_LARGE_FOR_REQUEST = "the page is too large for one request on its own";
