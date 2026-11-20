@@ -71,7 +71,7 @@ export function registerSessionTools(server: McpServer, deps: ToolDeps) {
     title: "Grant or clear site permissions",
     description: [
       "Grant browser permissions (geolocation, notifications, camera, microphone, clipboard-read, clipboard-write and others) to an origin, or clear the grants this tool made. Use it when a site asks for location, notifications, camera, microphone or clipboard access: the native permission prompt, the bubble under the address bar, is browser UI and not part of the page, so snapshot, click and dismiss_overlays cannot see or answer it. Grant the permission here, then reload or repeat the page action that asked.",
-      "Grants apply to that origin in every tab of the shared profile, add up across calls, and last until cleared or until the browser restarts. Clearing also drops a geolocation grant made by emulate.",
+      "Grants apply to that origin in every tab of the shared profile and add up across calls. The server keeps them and applies them again when the browser relaunches, so they last until cleared or until the server restarts; they are not saved in the profile. Clearing also drops a geolocation grant made by emulate.",
     ].join("\n"),
     input: {
       action: z.enum(["grant", "clear"]).describe("grant adds the permissions in grant for the origin; clear removes every grant of the origin (of all origins when neither origin nor tab is given)."),
