@@ -1,0 +1,447 @@
+[
+  {
+    "name": "find",
+    "description": "Search the page's elements for text, a role or a value and return the matching lines with their refs and context. Use it first to locate a control such as a toggle, tab, button or link by its words.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Words to look for, such as Yearly, Specifications or Shipping; matched case-insensitively."
+        },
+        "regex": {
+          "description": "Treat query as a regular expression.",
+          "type": "boolean"
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read_text",
+    "description": "Read the visible text of the page, or of one element with target. Long text comes in parts: the result says the offset to pass for the next part. markdown keeps headings, lists, tables and link URLs.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "format": {
+          "description": "text (default) or markdown.",
+          "type": "string",
+          "enum": [
+            "text",
+            "markdown"
+          ]
+        },
+        "offset": {
+          "description": "Character offset to continue from, as the previous result said.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "frames": {
+          "description": "Also read the text inside iframes.",
+          "type": "boolean"
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "snapshot",
+    "description": "List the page's elements as an indented tree with a ref on each, to see what you can act on. interactive true lists only buttons, links and fields, which is much shorter; target lists only one part of the page. Prefer find when you know the words you are after.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "interactive": {
+          "description": "Only buttons, links and fields.",
+          "type": "boolean"
+        },
+        "boxes": {
+          "description": "Add each element's position on screen.",
+          "type": "boolean"
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "screenshot",
+    "description": "Take a picture of what a visitor sees: the screen, the whole page with full_page, or one element with target. Use it for charts, images, hover effects and how a part of the page looks.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "full_page": {
+          "description": "The whole page instead of the screen.",
+          "type": "boolean"
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "extract",
+    "description": "Return the data the page declares for machines: product prices and availability, and every table as rows. Often the most exact source of a price or a spec.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "click",
+    "description": "Click an element by ref or selector, such as a toggle, a tab, a 'show more' button, an accordion header or a same-site link. The result says whether the page navigated or changed and lists the snapshot lines that changed. Buttons that buy, sign in, submit, subscribe, delete or download are refused.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "hover",
+    "description": "Move the mouse over an element and leave it there, to reveal menus, tooltips and card details that appear on hover. The result lists what appeared.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "scroll",
+    "description": "Scroll an element into view with target, or scroll the page in a direction, to reach content that loads late or sits further down.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "direction": {
+          "description": "Default down; top and bottom jump to the ends.",
+          "type": "string",
+          "enum": [
+            "down",
+            "up",
+            "left",
+            "right",
+            "top",
+            "bottom"
+          ]
+        },
+        "amount": {
+          "description": "Pixels to scroll. Default 800.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "press",
+    "description": "Press a key: Escape closes a menu or dialog, Tab and Shift+Tab move focus, the arrow keys, PageUp, PageDown, Home and End move through lists and tabs, Space toggles. Enter works only outside forms. With target, the element gets focus first.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key name, such as Escape, ArrowDown or Shift+Tab."
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "select_option",
+    "description": "Pick an option in a select box, or set a radio button or checkbox (option true or false), such as a region, size or billing period that changes what the page shows. Not for sign-in, checkout or other forms that send data.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "option": {
+          "type": "string",
+          "description": "The option's label or value, or true or false for a checkbox."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "option"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "search",
+    "description": "Type words into the site's search box and press Enter, to find a page of this site. Only search boxes are accepted.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What to search for."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wait_for",
+    "description": "Wait until a text appears, an element reaches a state, or the URL contains a text, for content that loads after an action. Give one of text, target or url.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "text": {
+          "description": "Wait until this text is visible.",
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The element: a ref from the latest find or snapshot of the tab, such as e12 or f2e12, or a selector such as text=Yearly."
+        },
+        "state": {
+          "description": "State for target. Default visible.",
+          "type": "string",
+          "enum": [
+            "visible",
+            "hidden",
+            "attached",
+            "detached"
+          ]
+        },
+        "url": {
+          "description": "Wait until the URL contains this.",
+          "type": "string",
+          "minLength": 1
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "navigate",
+    "description": "Load a URL of this site or of an allowed site in the tab, or go back or reload. Refs from before stop working; take a new find or snapshot.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A URL, or back or reload."
+        },
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "dismiss_overlays",
+    "description": "Close cookie banners, newsletter pop-ups and other overlays that cover the page, when a click fails because something is in the way.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "tab": {
+          "description": "Which of this task's tabs to use, such as t14. Default: the tab you used last.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_tabs",
+    "description": "List this task's tabs with their URLs: the page you started on and any tabs a click opened.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "close_tab",
+    "description": "Close a tab that a click opened during this task, when you are done with it.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "tab": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The tab to close, such as t15."
+        }
+      },
+      "required": [
+        "tab"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "report",
+    "description": "Finish the task: send the facts you found for this page with a status. Call it exactly once, as your last call.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "found",
+            "partial",
+            "not_found",
+            "blocked"
+          ],
+          "description": "found: everything the task asks for this page; partial: some of it; not_found: the page and the pages it links to do not show it; blocked: a sign-in wall, a CAPTCHA or a refused action stands in the way."
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The facts, one per entry, each naming its subject and keeping the conditions the page attaches."
+        },
+        "how": {
+          "type": "string",
+          "description": "One short English sentence on what you did, for the logs."
+        }
+      },
+      "required": [
+        "status",
+        "lines",
+        "how"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

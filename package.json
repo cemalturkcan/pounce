@@ -2,29 +2,38 @@
   "name": "web-agent-mcp",
   "version": "0.2.0",
   "private": true,
-  "type": "module",
   "description": "Browser automation MCP server: one persistent Chrome profile, ref-based targeting, bulk page collection, and server-side scripting.",
-  "engines": {
-    "node": ">=22.18.0"
-  },
+  "type": "module",
   "scripts": {
-    "daemon": "node src/server.ts --daemon",
-    "daemon:status": "node src/server.ts --daemon-status",
-    "daemon:stop": "node src/server.ts --daemon-stop",
-    "import-profile": "node src/server.ts --import-profile",
-    "dev": "node src/server.ts",
+    "daemon": "bun src/server.ts --daemon",
+    "daemon:status": "bun src/server.ts --daemon-status",
+    "daemon:stop": "bun src/server.ts --daemon-stop",
+    "import-profile": "bun src/server.ts --import-profile",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test \"src/**/*.test.ts\"",
-    "test:e2e": "node --test \"e2e/**/*.test.ts\""
+    "test": "bun test src",
+    "test:e2e": "bun test --timeout 300000 e2e",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint --deny-warnings",
+    "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run test && bun run test:e2e"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "patchright": "1.64.3",
-    "playwright-core": "1.64.1",
-    "zod": "^4.6.7"
+    "playwright-core": "1.65.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^22.19.0",
-    "typescript": "^7.0.2"
-  }
+    "@mswjs/interceptors": "0.45.12",
+    "@oxlint/plugins": "1.94.0",
+    "@types/bun": "1.4.5",
+    "msw": "3.0.7",
+    "oxfmt": "0.79.0",
+    "oxlint": "1.94.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": ">=1.4.5"
+  },
+  "packageManager": "bun@1.4.5"
 }

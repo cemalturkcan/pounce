@@ -1,13 +1,28 @@
-import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "../settle.ts";
-import { collectPages, renderCollectIndex } from "../collect.ts";
-import { ToolError } from "../errors.ts";
-import { untrusted } from "../output.ts";
-import { appendSiteNote, readSiteNotes, siteHost, siteNotesPath } from "../sites.ts";
-import { exportIndexedDb, listIndexedDb, readIndexedDbStore, readWebStorage, splitStoreKey, storageOrigin } from "../storage.ts";
-import { clipToFile, defineTool, pageBound, tabParam, type ToolDeps, type ToolInput, waitUntilParam } from "./common.ts";
+import { inSequence } from "../shared/async.ts";
+import { DEFAULT_MAX_WAIT_MS, DEFAULT_QUIET_MS } from "../page/settle.ts";
+import { collectPages, renderCollectIndex } from "../page/collect.ts";
+import { ToolError } from "../shared/errors.ts";
+import { untrusted } from "../shared/output.ts";
+import { appendSiteNote, readSiteNotes, siteHost, siteNotesPath } from "../page/sites.ts";
+import {
+  exportIndexedDb,
+  listIndexedDb,
+  readIndexedDbStore,
+  readWebStorage,
+  splitStoreKey,
+  storageOrigin,
+} from "../browser/storage.ts";
+import {
+  clipToFile,
+  defineTool,
+  tabParam,
+  type ToolDeps,
+  type ToolInput,
+  waitUntilParam,
+} from "./common.ts";
+import { pageBound } from "../page/bound.ts";
 
 export function cookieDomainMatches(cookieDomain: string, wanted: string) {
   const domain = cookieDomain.toLowerCase();
@@ -17,17 +32,39 @@ export function cookieDomainMatches(cookieDomain: string, wanted: string) {
 
 const cookiesInput = {
   action: z.enum(["list", "set", "delete", "export"]).describe("What to do."),
-  tab: tabParam.optional().describe("For list and export: only cookies that would be sent to this tab's current URL. For set: default URL for the cookie."),
-  domain: z.string().optional().describe("For list and export: keep cookies whose domain contains this. For delete: cookies of exactly this domain or its subdomains (x.com matches x.com and a.x.com, not netflix.com). For set: the cookie's domain, for example .example.com."),
-  name: z.string().optional().describe("Cookie name. Required for set; a filter for list, delete and export."),
+  tab: tabParam
+    .optional()
+    .describe(
+      "For list and export: only cookies that would be sent to this tab's current URL. For set: default URL for the cookie.",
+    ),
+  domain: z
+    .string()
+    .optional()
+    .describe(
+      "For list and export: keep cookies whose domain contains this. For delete: cookies of exactly this domain or its subdomains (x.com matches x.com and a.x.com, not netflix.com). For set: the cookie's domain, for example .example.com.",
+    ),
+  name: z
+    .string()
+    .optional()
+    .describe("Cookie name. Required for set; a filter for list, delete and export."),
   value: z.string().optional().describe("For set: cookie value."),
   path: z.string().optional().describe("For set: cookie path. Default /."),
-  url: z.string().optional().describe("For set: URL the cookie belongs to, as an alternative to domain and path."),
-  expires_in_seconds: z.number().int().optional().describe("For set: lifetime from now. Omit for a session cookie."),
+  url: z
+    .string()
+    .optional()
+    .describe("For set: URL the cookie belongs to, as an alternative to domain and path."),
+  expires_in_seconds: z
+    .number()
+    .int()
+    .optional()
+    .describe("For set: lifetime from now. Omit for a session cookie."),
   http_only: z.boolean().optional().describe("For set. Default false."),
   secure: z.boolean().optional().describe("For set. Default true for https URLs."),
   same_site: z.enum(["Strict", "Lax", "None"]).optional().describe("For set."),
-  full_values: z.boolean().optional().describe("For list: show whole values instead of the first 60 characters. Default false."),
+  full_values: z
+    .boolean()
+    .optional()
+    .describe("For list: show whole values instead of the first 60 characters. Default false."),
 };
 
 async function manageCookies({ manager, store }: ToolDeps, input: ToolInput<typeof cookiesInput>) {
@@ -37,13 +74,19 @@ async function manageCookies({ manager, store }: ToolDeps, input: ToolInput<type
   if (input.action === "set") {
     if (!input.name || input.value === undefined) throw new ToolError("set needs name and value.");
     const url = input.domain ? undefined : (input.url ?? tab?.page.url());
-    if (!input.domain && !url) throw new ToolError("set needs domain, url, or tab to know which site the cookie belongs to.");
+    if (!input.domain && !url)
+      throw new ToolError(
+        "set needs domain, url, or tab to know which site the cookie belongs to.",
+      );
     await context.addCookies([
       {
         name: input.name,
         value: input.value,
         ...(input.domain ? { domain: input.domain, path: input.path ?? "/" } : { url }),
-        expires: input.expires_in_seconds === undefined ? undefined : Math.floor(Date.now() / 1000) + input.expires_in_seconds,
+        expires:
+          input.expires_in_seconds === undefined
+            ? undefined
+            : Math.floor(Date.now() / 1000) + input.expires_in_seconds,
         httpOnly: input.http_only,
         secure: input.secure ?? (input.domain ? undefined : url?.startsWith("https:")),
         sameSite: input.same_site,
@@ -53,25 +96,50 @@ async function manageCookies({ manager, store }: ToolDeps, input: ToolInput<type
   }
 
   const domain = input.domain?.toLowerCase();
-  const domainMatches = input.action === "delete" ? cookieDomainMatches : (cookieDomain: string, wanted: string) => cookieDomain.toLowerCase().includes(wanted);
+  const domainMatches =
+    input.action === "delete"
+      ? cookieDomainMatches
+      : (cookieDomain: string, wanted: string) => cookieDomain.toLowerCase().includes(wanted);
   const cookies = (await context.cookies(tab ? [tab.page.url()] : undefined))
     .filter((cookie) => !domain || domainMatches(cookie.domain, domain))
     .filter((cookie) => !input.name || cookie.name === input.name);
 
   if (input.action === "delete") {
-    if (!input.domain && !input.name) throw new ToolError("delete needs domain or name, so it cannot wipe every cookie by accident.");
-    for (const cookie of cookies) await context.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path });
+    if (!input.domain && !input.name)
+      throw new ToolError(
+        "delete needs domain or name, so it cannot wipe every cookie by accident.",
+      );
+    await inSequence(cookies, (cookie) =>
+      context.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path }),
+    );
     return `Deleted ${cookies.length} cookies.`;
   }
   if (cookies.length === 0) return "No matching cookies.";
   if (input.action === "export") {
-    const file = await store.write("cookies", store.uniqueName(input.domain ?? tab?.id ?? "cookies", "json"), JSON.stringify(cookies, null, 2), { raw: true });
+    const file = await store.write(
+      "cookies",
+      store.uniqueName(input.domain ?? tab?.id ?? "cookies", "json"),
+      JSON.stringify(cookies, null, 2),
+      { raw: true },
+    );
     return `Exported ${cookies.length} cookies to ${file}`;
   }
   return cookies
     .map((cookie) => {
-      const value = input.full_values || cookie.value.length <= 60 ? cookie.value : `${cookie.value.slice(0, 60)}… (${cookie.value.length} chars)`;
-      const flags = [cookie.httpOnly ? "HttpOnly" : "", cookie.secure ? "Secure" : "", cookie.sameSite, cookie.expires > 0 ? `expires ${new Date(cookie.expires * 1000).toISOString().slice(0, 10)}` : "session"].filter(Boolean).join(" ");
+      const value =
+        input.full_values || cookie.value.length <= 60
+          ? cookie.value
+          : `${cookie.value.slice(0, 60)}… (${cookie.value.length} chars)`;
+      const flags = [
+        cookie.httpOnly ? "HttpOnly" : "",
+        cookie.secure ? "Secure" : "",
+        cookie.sameSite,
+        cookie.expires > 0
+          ? `expires ${new Date(cookie.expires * 1000).toISOString().slice(0, 10)}`
+          : "session",
+      ]
+        .filter(Boolean)
+        .join(" ");
       return `${cookie.domain}${cookie.path} ${cookie.name}=${value} [${flags}]`;
     })
     .join("\n");
@@ -80,9 +148,22 @@ async function manageCookies({ manager, store }: ToolDeps, input: ToolInput<type
 const storageInput = {
   tab: tabParam,
   action: z.enum(["list", "get", "export"]).describe("What to do."),
-  area: z.enum(["local", "session", "indexeddb"]).describe("localStorage, sessionStorage, or IndexedDB."),
-  key: z.string().optional().describe("For get: the storage key, or for indexeddb the database/store name (the store name alone works when it is unique)."),
-  max_chars: z.number().int().min(200).max(200_000).optional().describe("Character budget for get. Default 8000."),
+  area: z
+    .enum(["local", "session", "indexeddb"])
+    .describe("localStorage, sessionStorage, or IndexedDB."),
+  key: z
+    .string()
+    .optional()
+    .describe(
+      "For get: the storage key, or for indexeddb the database/store name (the store name alone works when it is unique).",
+    ),
+  max_chars: z
+    .number()
+    .int()
+    .min(200)
+    .max(200_000)
+    .optional()
+    .describe("Character budget for get. Default 8000."),
 };
 
 async function readStorage({ manager, store }: ToolDeps, input: ToolInput<typeof storageInput>) {
@@ -93,34 +174,73 @@ async function readStorage({ manager, store }: ToolDeps, input: ToolInput<typeof
     if (input.action === "list") {
       const stores = await listIndexedDb(tab.page);
       if (stores.length === 0) return `No IndexedDB databases for ${origin}.`;
-      return untrusted(tab.page.url(), stores.map((entry) => `${entry.database}/${entry.store} (${entry.count < 0 ? "?" : entry.count} records)`).join("\n"));
+      return untrusted(
+        tab.page.url(),
+        stores
+          .map(
+            (entry) =>
+              `${entry.database}/${entry.store} (${entry.count < 0 ? "?" : entry.count} records)`,
+          )
+          .join("\n"),
+      );
     }
     if (input.action === "export") {
       const { stores, data } = await exportIndexedDb(tab.page);
-      const file = await store.write("storage", store.uniqueName(`${origin}-indexeddb`, "json"), JSON.stringify({ origin, databases: data }, null, 2), { raw: true });
+      const file = await store.write(
+        "storage",
+        store.uniqueName(`${origin}-indexeddb`, "json"),
+        JSON.stringify({ origin, databases: data }, null, 2),
+        { raw: true },
+      );
       return `Exported ${stores.length} IndexedDB object stores of ${origin} to ${file}`;
     }
     if (!input.key) throw new ToolError("get needs key (database/store).");
     const found = splitStoreKey(input.key, await listIndexedDb(tab.page));
     const { records, truncated } = await readIndexedDbStore(tab.page, found.database, found.store);
-    const note = truncated ? `\n[stopped after ${records.length} records; use export or run_script for the rest]` : "";
-    const body = await clipToFile(store, "storage", `${origin}-${found.database}-${found.store}`, JSON.stringify(records, null, 2), input.max_chars ?? 8000);
-    return untrusted(tab.page.url(), `${found.database}/${found.store}: ${records.length} records\n${body}${note}`);
+    const note = truncated
+      ? `\n[stopped after ${records.length} records; use export or run_script for the rest]`
+      : "";
+    const body = await clipToFile(
+      store,
+      "storage",
+      `${origin}-${found.database}-${found.store}`,
+      JSON.stringify(records, null, 2),
+      input.max_chars ?? 8000,
+    );
+    return untrusted(
+      tab.page.url(),
+      `${found.database}/${found.store}: ${records.length} records\n${body}${note}`,
+    );
   }
   const entries = await readWebStorage(tab.page, input.area);
   const keys = Object.keys(entries);
   if (input.action === "export") {
-    const file = await store.write("storage", store.uniqueName(`${origin}-${input.area}`, "json"), JSON.stringify({ origin, area: input.area, entries }, null, 2), { raw: true });
+    const file = await store.write(
+      "storage",
+      store.uniqueName(`${origin}-${input.area}`, "json"),
+      JSON.stringify({ origin, area: input.area, entries }, null, 2),
+      { raw: true },
+    );
     return `Exported ${keys.length} ${label} entries of ${origin} to ${file}`;
   }
   if (input.action === "list") {
     if (keys.length === 0) return `${label} of ${origin} is empty.`;
-    return untrusted(tab.page.url(), keys.map((key) => `${key} (${entries[key]?.length ?? 0} chars)`).join("\n"));
+    return untrusted(
+      tab.page.url(),
+      keys.map((key) => `${key} (${entries[key]?.length ?? 0} chars)`).join("\n"),
+    );
   }
   if (input.key === undefined) throw new ToolError("get needs key.");
   const value = entries[input.key];
-  if (value === undefined) throw new ToolError(`${label} of ${origin} has no key ${JSON.stringify(input.key)}.`, "List the keys with action list.");
-  return untrusted(tab.page.url(), await clipToFile(store, "storage", `${origin}-${input.key}`, value, input.max_chars ?? 8000));
+  if (value === undefined)
+    throw new ToolError(
+      `${label} of ${origin} has no key ${JSON.stringify(input.key)}.`,
+      "List the keys with action list.",
+    );
+  return untrusted(
+    tab.page.url(),
+    await clipToFile(store, "storage", `${origin}-${input.key}`, value, input.max_chars ?? 8000),
+  );
 }
 
 export function registerDataTools(server: McpServer, deps: ToolDeps) {
@@ -132,33 +252,93 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     description:
       "Open a list of URLs in parallel tabs, save each page's content to files, close the tabs, and return a compact index (status, final URL, title, text length, file names, short preview). Use it when a task covers many pages, such as every product in a list, a set of articles or docs, or all routes of a site, so their content stays out of this conversation. Per page it can save the visible text, Markdown, the list of links, the accessibility snapshot, a screenshot and structured data. Afterwards ask_pages answers a question over the folder (pass it as dir), or read and grep the files yourself; for one or two pages, read_text is simpler. A cookie banner on a page is accepted before its content is saved (WEB_AGENT_AUTO_CONSENT on the server: accept, reject or off). A page that does not load or answer within its time limit is reported as failed and its tab is closed anyway. Collected files are transient: they are deleted after 7 days (checked at server start and every 24 hours).",
     input: {
-      urls: z.array(z.string().min(1)).min(1).max(200).describe("URLs to load. https:// is assumed when no scheme is given."),
+      urls: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(200)
+        .describe("URLs to load. https:// is assumed when no scheme is given."),
       include: z
         .array(z.enum(["text", "markdown", "links", "snapshot", "screenshot", "structured"]))
         .optional()
-        .describe("What to save per page. markdown saves the content as a .md file with headings, lists, links, code blocks and tables kept. structured saves JSON-LD, meta tags and tables as JSON and adds product name, price and availability to the index when the page declares them. Default [\"text\"]."),
-      scope: z.enum(["main", "page"]).optional().describe("For text and markdown: main keeps the main content area when the page marks one; page keeps everything. Default main."),
-      full_page: z.boolean().optional().describe("For screenshot: capture the whole scrollable page instead of the viewport. Default true."),
-      concurrency: z.number().int().min(1).max(12).optional().describe("Tabs loading at once. Default 6."),
+        .describe(
+          'What to save per page. markdown saves the content as a .md file with headings, lists, links, code blocks and tables kept. structured saves JSON-LD, meta tags and tables as JSON and adds product name, price and availability to the index when the page declares them. Default ["text"].',
+        ),
+      scope: z
+        .enum(["main", "page"])
+        .optional()
+        .describe(
+          "For text and markdown: main keeps the main content area when the page marks one; page keeps everything. Default main.",
+        ),
+      full_page: z
+        .boolean()
+        .optional()
+        .describe(
+          "For screenshot: capture the whole scrollable page instead of the viewport. Default true.",
+        ),
+      concurrency: z
+        .number()
+        .int()
+        .min(1)
+        .max(12)
+        .optional()
+        .describe("Tabs loading at once. Default 6."),
       wait_until: waitUntilParam,
-      settle_ms: z.number().int().min(0).max(30_000).optional().describe("Quiet window: after the navigation milestone, the page is saved once its main content has stopped changing for this long and no loading spinner or skeleton is visible, so pages that render with JavaScript are captured complete. Default 800."),
-      max_wait_ms: z.number().int().min(0).max(60_000).optional().describe("Longest wait for the content to settle; a page still changing then is saved as it is and flagged in the index. Never longer than timeout_ms. Default 8000."),
+      settle_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(30_000)
+        .optional()
+        .describe(
+          "Quiet window: after the navigation milestone, the page is saved once its main content has stopped changing for this long and no loading spinner or skeleton is visible, so pages that render with JavaScript are captured complete. Default 800.",
+        ),
+      max_wait_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(60_000)
+        .optional()
+        .describe(
+          "Longest wait for the content to settle; a page still changing then is saved as it is and flagged in the index. Never longer than timeout_ms. Default 8000.",
+        ),
       timeout_ms: z
         .number()
         .int()
         .min(100)
         .max(120_000)
         .optional()
-        .describe("Time limit per page in milliseconds for loading it, and the same again for saving its content; settle_ms is added on top. Default 30000."),
-      preview_chars: z.number().int().min(0).max(2000).optional().describe("Characters of text shown per page in the index; 0 for none. Default 160."),
+        .describe(
+          "Time limit per page in milliseconds for loading it, and the same again for saving its content; settle_ms is added on top. Default 30000.",
+        ),
+      preview_chars: z
+        .number()
+        .int()
+        .min(0)
+        .max(2000)
+        .optional()
+        .describe("Characters of text shown per page in the index; 0 for none. Default 160."),
       scroll: z
         .object({
           max_steps: z.number().int().min(1).max(200).describe("Most scroll steps per page."),
-          step_px: z.number().int().min(50).max(20_000).optional().describe("Pixels per step. Default 90% of the window height."),
-          idle_ms: z.number().int().min(50).max(10_000).optional().describe("Wait after each step for new content. Default 600."),
+          step_px: z
+            .number()
+            .int()
+            .min(50)
+            .max(20_000)
+            .optional()
+            .describe("Pixels per step. Default 90% of the window height."),
+          idle_ms: z
+            .number()
+            .int()
+            .min(50)
+            .max(10_000)
+            .optional()
+            .describe("Wait after each step for new content. Default 600."),
         })
         .optional()
-        .describe("Scroll each page down before saving it, for lazy-loaded and infinite-scroll pages: stops at the bottom once the page height stops growing, or after max_steps. The index reports the steps taken."),
+        .describe(
+          "Scroll each page down before saving it, for lazy-loaded and infinite-scroll pages: stops at the bottom once the page height stops growing, or after max_steps. The index reports the steps taken.",
+        ),
       label: z.string().optional().describe("Short name used in the output folder name."),
     },
     handler: async (input, owner, signal) => {
@@ -173,7 +353,13 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
         timeoutMs: input.timeout_ms ?? 30_000,
         fullPage: input.full_page ?? true,
         previewChars: input.preview_chars ?? 160,
-        scroll: input.scroll ? { maxSteps: input.scroll.max_steps, stepPx: input.scroll.step_px, idleMs: input.scroll.idle_ms ?? 600 } : undefined,
+        scroll: input.scroll
+          ? {
+              maxSteps: input.scroll.max_steps,
+              stepPx: input.scroll.step_px,
+              idleMs: input.scroll.idle_ms ?? 600,
+            }
+          : undefined,
         label: input.label,
         signal,
       });
@@ -206,10 +392,23 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
     description:
       "Read or add to the notes kept for one website, a Markdown file per host name that survives between sessions. Record what took effort to find out: working selectors, API endpoints and their parameters, pagination schemes, login steps, rate limits and quirks; the next visit then starts from them. tab_open and navigate mention when a host has notes, and reading them first saves working the site out again. Notes are written by agents, not by the site, and are not shared with any other machine; an old note is a lead to check, not a fact.",
     input: {
-      action: z.enum(["read", "append"]).describe("read returns the notes; append adds one dated line."),
+      action: z
+        .enum(["read", "append"])
+        .describe("read returns the notes; append adds one dated line."),
       tab: tabParam.optional().describe("Use the host of this tab's current URL."),
-      site: z.string().optional().describe("Host name or URL, for example shop.example.com, when no tab is given. A leading www. is ignored."),
-      note: z.string().max(2000).optional().describe("For append: one line with what took effort to learn, such as an endpoint with its parameters, a pagination scheme, a working selector or a quirk."),
+      site: z
+        .string()
+        .optional()
+        .describe(
+          "Host name or URL, for example shop.example.com, when no tab is given. A leading www. is ignored.",
+        ),
+      note: z
+        .string()
+        .max(2000)
+        .optional()
+        .describe(
+          "For append: one line with what took effort to learn, such as an endpoint with its parameters, a pagination scheme, a working selector or a quirk.",
+        ),
     },
     handler: async (input) => {
       const source = input.site ?? (input.tab ? manager.getTab(input.tab).page.url() : undefined);
@@ -222,7 +421,8 @@ export function registerDataTools(server: McpServer, deps: ToolDeps) {
         return `Added a note for ${host} to ${file}.`;
       }
       const notes = await readSiteNotes(sitesDir, host);
-      if (!notes) return `No notes for ${host} yet. Add one with action append once you learn something worth keeping.`;
+      if (!notes)
+        return `No notes for ${host} yet. Add one with action append once you learn something worth keeping.`;
       return `Notes for ${host} (${siteNotesPath(sitesDir, host)}):\n${notes.trimEnd()}`;
     },
   });

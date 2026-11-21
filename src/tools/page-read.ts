@@ -1,15 +1,26 @@
-import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readTabBody, tabBodyType } from "../body.ts";
-import { capture } from "../capture.ts";
-import { extractPage, summarizeStructured, toCsv } from "../extract.ts";
-import { framesText } from "../frames.ts";
-import { elementMarkdown, pageMarkdown } from "../markdown.ts";
-import { clipWindow, untrusted } from "../output.ts";
-import { pageText, rawSnapshot, renderSnapshot } from "../page.ts";
-import { buildMatcher, findInSnapshot } from "../snapshot.ts";
-import { clipToFile, defineTool, INLINE_SCREENSHOT_MAX_HEIGHT, pageBound, tabParam, targetParam, type ToolDeps } from "./common.ts";
+import { inSequence } from "../shared/async.ts";
+import { readTabBody, tabBodyType } from "../page/body.ts";
+import { capture } from "../page/capture.ts";
+import { extractPage, summarizeStructured, toCsv } from "../page/extract.ts";
+import { framesText } from "../page/frames.ts";
+import { elementMarkdown, pageMarkdown } from "../page/markdown.ts";
+import { clipWindow, untrusted } from "../shared/output.ts";
+import { pageText, rawSnapshot, renderSnapshot } from "../page/page.ts";
+import { buildMatcher, findInSnapshot } from "../page/snapshot.ts";
+import {
+  clipToFile,
+  defineTool,
+  INLINE_SCREENSHOT_MAX_HEIGHT,
+  tabParam,
+  targetParam,
+  type ToolDeps,
+} from "./common.ts";
+import { drainConsole } from "../browser/page-hooks.ts";
+import { pageBound } from "../page/bound.ts";
+
+const snapshotSchema = z.object({ data: z.string() });
 
 export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
   const { manager, store } = deps;
@@ -21,11 +32,37 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       "Return the page's accessibility tree as indented text, with a ref such as [ref=e12] on each element that click, fill and the other action tools take as target; iframe content is included. A ref such as f2e12 starts with the number of the document the element belongs to: each iframe has its own, and the page gets a new one every time it loads (navigation or reload). Use it to see what a page offers and which elements you can act on. A ref stays valid while its element stays on the page with the same role and name; after a navigation or reload every earlier ref stops working, so take a new snapshot. interactive: true returns only a flat list of buttons, links and inputs, which is much smaller. With target, the whole page is still snapshotted and only that element's subtree is returned, so refs from earlier snapshots keep working. When you know the label or role you are after, find is cheaper; to read an article, documentation or results, read_text returns clean text without refs. Output above max_chars is cut in the middle and the full tree is saved to a file whose path is in the result.",
     input: {
       tab: tabParam,
-      target: targetParam.optional().describe("Return only this element's subtree (ref or selector); refs elsewhere on the page stay valid."),
-      depth: z.number().int().min(1).max(50).optional().describe("Maximum tree depth to include, counted from target when one is given."),
-      interactive: z.boolean().optional().describe("Return only a flat list of interactive elements (buttons, links, inputs). Much smaller. Default false."),
-      boxes: z.boolean().optional().describe("Append each element's viewport rectangle as [box=x,y,width,height], to relate refs to a screenshot. Default false."),
-      max_chars: z.number().int().min(500).max(200_000).optional().describe("Character budget for the result. Default 20000."),
+      target: targetParam
+        .optional()
+        .describe(
+          "Return only this element's subtree (ref or selector); refs elsewhere on the page stay valid.",
+        ),
+      depth: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Maximum tree depth to include, counted from target when one is given."),
+      interactive: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return only a flat list of interactive elements (buttons, links, inputs). Much smaller. Default false.",
+        ),
+      boxes: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append each element's viewport rectangle as [box=x,y,width,height], to relate refs to a screenshot. Default false.",
+        ),
+      max_chars: z
+        .number()
+        .int()
+        .min(500)
+        .max(200_000)
+        .optional()
+        .describe("Character budget for the result. Default 20000."),
     },
     readOnly: true,
     handler: async (input) => {
@@ -48,17 +85,39 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       "Search the page's accessibility tree for a text, role or value and return only the matching lines, each with its ref and its ancestor lines for context. Use it instead of a full snapshot when you know what you are looking for, such as a button label, a link text or a field name, then act on the ref it returns. Matching is a case-insensitive substring unless regex is set. To read content rather than locate elements, read_text is the better fit.",
     input: {
       tab: tabParam,
-      query: z.string().min(1).describe("Text to look for in element roles, names and values, for example \"Add to cart\" or \"textbox\"."),
-      regex: z.boolean().optional().describe("Treat query as a case-insensitive regular expression. Default false."),
-      max_results: z.number().int().min(1).max(200).optional().describe("Maximum matches to return. Default 30."),
+      query: z
+        .string()
+        .min(1)
+        .describe(
+          'Text to look for in element roles, names and values, for example "Add to cart" or "textbox".',
+        ),
+      regex: z
+        .boolean()
+        .optional()
+        .describe("Treat query as a case-insensitive regular expression. Default false."),
+      max_results: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Maximum matches to return. Default 30."),
     },
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const snapshot = await rawSnapshot(manager, tab, {});
-      const found = findInSnapshot(snapshot, buildMatcher(input.query, input.regex ?? false), input.max_results ?? 30);
-      if (found.matches === 0) return `No match for ${JSON.stringify(input.query)} on ${tab.page.url()}.`;
-      const note = found.matches > found.shown ? ` (showing ${found.shown}; narrow the query or raise max_results)` : "";
+      const found = findInSnapshot(
+        snapshot,
+        buildMatcher(input.query, input.regex ?? false),
+        input.max_results ?? 30,
+      );
+      if (found.matches === 0)
+        return `No match for ${JSON.stringify(input.query)} on ${tab.page.url()}.`;
+      const note =
+        found.matches > found.shown
+          ? ` (showing ${found.shown}; narrow the query or raise max_results)`
+          : "";
       return untrusted(tab.page.url(), `${found.matches} matches${note}:\n${found.text}`);
     },
   });
@@ -73,39 +132,83 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Read only this element's text (ref or selector)."),
-      scope: z.enum(["main", "page"]).optional().describe("main returns the main content area when the page marks one, skipping navigation and footers; page returns everything. Default page. Ignored when target is set."),
-      format: z.enum(["text", "markdown"]).optional().describe("text is the rendered text as the user sees it; markdown keeps structure and link URLs. Default text."),
-      offset: z.number().int().min(0).optional().describe("Character offset to start from. Default 0."),
-      max_chars: z.number().int().min(200).max(200_000).optional().describe("Characters to return. Default 12000."),
-      frames: z.boolean().optional().describe("Append the text of every iframe, same-origin or cross-origin, each after a line \"--- frame: <url> ---\". Default false. Ignored when target is set."),
+      scope: z
+        .enum(["main", "page"])
+        .optional()
+        .describe(
+          "main returns the main content area when the page marks one, skipping navigation and footers; page returns everything. Default page. Ignored when target is set.",
+        ),
+      format: z
+        .enum(["text", "markdown"])
+        .optional()
+        .describe(
+          "text is the rendered text as the user sees it; markdown keeps structure and link URLs. Default text.",
+        ),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Character offset to start from. Default 0."),
+      max_chars: z
+        .number()
+        .int()
+        .min(200)
+        .max(200_000)
+        .optional()
+        .describe("Characters to return. Default 12000."),
+      frames: z
+        .boolean()
+        .optional()
+        .describe(
+          'Append the text of every iframe, same-origin or cross-origin, each after a line "--- frame: <url> ---". Default false. Ignored when target is set.',
+        ),
     },
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const scope = input.scope ?? "page";
       const read = await pageBound(
-        (async (): Promise<{ early: string } | { text: string; frameText: string; body: Awaited<ReturnType<typeof readTabBody>> | undefined }> => {
+        (async (): Promise<
+          | { early: string }
+          | {
+              text: string;
+              frameText: string;
+              body: Awaited<ReturnType<typeof readTabBody>> | undefined;
+            }
+        > => {
           const bodyType = input.target ? undefined : await tabBodyType(tab.page);
-          const body = bodyType && bodyType.kind !== "html" ? await readTabBody(tab, bodyType, store) : undefined;
+          const body =
+            bodyType && bodyType.kind !== "html"
+              ? await readTabBody(tab, bodyType, store)
+              : undefined;
           if (body && body.text === undefined) return { early: body.note ?? "" };
           const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
-          const text: string = body?.text !== undefined
-            ? body.text
-            : input.format === "markdown"
-              ? locator
-                ? await elementMarkdown(locator)
-                : await pageMarkdown(tab.page, scope)
-              : locator
-                ? await locator.innerText()
-                : await pageText(tab.page, scope);
-          const frameText = input.frames && !locator && body === undefined ? await framesText(tab.page, input.format ?? "text") : "";
+          const text: string =
+            body?.text !== undefined
+              ? body.text
+              : input.format === "markdown"
+                ? locator
+                  ? await elementMarkdown(locator)
+                  : await pageMarkdown(tab.page, scope)
+                : locator
+                  ? await locator.innerText()
+                  : await pageText(tab.page, scope);
+          const frameText =
+            input.frames && !locator && body === undefined
+              ? await framesText(tab.page, input.format ?? "text")
+              : "";
           return { text, frameText, body };
         })(),
         "read_text",
       );
       if ("early" in read) return read.early;
       const { text, frameText, body } = read;
-      const window = clipWindow(frameText ? `${text}\n\n${frameText}` : text, input.offset ?? 0, input.max_chars ?? 12_000);
+      const window = clipWindow(
+        frameText ? `${text}\n\n${frameText}` : text,
+        input.offset ?? 0,
+        input.max_chars ?? 12_000,
+      );
       const footer = window.hasMore
         ? `\n[chars ${window.start}-${window.end} of ${window.totalChars}; pass offset=${window.end} for more]`
         : `\n[chars ${window.start}-${window.end} of ${window.totalChars}; end of text]`;
@@ -122,22 +225,45 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     input: {
       tab: tabParam,
       target: targetParam.optional().describe("Capture only this element (ref or selector)."),
-      full_page: z.boolean().optional().describe("Capture the whole scrollable page instead of the viewport. Default false."),
+      full_page: z
+        .boolean()
+        .optional()
+        .describe("Capture the whole scrollable page instead of the viewport. Default false."),
       quality: z.number().int().min(20).max(100).optional().describe("JPEG quality. Default 70."),
-      save_only: z.boolean().optional().describe("Save the file and return only its path, without the inline image. Default false."),
+      save_only: z
+        .boolean()
+        .optional()
+        .describe(
+          "Save the file and return only its path, without the inline image. Default false.",
+        ),
     },
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const locator = input.target ? await manager.resolve(tab, input.target) : undefined;
-      const image = await capture(tab.page, { format: "jpeg", quality: input.quality ?? 70, timeoutMs: 20_000, locator, fullPage: !locator && (input.full_page ?? false) });
-      const file = await store.write("screenshots", store.uniqueName(`${tab.id}-${tab.page.url()}`, "jpg"), image);
-      const pageHeight = input.full_page ? await tab.page.evaluate(() => document.documentElement.scrollHeight).catch(() => 0) : 0;
+      const image = await capture(tab.page, {
+        format: "jpeg",
+        quality: input.quality ?? 70,
+        timeoutMs: 20_000,
+        locator,
+        fullPage: !locator && (input.full_page ?? false),
+      });
+      const file = await store.write(
+        "screenshots",
+        store.uniqueName(`${tab.id}-${tab.page.url()}`, "jpg"),
+        image,
+      );
+      const pageHeight = input.full_page
+        ? await tab.page.evaluate(() => document.documentElement.scrollHeight).catch(() => 0)
+        : 0;
       if (input.save_only) return `Screenshot saved to ${file}`;
       if (pageHeight > INLINE_SCREENSHOT_MAX_HEIGHT) {
         return `Screenshot saved to ${file}. The page is ${pageHeight}px tall, too large to return inline; read the file, or capture a target or the viewport.`;
       }
-      return { text: `Screenshot of ${tab.page.url()} saved to ${file}`, images: [{ data: image, mimeType: "image/jpeg" }] };
+      return {
+        text: `Screenshot of ${tab.page.url()} saved to ${file}`,
+        images: [{ data: image, mimeType: "image/jpeg" }],
+      };
     },
   });
 
@@ -148,20 +274,37 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       "Return the console messages and uncaught errors captured for a tab, newest last. Use it when a page misbehaves or shows a blank area, to look for JavaScript errors, or to check a local app for warnings. With the default patchright engine, the page's own console calls and uncaught errors are captured only on local development hosts (localhost, 127.0.0.1, *.localhost, *.test) unless the server runs with WEB_AGENT_CONSOLE_HOOK=all (every site) or off (none). With WEB_AGENT_ENGINE=playwright they are captured on every site and WEB_AGENT_CONSOLE_HOOK has no effect. Messages Chrome itself logs about the page, such as a Permissions-Policy header error, are captured on every site. Failed requests are in network_requests, and failures of this server's own tools in server_log.",
     input: {
       tab: tabParam,
-      level: z.enum(["all", "errors"]).optional().describe("errors keeps only error and warning entries. Default all."),
-      pattern: z.string().optional().describe("Keep only entries whose text contains this, case-insensitive."),
-      limit: z.number().int().min(1).max(300).optional().describe("Maximum entries to return. Default 40."),
+      level: z
+        .enum(["all", "errors"])
+        .optional()
+        .describe("errors keeps only error and warning entries. Default all."),
+      pattern: z
+        .string()
+        .optional()
+        .describe("Keep only entries whose text contains this, case-insensitive."),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(300)
+        .optional()
+        .describe("Maximum entries to return. Default 40."),
     },
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const pattern = input.pattern?.toLowerCase();
-      const entries = (await manager.drainConsole(tab))
+      const entries = (await drainConsole(manager.config.engine, tab))
         .filter((entry) => input.level !== "errors" || /error|warn/i.test(entry.level))
         .filter((entry) => !pattern || entry.text.toLowerCase().includes(pattern))
         .slice(-(input.limit ?? 40));
       if (entries.length === 0) return `No console entries captured for ${tab.page.url()}.`;
-      return untrusted(tab.page.url(), entries.map((entry) => `${entry.time.slice(11, 19)} ${entry.level}: ${entry.text}`).join("\n"));
+      return untrusted(
+        tab.page.url(),
+        entries
+          .map((entry) => `${entry.time.slice(11, 19)} ${entry.level}: ${entry.text}`)
+          .join("\n"),
+      );
     },
   });
 
@@ -172,20 +315,40 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       "Return the machine-readable data a page declares: JSON-LD objects (products with price and availability, articles, events, breadcrumbs), Open Graph and other meta tags, and every HTML table as rows. Tables are also saved as CSV files, which are kept until you delete them. Use it first when the task asks for a product's name, price, availability or specs, or for a table's contents: it is faster and more exact than reading them out of the page text. A price here is what the page declares, which can differ from a signed-in or checkout price. When a page declares nothing useful, read_text with format markdown keeps its tables and lists; for the same data across many pages, collect_pages with include structured.",
     input: {
       tab: tabParam,
-      max_chars: z.number().int().min(200).max(200_000).optional().describe("Character budget for the JSON in the result; the full data is saved to a file when larger. Default 10000."),
+      max_chars: z
+        .number()
+        .int()
+        .min(200)
+        .max(200_000)
+        .optional()
+        .describe(
+          "Character budget for the JSON in the result; the full data is saved to a file when larger. Default 10000.",
+        ),
     },
     readOnly: true,
     handler: async (input) => {
       const tab = manager.getTab(input.tab);
       const data = await pageBound(extractPage(tab.page), "extract");
-      const tables = [];
-      for (const [index, table] of data.tables.entries()) {
-        const file = await store.write("extract", store.uniqueName(`${tab.id}-table-${index + 1}`, "csv"), toCsv(table.rows));
-        tables.push({ caption: table.caption, rows: table.rows.length, columns: table.rows[0]?.length ?? 0, header: table.rows[0], file });
-      }
+      const tables = await inSequence(data.tables, async (table, index) => {
+        const file = await store.write(
+          "extract",
+          store.uniqueName(`${tab.id}-table-${index + 1}`, "csv"),
+          toCsv(table.rows),
+        );
+        return {
+          caption: table.caption,
+          rows: table.rows.length,
+          columns: table.rows[0]?.length ?? 0,
+          header: table.rows[0],
+          file,
+        };
+      });
       const summary = summarizeStructured(data);
       const body = JSON.stringify({ jsonld: data.jsonld, meta: data.meta, tables }, null, 2);
-      return untrusted(tab.page.url(), `${summary ? `${summary}\n` : ""}${await clipToFile(store, "extract", `${tab.id}-structured`, body, input.max_chars ?? 10_000)}`);
+      return untrusted(
+        tab.page.url(),
+        `${summary ? `${summary}\n` : ""}${await clipToFile(store, "extract", `${tab.id}-structured`, body, input.max_chars ?? 10_000)}`,
+      );
     },
   });
 
@@ -197,7 +360,10 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
     input: {
       tab: tabParam,
       format: z.enum(["pdf", "mhtml", "html"]).describe("File format."),
-      label: z.string().optional().describe("Short name used in the file name. Default: the page URL."),
+      label: z
+        .string()
+        .optional()
+        .describe("Short name used in the file name. Default: the page URL."),
     },
     readOnly: true,
     handler: async (input) => {
@@ -209,7 +375,9 @@ export function registerPageReadTools(server: McpServer, deps: ToolDeps) {
       } else if (input.format === "mhtml") {
         const session = await tab.page.context().newCDPSession(tab.page);
         try {
-          content = ((await session.send("Page.captureSnapshot", { format: "mhtml" })) as { data: string }).data;
+          content = snapshotSchema.parse(
+            await session.send("Page.captureSnapshot", { format: "mhtml" }),
+          ).data;
         } finally {
           await session.detach().catch(() => undefined);
         }

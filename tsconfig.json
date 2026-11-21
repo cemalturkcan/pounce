@@ -12,7 +12,17 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["bun"],
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "e2e/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "e2e/**/*.ts",
+    "tests/**/*.ts",
+    "eval/**/*.ts",
+    "examples/**/*.ts",
+    "oxlint.config.ts"
+  ]
 }

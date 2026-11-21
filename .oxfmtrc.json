@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "HANDOFF.md",
+    "e2e/recordings/**",
+    "eval/results/**",
+    "tools/oxlint/anti-slop/**",
+    "skills/**",
+    ".claude/**"
+  ]
+}

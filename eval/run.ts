@@ -1,17 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { z } from "zod";
 import { startFixture } from "../e2e/fixture.ts";
-import { createImage, fillRect } from "../src/pixels.ts";
-import { encodePng } from "../src/png.ts";
+import { healthy, spawnDaemon } from "../tests/daemon.ts";
+import { runPool } from "../src/shared/async.ts";
+import { createImage, fillRect } from "../src/visual/pixels.ts";
+import { encodePng } from "../src/visual/png.ts";
+import { writeStderr } from "../src/log/stderr.ts";
 import { score, toolUses, type ToolUse } from "./score.ts";
-import { type Family, type Task, TASKS } from "./tasks.ts";
+import { type Family, TASKS } from "./tasks.ts";
 
 const EVAL_DIR = import.meta.dirname;
 const REPO_DIR = path.dirname(EVAL_DIR);
@@ -33,7 +36,20 @@ document.getElementById("next").onclick = () => { page += 1; load(); };
 load();
 </script></body></html>`;
 
-type Outcome = { id: string; family: Family; expect: string[]; tools: ToolUse[]; key?: ToolUse; pass: boolean; detours: string[]; turns?: number; error?: string; ms: number };
+type Outcome = {
+  id: string;
+  family: Family;
+  expect: string[];
+  tools: ToolUse[];
+  key?: ToolUse;
+  pass: boolean;
+  detours: string[];
+  turns?: number;
+  error?: string;
+  ms: number;
+};
+
+const listening = z.object({ port: z.number() });
 
 const { values } = parseArgs({
   options: {
@@ -47,14 +63,6 @@ const { values } = parseArgs({
   },
 });
 
-async function freePort() {
-  const server = createNetServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
-
 async function startSite() {
   const fixture = await startFixture();
   const server = http.createServer(async (request, response) => {
@@ -62,19 +70,24 @@ async function startSite() {
       response.writeHead(200, { "content-type": "text/html" }).end(CATALOG);
       return;
     }
-    const upstream = await fetch(`${fixture.url}${request.url ?? "/"}`, { method: request.method, headers: { cookie: request.headers.cookie ?? "" }, redirect: "manual" }).catch(() => undefined);
+    const upstream = await fetch(`${fixture.url}${request.url ?? "/"}`, {
+      method: request.method,
+      headers: { cookie: request.headers.cookie ?? "" },
+      redirect: "manual",
+    }).catch(() => undefined);
     if (!upstream) {
       response.writeHead(502).end();
       return;
     }
     const headers: Record<string, string> = {};
     upstream.headers.forEach((value, name) => {
-      if (!["content-encoding", "content-length", "transfer-encoding"].includes(name)) headers[name] = value;
+      if (!["content-encoding", "content-length", "transfer-encoding"].includes(name))
+        headers[name] = value;
     });
     response.writeHead(upstream.status, headers).end(Buffer.from(await upstream.arrayBuffer()));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const base = `http://127.0.0.1:${listening.parse(server.address()).port}`;
   return {
     base,
     close: async () => {
@@ -86,27 +99,14 @@ async function startSite() {
 }
 
 async function startDaemon(serverDir: string, dataDir: string) {
-  const port = await freePort();
-  const env = {
-    ...process.env,
-    WEB_AGENT_DAEMON_DATA_DIR: dataDir,
-    WEB_AGENT_DAEMON_PORT: String(port),
-    WEB_AGENT_HEADLESS: "true",
-    WEB_AGENT_PASSWORD_STORE: "basic",
-    WEB_AGENT_SECRETS: "none",
-    WEB_AGENT_ASK_ADAPTER: path.join(EVAL_DIR, "fake-adapter.mjs"),
-  };
-  let stderr = "";
-  const daemon = spawn(process.execPath, [path.join(serverDir, "src", "server.ts"), "--daemon"], { env, stdio: ["ignore", "ignore", "pipe"] });
-  daemon.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-  for (let waited = 0; waited < 30_000; waited += 250) {
-    const healthy = await fetch(`http://127.0.0.1:${port}/healthz`).then((response) => response.ok).catch(() => false);
-    if (healthy) return { daemon, endpoint: `http://127.0.0.1:${port}/mcp` };
-    if (daemon.exitCode !== null) break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  daemon.kill("SIGTERM");
-  throw new Error(`The daemon did not start:\n${stderr}`);
+  const daemon = await spawnDaemon(
+    dataDir,
+    { WEB_AGENT_ASK_ADAPTER: path.join(EVAL_DIR, "fake-adapter.ts") },
+    serverDir,
+  );
+  if (await healthy(daemon.port)) return { daemon, endpoint: daemon.endpoint.href };
+  await daemon.stop();
+  throw new Error(`The daemon did not start:\n${daemon.stderr()}`);
 }
 
 async function writeReference(file: string) {
@@ -123,10 +123,14 @@ async function failedRequestId(endpoint: string, base: string) {
   try {
     const opened = await client.callTool({ name: "tab_open", arguments: { url: `${base}/doc` } });
     const tab = /Opened (t\d+)/.exec(JSON.stringify(opened.content))?.[1] ?? "t1";
-    const failed = await client.callTool({ name: "click", arguments: { tab, target: "#no-such-button", timeout_ms: 500 } });
+    const failed = await client.callTool({
+      name: "click",
+      arguments: { tab, target: "#no-such-button", timeout_ms: 500 },
+    });
     await client.callTool({ name: "tab_close", arguments: { tab } });
     const id = /\[req ([0-9a-f]+)\]/.exec(JSON.stringify(failed.content))?.[1];
-    if (!id) throw new Error(`The setup call did not fail as expected: ${JSON.stringify(failed.content)}`);
+    if (!id)
+      throw new Error(`The setup call did not fail as expected: ${JSON.stringify(failed.content)}`);
     return id;
   } finally {
     await client.close();
@@ -164,50 +168,89 @@ function runClaude(prompt: string, mcpConfig: string, cwd: string) {
     child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ stdout, error: code === 0 ? undefined : `exit ${code}: ${stderr.trim().split("\n").slice(-3).join(" ")}` });
+      resolve({
+        stdout,
+        error:
+          code === 0 ? undefined : `exit ${code}: ${stderr.trim().split("\n").slice(-3).join(" ")}`,
+      });
     });
   });
 }
 
 async function main() {
-  const tasks = values.only ? TASKS.filter((task) => values.only?.split(",").includes(task.id)) : TASKS;
+  const tasks = values.only
+    ? TASKS.filter((task) => values.only?.split(",").includes(task.id))
+    : TASKS;
   const work = await mkdtemp(path.join(tmpdir(), "web-agent-eval-"));
   const site = await startSite();
   const reference = path.join(work, "doc-figma-export.png");
   await writeReference(reference);
-  const { daemon, endpoint } = await startDaemon(path.resolve(values.server ?? REPO_DIR), path.join(work, "data"));
+  const { daemon, endpoint } = await startDaemon(
+    path.resolve(values.server ?? REPO_DIR),
+    path.join(work, "data"),
+  );
   const failedRequest = await failedRequestId(endpoint, site.base);
-  const mcpConfig = JSON.stringify({ mcpServers: { [SERVER_KEY]: { type: "http", url: endpoint } } });
+  const mcpConfig = JSON.stringify({
+    mcpServers: { [SERVER_KEY]: { type: "http", url: endpoint } },
+  });
   const outcomes: Outcome[] = [];
-  let cursor = 0;
   try {
-    const worker = async () => {
-      while (cursor < tasks.length) {
-        const task = tasks[cursor] as Task;
-        cursor += 1;
-        const cwd = path.join(work, `cwd-${task.id}`);
-        await mkdir(cwd, { recursive: true });
-        const started = Date.now();
-        const result = await runClaude(task.prompt(site.base, { reference, failedRequest }), mcpConfig, cwd);
-        const { uses, turns } = toolUses(result.stdout);
-        const scored = score(task, uses);
-        await mkdir(values.out ?? "", { recursive: true });
-        await writeFile(path.join(values.out ?? "", `${values.label}-${task.id}.jsonl`), result.stdout);
-        outcomes.push({ id: task.id, family: task.family, expect: task.expect, tools: uses, ...scored, turns, error: result.error, ms: Date.now() - started });
-        console.error(`${task.id}: ${scored.pass ? "pass" : "FAIL"} key=${scored.key?.name ?? "-"} tools=${uses.map((use) => use.name).join(",")}${result.error ? ` (${result.error})` : ""}`);
-      }
-    };
-    await Promise.all(Array.from({ length: Number(values.concurrency) }, worker));
+    await runPool(tasks, Number(values.concurrency), async (task) => {
+      const cwd = path.join(work, `cwd-${task.id}`);
+      await mkdir(cwd, { recursive: true });
+      const started = Date.now();
+      const result = await runClaude(
+        task.prompt(site.base, { reference, failedRequest }),
+        mcpConfig,
+        cwd,
+      );
+      const { uses, turns } = toolUses(result.stdout);
+      const scored = score(task, uses);
+      await mkdir(values.out ?? "", { recursive: true });
+      await writeFile(
+        path.join(values.out ?? "", `${values.label}-${task.id}.jsonl`),
+        result.stdout,
+      );
+      outcomes.push({
+        id: task.id,
+        family: task.family,
+        expect: task.expect,
+        tools: uses,
+        ...scored,
+        turns,
+        error: result.error,
+        ms: Date.now() - started,
+      });
+      writeStderr(
+        `${task.id}: ${scored.pass ? "pass" : "FAIL"} key=${scored.key?.name ?? "-"} tools=${uses.map((use) => use.name).join(",")}${result.error ? ` (${result.error})` : ""}`,
+      );
+    });
   } finally {
-    daemon.kill("SIGTERM");
+    await daemon.stop();
     await site.close();
     await rm(work, { recursive: true, force: true });
   }
-  const ordered = tasks.map((task) => outcomes.find((outcome) => outcome.id === task.id)).filter((outcome): outcome is Outcome => Boolean(outcome));
-  await writeFile(path.join(values.out ?? "", `${values.label}.json`), JSON.stringify(ordered, null, 2));
-  const rows = ordered.map((outcome) => `| ${outcome.id} | ${outcome.family} | ${outcome.expect.join(" / ")} | ${outcome.key?.name ?? "-"}${outcome.key?.input.mode ? ` (${String(outcome.key.input.mode)})` : ""} | ${outcome.detours.join(", ") || "-"} | ${outcome.pass ? "pass" : "fail"} |`);
-  console.log(["| task | family | expected | key tool | detours | result |", "|---|---|---|---|---|---|", ...rows].join("\n"));
-  console.log(`\n${values.label}: ${ordered.filter((outcome) => outcome.pass).length}/${ordered.length} passed`);
+  const ordered = tasks
+    .map((task) => outcomes.find((outcome) => outcome.id === task.id))
+    .filter((outcome): outcome is Outcome => Boolean(outcome));
+  await writeFile(
+    path.join(values.out ?? "", `${values.label}.json`),
+    JSON.stringify(ordered, null, 2),
+  );
+  const rows = ordered.map(
+    (outcome) =>
+      `| ${outcome.id} | ${outcome.family} | ${outcome.expect.join(" / ")} | ${outcome.key?.name ?? "-"}${outcome.key?.input.mode ? ` (${String(outcome.key.input.mode)})` : ""} | ${outcome.detours.join(", ") || "-"} | ${outcome.pass ? "pass" : "fail"} |`,
+  );
+  process.stdout.write(
+    `${[
+      "| task | family | expected | key tool | detours | result |",
+      "|---|---|---|---|---|---|",
+      ...rows,
+    ].join("\n")}\n`,
+  );
+  process.stdout.write(
+    `\n${values.label}: ${ordered.filter((outcome) => outcome.pass).length}/${ordered.length} passed\n`,
+  );
 }
 
 await main();

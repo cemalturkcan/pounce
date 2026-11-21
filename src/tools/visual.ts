@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DEFAULT_MAX_OUTPUT_TOKENS } from "../ask.ts";
-import { untrusted } from "../output.ts";
-import { compareDesign, DEFAULTS } from "../visual.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../ask/run.ts";
+import { untrusted } from "../shared/output.ts";
+import { compareDesign, DEFAULTS } from "../visual/compare.ts";
 import { defineTool, tabParam, targetParam, type ToolDeps } from "./common.ts";
 
 export function registerVisualTools(server: McpServer, deps: ToolDeps) {
@@ -16,18 +16,95 @@ export function registerVisualTools(server: McpServer, deps: ToolDeps) {
     ].join("\n"),
     input: {
       tab: tabParam,
-      reference: z.string().min(1).describe("Absolute path of the reference image (PNG, JPEG or WebP): a design export, a mockup, an earlier screenshot used as a baseline, or a screenshot of another site."),
-      target: targetParam.optional().describe("Compare only this element (ref or selector); the reference is then an export of that element."),
-      full_page: z.boolean().optional().describe("Capture the whole scrollable page; the viewport height is then the smaller of the reference height and 1080 CSS px. Default false."),
-      width: z.number().int().min(100).max(7680).optional().describe("Viewport width in CSS pixels. Default: reference width / device_scale_factor (current width with target)."),
-      height: z.number().int().min(100).max(8640).optional().describe("Viewport height in CSS pixels. Default: reference height / device_scale_factor (current height with target)."),
-      device_scale_factor: z.number().min(0.5).max(4).optional().describe("Device pixel ratio for the capture; 2 for a design exported at @2x. Default 1."),
-      tolerance: z.number().min(0).max(1).optional().describe(`Color difference a pixel may have and still match, 0 (exact) to 1. Default ${DEFAULTS.tolerance}.`),
-      min_region_area: z.number().int().min(1).max(1_000_000).optional().describe(`Regions with a smaller bounding box, in reference pixels, are dropped as noise. Default ${DEFAULTS.minRegionArea}.`),
-      max_regions: z.number().int().min(1).max(100).optional().describe(`How many of the largest regions the model describes. Default ${DEFAULTS.maxRegions}.`),
-      model: z.string().optional().describe("haiku (default), sonnet, opus, any model id the adapter accepts, or none for the pixel layer only."),
-      concurrency: z.number().int().min(1).max(8).optional().describe(`Model calls running at once. Default ${DEFAULTS.concurrency}.`),
-      max_output_tokens: z.number().int().min(1000).max(DEFAULT_MAX_OUTPUT_TOKENS).optional().describe("Output token limit per model call, thinking included. Default 128000, the model's maximum."),
+      reference: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute path of the reference image (PNG, JPEG or WebP): a design export, a mockup, an earlier screenshot used as a baseline, or a screenshot of another site.",
+        ),
+      target: targetParam
+        .optional()
+        .describe(
+          "Compare only this element (ref or selector); the reference is then an export of that element.",
+        ),
+      full_page: z
+        .boolean()
+        .optional()
+        .describe(
+          "Capture the whole scrollable page; the viewport height is then the smaller of the reference height and 1080 CSS px. Default false.",
+        ),
+      width: z
+        .number()
+        .int()
+        .min(100)
+        .max(7680)
+        .optional()
+        .describe(
+          "Viewport width in CSS pixels. Default: reference width / device_scale_factor (current width with target).",
+        ),
+      height: z
+        .number()
+        .int()
+        .min(100)
+        .max(8640)
+        .optional()
+        .describe(
+          "Viewport height in CSS pixels. Default: reference height / device_scale_factor (current height with target).",
+        ),
+      device_scale_factor: z
+        .number()
+        .min(0.5)
+        .max(4)
+        .optional()
+        .describe("Device pixel ratio for the capture; 2 for a design exported at @2x. Default 1."),
+      tolerance: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe(
+          `Color difference a pixel may have and still match, 0 (exact) to 1. Default ${DEFAULTS.tolerance}.`,
+        ),
+      min_region_area: z
+        .number()
+        .int()
+        .min(1)
+        .max(1_000_000)
+        .optional()
+        .describe(
+          `Regions with a smaller bounding box, in reference pixels, are dropped as noise. Default ${DEFAULTS.minRegionArea}.`,
+        ),
+      max_regions: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          `How many of the largest regions the model describes. Default ${DEFAULTS.maxRegions}.`,
+        ),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "haiku (default), sonnet, opus, any model id the adapter accepts, or none for the pixel layer only.",
+        ),
+      concurrency: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe(`Model calls running at once. Default ${DEFAULTS.concurrency}.`),
+      max_output_tokens: z
+        .number()
+        .int()
+        .min(1000)
+        .max(DEFAULT_MAX_OUTPUT_TOKENS)
+        .optional()
+        .describe(
+          "Output token limit per model call, thinking included. Default 128000, the model's maximum.",
+        ),
     },
     readOnly: true,
     handler: async (input, _owner, signal) => {
@@ -47,7 +124,9 @@ export function registerVisualTools(server: McpServer, deps: ToolDeps) {
         signal,
       });
       const heading = `Compared ${tab.id} (${report.url}) with ${report.reference}`;
-      return report.model ? untrusted(report.url, `${heading}\n${report.text}`) : `${heading}\n${report.text}`;
+      return report.model
+        ? untrusted(report.url, `${heading}\n${report.text}`)
+        : `${heading}\n${report.text}`;
     },
   });
 }
