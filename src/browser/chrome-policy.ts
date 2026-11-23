@@ -14,7 +14,8 @@ const DEFAULT_PORTS = new Map([
   ["ws", "80"],
   ["wss", "443"],
 ]);
-const BLOCKED_ERROR = /net::ERR_BLOCKED_BY_(ADMINISTRATOR|CLIENT)(?: at (\S+))?/;
+const BLOCKED_ERROR =
+  /(?:Could not load (\S+) \()?net::ERR_BLOCKED_BY_(ADMINISTRATOR|CLIENT)(?: at (\S+))?/;
 
 type UrlFilter = {
   scheme?: string;
@@ -188,9 +189,9 @@ const describeMatch = (match: PolicyMatch) =>
 
 export async function explainPolicyBlock(errorText: string, dirs: string[]) {
   const found = BLOCKED_ERROR.exec(errorText);
-  const url = found?.[2];
+  const url = found?.[1] ?? found?.[3];
   if (!found || !url) return undefined;
-  const byAdministrator = found[1] === "ADMINISTRATOR";
+  const byAdministrator = found[2] === "ADMINISTRATOR";
   const matches = findPolicyMatches(url, await loadPolicyFiles(dirs));
   const block = mostSpecific(matches.blocklist);
   if (!block) {

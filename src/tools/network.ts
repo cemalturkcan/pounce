@@ -12,12 +12,14 @@ import {
   listRules,
   removeRule,
   responseBody,
+  urlPattern,
 } from "../browser/network.ts";
-import { untrusted } from "../shared/output.ts";
+import { shownUrl, untrusted } from "../shared/output.ts";
+import { documentOrder, type NetworkEntry, type PendingRequest, type Tab } from "../browser/tab.ts";
+import type { Request } from "playwright-core";
 import {
   clipToFile,
   defineTool,
-  SENSITIVE_HEADERS,
   tabParam,
   timeoutParam,
   type ToolDeps,
@@ -32,7 +34,9 @@ const requestInput = {
     .number()
     .int()
     .optional()
-    .describe("Id of a captured request (from network_requests) to replay."),
+    .describe(
+      "Id of a captured request (from network) to replay; needs tab, the tab it was captured in.",
+    ),
   url: z.string().optional().describe("Request URL. Required unless from_request is given."),
   method: z
     .string()
@@ -78,7 +82,7 @@ async function sendRequest({ manager, store }: ToolDeps, input: ToolInput<typeof
   if (input.from_request !== undefined && !source) {
     throw new ToolError(
       `Request ${input.from_request} is not in the buffer${tab ? ` of ${tab.id}` : ""}.`,
-      "Pass the tab it was captured in, and list network_requests for current ids.",
+      "Pass the tab it was captured in, and list network for current ids.",
     );
   }
   const rawUrl = input.url ?? source?.url;
@@ -172,8 +176,7 @@ async function sendRequest({ manager, store }: ToolDeps, input: ToolInput<typeof
     "retry-after",
     "x-ratelimit-remaining",
   ]) {
-    if (responseHeaders[name])
-      lines.push(`${name}: ${name === "set-cookie" ? "<masked>" : responseHeaders[name]}`);
+    if (responseHeaders[name]) lines.push(`${name}: ${responseHeaders[name]}`);
   }
   if (!isText || input.save) {
     const extension = /json/i.test(contentType)
@@ -195,32 +198,267 @@ async function sendRequest({ manager, store }: ToolDeps, input: ToolInput<typeof
   }
   lines.push(
     "",
-    await clipToFile(
-      store,
-      "requests",
-      url.hostname + url.pathname,
-      payload.toString("utf8"),
-      input.max_chars ?? 8000,
-    ),
+    (
+      await clipToFile(
+        store,
+        "requests",
+        url.hostname + url.pathname,
+        payload.toString("utf8"),
+        input.max_chars ?? 8000,
+      )
+    ).text,
   );
   return untrusted(url.href, lines.join("\n"));
 }
 
-function masked(headers: Record<string, string>) {
-  return Object.entries(headers).map(
-    ([name, value]) => `${name}: ${SENSITIVE_HEADERS.has(name.toLowerCase()) ? "<masked>" : value}`,
+const waitedSeconds = (startedAt: number) => ((Date.now() - startedAt) / 1000).toFixed(1);
+
+const leftBehind = (tab: Tab, documentId: number) =>
+  documentId !== tab.currentDocument && documentId !== tab.committingDocument;
+
+const REQUEST_STATES = ["answered", "failed", "waiting", "abandoned"] as const;
+
+const requestField = z.object({
+  id: z.number().int(),
+  method: z.string(),
+  type: z.string(),
+  url: z.string(),
+  status: z.number().int().optional(),
+  failure: z.string().optional(),
+  state: z.enum(REQUEST_STATES),
+  waitedMs: z.number().optional(),
+});
+
+function answeredFact(entry: NetworkEntry) {
+  return {
+    id: entry.id,
+    method: entry.method,
+    type: entry.resourceType,
+    url: entry.url,
+    status: entry.status,
+    failure: entry.failure,
+    state: entry.failure === undefined ? ("answered" as const) : ("failed" as const),
+  };
+}
+
+function pendingFact(tab: Tab, request: Request, pending: PendingRequest) {
+  const left = leftBehind(tab, pending.documentId);
+  return {
+    id: pending.id,
+    method: request.method(),
+    type: request.resourceType(),
+    url: request.url(),
+    state: left ? ("abandoned" as const) : ("waiting" as const),
+    waitedMs: left ? undefined : Date.now() - pending.startedAt,
+  };
+}
+
+function headerLines(headers: Record<string, string>) {
+  return Object.entries(headers).map(([name, value]) => `${name}: ${value}`);
+}
+
+type RuleMode = "block" | "modify" | "mock" | "patch_response";
+const RULE_FIELD_MODES = {
+  set_headers: ["modify", "patch_response"],
+  remove_headers: ["modify", "patch_response"],
+  method: ["modify"],
+  post_data: ["modify"],
+  rewrite_url: ["modify"],
+  mock_status: ["mock"],
+  mock_headers: ["mock"],
+  mock_content_type: ["mock"],
+  mock_body: ["mock"],
+  replacements: ["patch_response"],
+} satisfies Record<string, readonly RuleMode[]>;
+const RULE_FIELDS = [
+  "set_headers",
+  "remove_headers",
+  "method",
+  "post_data",
+  "rewrite_url",
+  "mock_status",
+  "mock_headers",
+  "mock_content_type",
+  "mock_body",
+  "replacements",
+] as const satisfies readonly (keyof typeof RULE_FIELD_MODES)[];
+const ADD_ONLY_FIELDS = ["url", "regex", "mode", ...RULE_FIELDS] as const;
+
+const LIST_FILTERS = ["pattern", "types", "failed_only", "limit"] as const;
+const EXPORT_EXCLUDED = ["limit", "failed_only", "max_chars"] as const;
+const EXPORT_ONLY = ["include_bodies", "label"] as const;
+
+function rejectTogether(mode: string, names: readonly string[]) {
+  if (names.length === 0) return;
+  throw new ToolError(
+    `${mode} cannot be combined with ${names.join(", ")}.`,
+    mode === "id"
+      ? "Pass id alone to read one request, or leave it out to list."
+      : "Leave those out; har writes every matching request.",
   );
+}
+
+async function networkDetail({ store }: ToolDeps, tab: Tab, id: number, budget: number) {
+  const entry = tab.network.find((candidate) => candidate.id === id);
+  const waiting = entry ? undefined : [...tab.pending].find(([, pending]) => pending.id === id);
+  if (waiting) {
+    const [request, pending] = waiting;
+    const { startedAt, documentId } = pending;
+    const text = untrusted(
+      tab.page.url(),
+      [
+        `${request.method()} ${request.url()}`,
+        "",
+        "Request headers:",
+        ...headerLines(await headersOf(request)),
+        "",
+        leftBehind(tab, documentId)
+          ? "No response: the tab left the page before the server answered."
+          : `Still waiting for a response after ${waitedSeconds(startedAt)} s.`,
+      ].join("\n"),
+    );
+    return { text, data: { request: pendingFact(tab, request, pending) } };
+  }
+  if (!entry)
+    throw new ToolError(
+      `Request ${id} is no longer in the buffer of ${tab.id}.`,
+      "List requests again; only the most recent ones are kept.",
+    );
+  const lines = [
+    `${entry.method} ${entry.status ?? entry.failure} ${entry.url}`,
+    "",
+    "Request headers:",
+    ...headerLines(await headersOf(entry.request)),
+  ];
+  const postData = entry.request.postData();
+  if (postData)
+    lines.push(
+      "",
+      "Request body:",
+      (await clipToFile(store, "network", `${tab.id}-request-${entry.id}-body`, postData, budget))
+        .text,
+    );
+  if (entry.response) {
+    lines.push("", "Response headers:", ...headerLines(await headersOf(entry.response)));
+    const { body, note } = await responseBody(entry);
+    lines.push(
+      "",
+      "Response body:",
+      body
+        ? (
+            await clipToFile(
+              store,
+              "network",
+              `${tab.id}-request-${entry.id}`,
+              body.toString("utf8"),
+              budget,
+            )
+          ).text
+        : `<${note}>`,
+    );
+  }
+  return {
+    text: untrusted(tab.page.url(), lines.join("\n")),
+    data: { request: answeredFact(entry) },
+  };
+}
+
+type ListFilters = { pattern?: string; types?: string[]; failed_only?: boolean; limit?: number };
+
+function networkList(tab: Tab, input: ListFilters) {
+  const pattern = input.pattern === undefined ? undefined : urlPattern(input.pattern);
+  const filtered = pattern !== undefined || input.types !== undefined || input.failed_only === true;
+  const matches = (url: string, resourceType: string) =>
+    (!pattern || pattern.test(url)) && (!input.types || input.types.includes(resourceType));
+  const limit = input.limit ?? 40;
+  const entries = tab.network
+    .filter((entry) => matches(entry.url, entry.resourceType))
+    .filter(
+      (entry) => !input.failed_only || entry.failure !== undefined || (entry.status ?? 0) >= 400,
+    )
+    .slice(-limit);
+  const pending = input.failed_only
+    ? []
+    : [...tab.pending]
+        .filter(([request]) => matches(request.url(), request.resourceType()))
+        .slice(-limit);
+  if (entries.length === 0 && pending.length === 0)
+    return {
+      text: filtered
+        ? `No network entries match the filter in ${tab.network.length + tab.pending.size} captured requests of ${tab.id}.`
+        : `No network entries captured for ${tab.id} yet.`,
+      data: { pages: [] },
+    };
+  const currentId = tab.currentDocument;
+  const documentIds = documentOrder(tab, [
+    ...new Set([
+      ...entries.map((entry) => entry.documentId),
+      ...pending.map(([, { documentId }]) => documentId),
+      currentId,
+    ]),
+  ]);
+  const lines: string[] = [];
+  const pages: {
+    url?: string;
+    current: boolean;
+    requests: z.infer<typeof requestField>[];
+  }[] = [];
+  for (const documentId of documentIds) {
+    const own = entries.filter((entry) => entry.documentId === documentId);
+    const waiting = pending.filter(([, { documentId: owning }]) => owning === documentId);
+    const url = tab.documents.find((candidate) => candidate.id === documentId)?.url;
+    pages.push({
+      url: url === undefined ? undefined : shownUrl(url),
+      current: documentId === currentId,
+      requests: [
+        ...own.map(answeredFact),
+        ...waiting.map(([request, waited]) => pendingFact(tab, request, waited)),
+      ],
+    });
+    const header = `Page ${url ? shownUrl(url) : "(earlier page)"}${documentId === currentId ? " (current)" : ""}`;
+    if (own.length === 0 && waiting.length === 0) {
+      lines.push(`${header}: no ${filtered ? "matching " : ""}requests.`);
+      continue;
+    }
+    lines.push(
+      `${header}:`,
+      ...own.map(
+        (entry) =>
+          `#${entry.id} ${entry.method} ${entry.status ?? `FAILED ${entry.failure}`} ${entry.resourceType} ${entry.url.slice(0, 300)}`,
+      ),
+    );
+    if (waiting.length) {
+      const left = leftBehind(tab, documentId);
+      lines.push(
+        ...(own.length ? [""] : []),
+        left
+          ? "Abandoned without a response when the tab left the page:"
+          : "Still waiting for a response:",
+        ...waiting.map(([request, { id, startedAt }]) => {
+          const line = `#${id} ${request.method()} ${request.resourceType()} ${request.url().slice(0, 300)}`;
+          return left ? line : `${line} (waiting ${waitedSeconds(startedAt)} s)`;
+        }),
+      );
+    }
+  }
+  return {
+    text: untrusted(tab.page.url(), lines.join("\n")),
+    payloadFrame: (shown: string) =>
+      untrusted(tab.page.url(), `Requests of ${tab.id} by page, newest page last: ${shown}`),
+    data: { pages },
+  };
 }
 
 export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
   const { manager, store } = deps;
 
   defineTool(server, deps, {
-    name: "network_requests",
+    name: "network",
     title: "Network requests",
     description: [
-      "List a tab's recent network responses and failures (id, method, status, resource type, URL), newest last, or with id return one request in full: request headers and body, response headers and response body. Use it to find the API call behind a page, a table, a search or an infinite list and read its JSON directly, to see which requests failed (failed_only), or to debug a local app. Credential headers are masked. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for. Text bodies up to 1 MB are kept as they arrive on tabs an agent opened; on a tab the user opened, they are kept only from the first network_requests or network_export call on it, and earlier bodies are read on demand and may no longer be available.",
-      "Once you know the endpoint, request calls it again with other parameters or pages and from_request replays a captured one; network_export writes the whole capture to a HAR file; intercept changes requests and responses.",
+      "List a tab's recent network requests, grouped by the page they came from with each page's URL and the newest page last (id, method, status, resource type, URL), return one request in full with id (request headers and body, response headers and response body), or write the capture to a HAR 1.2 file with har. Use it to find the API call behind a page, a table, a search or an infinite list and read its JSON directly, to see which requests failed (failed_only), or to debug a local app. Each tab keeps its latest 1000 requests since it was opened. Requests still waiting for a response are listed after the others of their page with their id and how long they have waited; with that id the call shows the request headers. Requests of an earlier page that never got an answer before the tab left it are listed as abandoned instead. Streaming responses (text/event-stream) and bodies that do not finish within a few seconds are reported as unavailable instead of waited for. Text bodies up to 1 MB are kept as they arrive on tabs you opened; on a tab the user opened, they are kept only from your first network call on it, and earlier bodies are read on demand and may no longer be available.",
+      "id excludes pattern, types, failed_only, limit and har. har writes every matching request (pattern and types narrow it; include_bodies, default true, adds response bodies up to 2 MB each; label names the file), excludes limit, failed_only and max_chars, and returns the path. The HAR is raw: cookies, tokens and typed passwords appear as sent, and the file stays until you delete it. max_chars (default 8000) applies to id.",
+      "Once you know the endpoint, request calls it again with other parameters or pages and from_request replays a captured one; intercept changes requests and responses.",
     ].join("\n"),
     input: {
       tab: tabParam,
@@ -234,7 +472,9 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
       pattern: z
         .string()
         .optional()
-        .describe("Keep only requests whose URL contains this, case-insensitive."),
+        .describe(
+          "Keep only requests whose URL contains this, case-insensitive; * stands for any characters, / included, for example *.png or **/api/**.",
+        ),
       failed_only: z
         .boolean()
         .optional()
@@ -249,123 +489,83 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
         .min(1)
         .max(400)
         .optional()
-        .describe("Maximum entries to list. Default 40."),
+        .describe("Maximum entries to list, newest kept. Default 40."),
       max_chars: z
         .number()
         .int()
         .min(200)
         .max(200_000)
         .optional()
-        .describe("Character budget for the request body and for the response body. Default 8000."),
+        .describe(
+          "With id: character budget for the request body and for the response body. Default 8000.",
+        ),
+      har: z
+        .boolean()
+        .optional()
+        .describe("true writes the matching requests to a HAR file and returns its path."),
+      include_bodies: z
+        .boolean()
+        .optional()
+        .describe("With har: include response bodies. Default true."),
+      label: z.string().optional().describe("With har: short name used in the file name."),
     },
-    readOnly: true,
-    handler: async (input) => {
-      const tab = manager.getTab(input.tab);
-      tab.captureBodies = true;
-      if (input.id !== undefined) {
-        const entry = tab.network.find((candidate) => candidate.id === input.id);
-        if (!entry)
-          throw new ToolError(
-            `Request ${input.id} is no longer in the buffer of ${tab.id}.`,
-            "List requests again; only the most recent ones are kept.",
-          );
-        const budget = input.max_chars ?? 8000;
-        const lines = [
-          `${entry.method} ${entry.status ?? entry.failure} ${entry.url}`,
-          "",
-          "Request headers:",
-          ...masked(await headersOf(entry.request)),
-        ];
-        const postData = entry.request.postData();
-        if (postData)
-          lines.push(
-            "",
-            "Request body:",
-            await clipToFile(
-              store,
-              "network",
-              `${tab.id}-request-${entry.id}-body`,
-              postData,
-              budget,
-            ),
-          );
-        if (entry.response) {
-          lines.push("", "Response headers:", ...masked(await headersOf(entry.response)));
-          const { body, note } = await responseBody(entry);
-          lines.push(
-            "",
-            "Response body:",
-            body
-              ? await clipToFile(
-                  store,
-                  "network",
-                  `${tab.id}-request-${entry.id}`,
-                  body.toString("utf8"),
-                  budget,
-                )
-              : `<${note}>`,
-          );
-        }
-        return untrusted(tab.page.url(), lines.join("\n"));
-      }
-
-      const pattern = input.pattern?.toLowerCase();
-      const entries = tab.network
-        .filter((entry) => !pattern || entry.url.toLowerCase().includes(pattern))
-        .filter(
-          (entry) =>
-            !input.failed_only || entry.failure !== undefined || (entry.status ?? 0) >= 400,
+    output: {
+      pages: z
+        .array(
+          z.object({
+            url: z.string().optional(),
+            current: z.boolean(),
+            requests: z.array(requestField),
+          }),
         )
-        .filter((entry) => !input.types || input.types.includes(entry.resourceType))
-        .slice(-(input.limit ?? 40));
-      if (entries.length === 0) return `No matching network entries for ${tab.page.url()}.`;
-      return untrusted(
-        tab.page.url(),
-        entries
-          .map(
-            (entry) =>
-              `#${entry.id} ${entry.method} ${entry.status ?? `FAILED ${entry.failure}`} ${entry.resourceType} ${entry.url.slice(0, 300)}`,
-          )
-          .join("\n"),
-      );
+        .optional(),
+      request: requestField.optional(),
+      harFile: z.string().optional(),
     },
-  });
-
-  defineTool(server, deps, {
-    name: "network_export",
-    title: "Export network as HAR",
-    description:
-      "Write the captured network traffic of a tab to a HAR 1.2 file (request and response headers, post data, timings, and response bodies up to 2 MB each) and return its path. Use it to keep a full record of a session's traffic, to search all of it with file tools, or to open it in DevTools or another HAR tool; to look at a few requests, network_requests is enough. It is a raw export: cookies, tokens and typed passwords appear as sent, unmasked, and the file is kept until you delete it. Streaming responses and bodies that do not finish within a few seconds are left out with a comment. Capture covers the most recent 1000 requests since the tab was opened.",
-    input: {
-      tab: tabParam,
-      pattern: z
-        .string()
-        .optional()
-        .describe("Export only requests whose URL contains this, case-insensitive."),
-      types: z
-        .array(z.string())
-        .optional()
-        .describe('Export only these resource types, for example ["xhr", "fetch"].'),
-      include_bodies: z.boolean().optional().describe("Include response bodies. Default true."),
-      label: z.string().optional().describe("Short name used in the file name."),
-    },
+    payload: ["pages"],
     readOnly: true,
     handler: async (input) => {
+      const exporting = input.har === true;
+      if (input.id !== undefined) {
+        rejectTogether("id", [
+          ...LIST_FILTERS.filter((name) => input[name] !== undefined),
+          ...(input.har === undefined ? [] : ["har"]),
+        ]);
+      }
+      if (exporting) {
+        rejectTogether(
+          "har",
+          EXPORT_EXCLUDED.filter((name) => input[name] !== undefined),
+        );
+      }
+      if (!exporting) {
+        for (const name of EXPORT_ONLY) {
+          if (input[name] !== undefined) throw new ToolError(`${name} needs har.`);
+        }
+      }
+      if (input.id === undefined && input.max_chars !== undefined)
+        throw new ToolError("max_chars needs id.");
       const tab = manager.getTab(input.tab);
       tab.captureBodies = true;
-      const pattern = input.pattern?.toLowerCase();
-      const entries = tab.network
-        .filter((entry) => !pattern || entry.url.toLowerCase().includes(pattern))
-        .filter((entry) => !input.types || input.types.includes(entry.resourceType));
-      if (entries.length === 0) return `No matching network entries captured for ${tab.id}.`;
-      const har = await buildHar(entries, input.include_bodies ?? true, tab.page.url());
-      const file = await store.write(
-        "har",
-        store.uniqueName(input.label ?? `${tab.id}-network`, "har"),
-        JSON.stringify(har, null, 1),
-        { raw: true },
-      );
-      return `Exported ${entries.length} requests to ${file}`;
+      if (input.id !== undefined)
+        return networkDetail(deps, tab, input.id, input.max_chars ?? 8000);
+      if (exporting) {
+        const pattern = input.pattern === undefined ? undefined : urlPattern(input.pattern);
+        const entries = tab.network
+          .filter((entry) => !pattern || pattern.test(entry.url))
+          .filter((entry) => !input.types || input.types.includes(entry.resourceType));
+        if (entries.length === 0)
+          return { text: `No matching network entries captured for ${tab.id}.`, data: {} };
+        const har = await buildHar(entries, input.include_bodies ?? true, tab.page.url());
+        const file = await store.write(
+          "har",
+          store.uniqueName(input.label ?? `${tab.id}-network`, "har"),
+          JSON.stringify(har, null, 1),
+          { raw: true },
+        );
+        return { text: `Exported ${entries.length} requests to ${file}`, data: { harFile: file } };
+      }
+      return networkList(tab, input);
     },
   });
 
@@ -373,8 +573,8 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "intercept",
     title: "Intercept requests",
     description: [
-      "Add, list or remove rules that intercept the network requests of a tab. A rule matches request URLs by substring (or regex) and applies one mode: block aborts the request; modify changes the outgoing request (headers, method, body, or target URL) and lets it continue; mock answers without contacting the server; patch_response fetches the real response and replaces text in its body. Use it to see how a page handles a failing or different API response, to block trackers or heavy resources, to send requests to a local server, or to add a header.",
-      "patch_response only rewrites textual bodies (HTML, JSON, JavaScript, XML, SVG, plain text); images and other binary responses pass through unchanged. Rules stay active until removed or the tab closes; list shows each rule's hits and failures. If a rule fails on a request (for example a rewrite_url with another protocol, or an unreachable upstream), the request continues unmodified or is aborted, and the failure is shown in list. When several rules match one request, only the most recently added one applies. Rule numbers are never reused within a tab. The Cookie header cannot be changed by a rule; use cookies to add or change cookies instead. To send a request yourself use request; for logic beyond these modes, call page.route() from run_script.",
+      "Add, list, remove or clear rules that intercept the network requests of a tab. A rule matches request URLs by text, where * stands for any characters, / included (* matches every request, *.png every PNG, https://example.com/api/* everything under that path, **/api/** every URL with /api/ in it), or by regex, and applies one mode: block aborts the request; modify changes the outgoing request (headers, method, body, or target URL) and lets it continue; mock answers without contacting the server; patch_response fetches the real response and replaces text in its body. Use it to see how a page handles a failing or different API response, to block trackers or heavy resources, to send requests to a local server, or to add a header.",
+      "patch_response only rewrites textual bodies (HTML, JSON, JavaScript, XML, SVG, plain text); images and other binary responses pass through unchanged. Rules stay active until removed or the tab closes; list shows each rule's hits and failures. If a rule fails on a request (for example a rewrite_url with another protocol, or an unreachable upstream), the request continues unmodified or is aborted, and the failure is shown in list. When several rules match one request, only the most recently added one applies. Rule numbers are never reused within a tab. The Cookie header cannot be changed by a rule; use storage with area cookies instead. Each mode accepts only its own fields, and a field that belongs to another mode is rejected. To send a request yourself use request; for logic beyond these modes, call page.route() from run_script.",
     ].join("\n"),
     input: {
       tab: tabParam,
@@ -383,7 +583,12 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
         .describe(
           "add creates a rule; list shows rules and hit counts; remove deletes rule_id; clear deletes all rules of the tab.",
         ),
-      url: z.string().optional().describe("For add: match requests whose URL contains this text."),
+      url: z
+        .string()
+        .optional()
+        .describe(
+          "For add: match requests whose URL contains this text, ignoring case; * stands for any characters, / included, for example *.png or **/api/**.",
+        ),
       regex: z
         .boolean()
         .optional()
@@ -391,7 +596,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
       mode: z
         .enum(["block", "modify", "mock", "patch_response"])
         .optional()
-        .describe("For add: what the rule does. Default modify."),
+        .describe("For add, required: block, modify, mock or patch_response."),
       set_headers: z
         .record(z.string(), z.string())
         .optional()
@@ -422,7 +627,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
         .describe("mock: Content-Type. Default application/json."),
       mock_body: z.string().optional().describe("mock: response body."),
       replacements: z
-        .array(z.object({ find: z.string().min(1), replace: z.string() }))
+        .array(z.strictObject({ find: z.string().min(1), replace: z.string() }))
         .optional()
         .describe(
           "patch_response: literal text replacements applied to the response body in order.",
@@ -430,6 +635,14 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
       rule_id: z.number().int().optional().describe("For remove: the rule number from list."),
     },
     handler: async (input) => {
+      if (input.action !== "add") {
+        for (const field of ADD_ONLY_FIELDS) {
+          if (input[field] !== undefined)
+            throw new ToolError(`${field} applies to add, not ${input.action}.`);
+        }
+      }
+      if (input.action !== "remove" && input.rule_id !== undefined)
+        throw new ToolError(`rule_id applies to remove, not ${input.action}.`);
       const tab = manager.getTab(input.tab);
       if (input.action === "list") return listRules(tab);
       if (input.action === "clear") return `Removed ${await clearRules(tab)} rules from ${tab.id}.`;
@@ -439,10 +652,23 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
         return `Removed rule #${removed.id} (${removed.summary}) after ${removed.hits} hits.`;
       }
       if (!input.url) throw new ToolError("add needs url.");
+      if (!input.mode)
+        throw new ToolError(
+          "add needs mode.",
+          "Pass block, modify, mock or patch_response; mock_* fields go with mock, replacements with patch_response, the other fields with modify.",
+        );
+      for (const field of RULE_FIELDS) {
+        const modes: readonly RuleMode[] = RULE_FIELD_MODES[field];
+        if (input[field] !== undefined && !modes.includes(input.mode))
+          throw new ToolError(
+            `${field} does not apply to mode ${input.mode}; it belongs to ${modes.join(" or ")}.`,
+            "Change the mode, or leave the field out.",
+          );
+      }
       const rule = await addRule(tab, {
         url: input.url,
         regex: input.regex ?? false,
-        mode: input.mode ?? "modify",
+        mode: input.mode,
         setHeaders: input.set_headers,
         removeHeaders: input.remove_headers,
         method: input.method,
@@ -462,7 +688,7 @@ export function registerNetworkTools(server: McpServer, deps: ToolDeps) {
     name: "request",
     title: "Send HTTP request with the browser session",
     description: [
-      "Send an HTTP request that carries the browser's cookies, and return the status, content type and size, the location, set-cookie (masked), content-disposition, retry-after and x-ratelimit-remaining response headers when present, and the body. Use it to call a site's API directly instead of scraping the rendered page: fetch JSON with the user's session, page through results by changing query parameters, download a file, or replay a captured request with changes (from_request takes an id from network_requests and copies its method, URL, headers and body; any field given here overrides the copy). The endpoint usually comes from network_requests or site notes. For many dependent calls with logic between them, context.request in run_script does the same in one script.",
+      "Send an HTTP request that carries the browser's cookies, and return the status, content type and size, the location, set-cookie, content-disposition, retry-after and x-ratelimit-remaining response headers when present, and the body. Use it to call a site's API directly instead of scraping the rendered page: fetch JSON with the user's session, page through results by changing query parameters, download a file, or replay a captured request with changes (from_request takes an id from network and copies its method, URL, headers and body; any field given here overrides the copy). The endpoint usually comes from network or the site's notes. For many dependent calls with logic between them, context.request in run_script does the same in one script.",
       "via browser (default) sends from the browser's network stack outside any page: no CORS limits, good for downloads and cross-site calls. via page runs fetch() inside the tab, so the request has the page's origin, referrer and same-site context, which some APIs require.",
       "Replaying a request that changes data (POST, PUT, DELETE) repeats its effect. Bodies above max_chars and binary responses are saved to a file.",
     ].join("\n"),

@@ -5,9 +5,14 @@ import { repeatUntil, sleep } from "../src/shared/async.ts";
 const START_POLL_MS = 100;
 const START_TIMEOUT_MS = 30_000;
 const STOP_GRACE_MS = 15_000;
+const EXIT_FLUSH_MS = 1000;
+const READY_LINE = "web-agent-mcp daemon running at";
+const PORT_TAKEN = /Is port \d+ in use/;
+
+export const heldPort = () => Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
 
 export function freePort() {
-  const listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const listener = heldPort();
   const { port } = listener;
   listener.stop(true);
   return port;
@@ -49,10 +54,17 @@ export async function spawnDaemon(
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
   });
+  const closed = new Promise((resolve) => child.once("close", resolve));
   await repeatUntil(
-    async () => ((await healthy(port)) || child.exitCode !== null ? true : undefined),
+    async () =>
+      child.exitCode !== null || (stderr.includes(READY_LINE) && (await healthy(port)))
+        ? true
+        : undefined,
     { delayMs: () => START_POLL_MS, giveUp: (made) => made * START_POLL_MS >= START_TIMEOUT_MS },
   );
+  if (child.exitCode !== null) await Promise.race([closed, sleep(EXIT_FLUSH_MS)]);
+  if (child.exitCode !== null && PORT_TAKEN.test(stderr) && !env.WEB_AGENT_DAEMON_PORT)
+    return spawnDaemon(dataDir, env, serverDir);
   return {
     process: child,
     port,

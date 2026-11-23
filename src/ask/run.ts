@@ -17,7 +17,8 @@ import {
   REVIEW_BROWSE_NOTE,
   REVIEW_SYSTEM,
 } from "./prompt.ts";
-import { parseEscalations, parseReply, parseReview } from "./reply.ts";
+import { checkCounts } from "./counts.ts";
+import { CITATION, parseEscalations, parseReply, parseReview } from "./reply.ts";
 import { AskSetupError } from "./errors.ts";
 import type { AskDocument, AskMode, Escalation } from "./types.ts";
 
@@ -57,7 +58,6 @@ export type BrowseOutcome =
   | "refused"
   | "cut_off"
   | "context_full"
-  | "step_limit"
   | "timed_out"
   | "cancelled"
   | "failed";
@@ -71,6 +71,8 @@ export type BrowseResult = {
   outcome: BrowseOutcome;
   lines: string[];
   issues?: BrowseIssue[];
+  dropped?: { issue: string; evidence: string }[];
+  disputed?: string[];
   how?: string;
   steps: number;
   toolCalls: BrowseToolCall[];
@@ -215,6 +217,17 @@ function askInput(options: AskOptions, batch: AskDocument[], system: string) {
   return input;
 }
 
+function checkedCounts<T extends { answers: string[] }>(parsed: T, batch: AskDocument[]): T {
+  const texts = new Map(
+    batch.flatMap((document) => (document.plain ? [] : [[document.source, document.text]])),
+  );
+  const answers = parsed.answers.map((answer) => {
+    const text = texts.get(CITATION.exec(answer)?.[1] ?? "");
+    return checkCounts(answer, text === undefined ? [] : [text]);
+  });
+  return { ...parsed, answers };
+}
+
 export async function askPages(adapter: AskAdapter, options: AskOptions): Promise<AskReport> {
   const named = uniqueSources(options.documents);
   const empty = named
@@ -257,7 +270,9 @@ export async function askPages(adapter: AskAdapter, options: AskOptions): Promis
         ? parseEscalations(text, sources, options.mode ?? "answer")
         : undefined;
       const answerText = escalated ? escalated.text : text;
-      const parsed = review ? parseReview(answerText, sources) : parseReply(answerText, sources);
+      const parsed = review
+        ? parseReview(answerText, sources)
+        : checkedCounts(parseReply(answerText, sources), batch);
       const outcome: BatchOutcome = {
         sources,
         ...parsed,

@@ -162,6 +162,17 @@ test("a blocked-by-client error is explained only when a policy pattern matches"
   });
 });
 
+test("a blocked navigation is explained from the plain failure sentence", async () => {
+  await withPolicyDirs(async (dirs) => {
+    expect(
+      (await explainPolicyBlock(
+        "Could not load https://blocked.test/x (net::ERR_BLOCKED_BY_CLIENT).",
+        dirs,
+      )) ?? "",
+    ).toMatch(/URLBlocklist pattern "blocked.test"/);
+  });
+});
+
 test("an allow pattern that outranks the block pattern is reported", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "web-agent-policy-"));
   try {

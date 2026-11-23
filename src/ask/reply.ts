@@ -166,3 +166,10 @@ export function sortIssues(lines: string[]) {
     .toSorted((left, right) => left.rank - right.rank || left.index - right.index)
     .map((entry) => entry.line);
 }
+
+export function issueSource(line: string, sources: Iterable<string>) {
+  const rest = line.replace(/^- \[\w+\] (?:\[browsed\] )?/, "");
+  return [...sources]
+    .filter((source) => rest.startsWith(`${source}, `))
+    .toSorted((left, right) => right.length - left.length)[0];
+}

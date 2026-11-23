@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { AskImageBlock, AskTextBlock } from "../ask/adapter.ts";
-import { inSequence, untilAborted, withDeadline } from "../shared/async.ts";
+import { inSequence, TIMED_OUT, untilAborted, withDeadline } from "../shared/async.ts";
 import {
   classifyClick,
   classifyNavigation,
@@ -26,15 +26,18 @@ import {
   toModelImage,
 } from "./tool-table.ts";
 import { describeError } from "../shared/errors.ts";
+import { shownUrl } from "../shared/output.ts";
 import { browserTranscoder } from "../ask/model-images.ts";
 import type { ToolCallExtra, ToolCallResult } from "../shared/tool-call.ts";
 import type { BrowserManager } from "../browser/manager.ts";
+import { pageMarkdown } from "../page/markdown.ts";
 import type { Tab } from "../browser/tab.ts";
 
 const BROWSE_FLAGS = { dismissDialogs: true, blockDownloads: true } as const;
 const POPUP_LOAD_MS = 3000;
 const BACK_MS = 10_000;
 const CLOSE_MS = 12_000;
+const PAGE_TEXT_MS = 10_000;
 const mediaType = z.enum(["image/jpeg", "image/png", "image/webp"]).catch("image/jpeg");
 const TALL_SCREENSHOT = /saved to (\S+\.jpg)\. The page is \d+px tall/;
 
@@ -66,6 +69,11 @@ export const textExecution = (value: string, isError = false): ToolExecution => 
 });
 const textOf = (result: ToolCallResult) =>
   result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+
+const closeFailure = (result: ToolCallResult, id: string) =>
+  textOf(result)
+    .split("\n")
+    .find((line) => line.startsWith(`${id}: `)) ?? `Tab ${id} could not be closed.`;
 
 async function toExecution(
   result: ToolCallResult,
@@ -99,7 +107,7 @@ async function toExecution(
     );
     return {
       content: [
-        { type: "text", text: `Screenshot of ${tab.page.url()} saved to ${file}` },
+        { type: "text", text: `Screenshot of ${shownUrl(tab.page.url())} saved to ${file}` },
         { type: "image", image },
       ],
       isError: false,
@@ -277,10 +285,12 @@ export async function openBrowseExecutor(
     }
     current = tool.name === "close_tab" ? current : id;
     const result = await callTool(tool.mcp ?? tool.name, tool.toMcp(input, id), signal);
-    if (tool.name === "close_tab" && !result.isError) {
+    if (tool.name === "close_tab") {
+      if (result.isError) return textExecution(closeFailure(result, id), true);
       tabs.delete(id);
       opened.delete(id);
       if (current === id) current = mainId;
+      return textExecution(`Closed ${id}.`);
     }
     const execution = await toExecution(result, tool, tab);
     if (tool.action) {
@@ -307,6 +317,18 @@ export async function openBrowseExecutor(
     run,
     newTabsNote: () => (notes.length ? notes.splice(0).join("\n") : undefined),
     currentUrl: () => manager.peekTab(mainId)?.page.url(),
+    pageTexts: async () => {
+      const texts: string[] = [];
+      await inSequence([...new Set([current, ...tabs])], async (id) => {
+        const tab = manager.peekTab(id);
+        if (!tab || tab.page.isClosed()) return;
+        const text = await withDeadline(pageMarkdown(tab.page, "page"), PAGE_TEXT_MS).catch(
+          (): typeof TIMED_OUT => TIMED_OUT,
+        );
+        if (text !== TIMED_OUT) texts.push(text);
+      });
+      return texts;
+    },
     close: async () => {
       if (callerTab) delete callerTab.browse;
       const late = manager

@@ -10,8 +10,8 @@
     "daemon:stop": "bun src/server.ts --daemon-stop",
     "import-profile": "bun src/server.ts --import-profile",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "bun test src",
-    "test:e2e": "bun test --timeout 300000 e2e",
+    "test": "bun test src --parallel=8",
+    "test:e2e": "bun test --timeout 300000 e2e --parallel=8 --timings=e2e/timings.json",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "lint": "oxlint --deny-warnings",
@@ -21,6 +21,7 @@
     "@modelcontextprotocol/sdk": "1.32.2",
     "patchright": "1.64.3",
     "playwright-core": "1.65.1",
+    "tldts": "7.5.5",
     "zod": "4.6.7"
   },
   "devDependencies": {

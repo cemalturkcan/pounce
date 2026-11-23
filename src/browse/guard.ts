@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import { isLocalHost, normalizeUrl } from "../page/collect.ts";
 import { pageBound } from "../page/bound.ts";
+import { registrableDomain } from "../page/sites.ts";
 
 type FormDescription = {
   method: string;
@@ -111,7 +112,6 @@ const BLOCKED_PATH =
 const FILE_EXTENSION =
   /\.(pdf|zip|exe|dmg|csv|xlsx?|docx?|pptx?|rar|7z|tar|gz|tgz|bz2|msi|pkg|deb|rpm|apk|iso|bin|img|jar)$/i;
 const SEARCH_WORDS = /(?<![\p{L}\p{N}])(search|ara|such|recherch|busca)/iu;
-const SECOND_LEVEL = new Set(["co", "com", "org", "net", "gov", "ac", "edu"]);
 const PRESS_KEYS = new Set([
   "Escape",
   "Tab",
@@ -139,14 +139,6 @@ function isIpHost(host: string) {
     : /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
 }
 
-function registrable(host: string) {
-  const labels = host.toLowerCase().replace(/\.$/, "").split(".");
-  const last = labels.at(-1) ?? "";
-  const second = labels.at(-2) ?? "";
-  const keep = labels.length >= 3 && SECOND_LEVEL.has(second) && last.length === 2 ? 3 : 2;
-  return labels.slice(-keep).join(".");
-}
-
 function parse(url: string) {
   try {
     return new URL(url);
@@ -166,7 +158,7 @@ export function sameSiteWithLocalPort(left: string, right: string) {
     isIpHost(b.hostname)
   )
     return a.host === b.host;
-  return registrable(a.hostname) === registrable(b.hostname);
+  return registrableDomain(a.hostname) === registrableDomain(b.hostname);
 }
 
 function allowedSite(url: URL, sites: string[]) {

@@ -184,6 +184,21 @@ test("23: navigation stays on the site, its subdomains and the allowed sites, aw
   expect(sameSiteWithLocalPort("https://a.com.tr/", "https://b.com.tr/")).toBe(false);
 });
 
+test("browsing from one github.io owner's pages to another's is off-limits", () => {
+  blocked(
+    classifyNavigation("https://bob.github.io/", {
+      startUrl: "https://alice.github.io/",
+      sites: [],
+    }),
+  );
+});
+
+test("browsing from www.web.de to mail.web.de stays on the site", () => {
+  allowed(
+    classifyNavigation("https://mail.web.de/", { startUrl: "https://www.web.de/", sites: [] }),
+  );
+});
+
 test("24: only navigation keys pass, Enter only outside forms and fields", () => {
   allowed(classifyPress("Escape", undefined, policy));
   allowed(classifyPress("ArrowDown", element({ tag: "div", role: "listbox" }), policy));

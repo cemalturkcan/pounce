@@ -38,24 +38,55 @@ test("actions map to their MCP tool on the current tab with include_diff", () =>
   });
 });
 
+test("a browse scroll to the top or bottom becomes a scroll jump", () => {
+  expect(mapped("scroll", { direction: "bottom" })).toStrictEqual({
+    tab: "t7",
+    to: "bottom",
+    include_diff: true,
+  });
+});
+
 test("select_option and search become fill calls, search with submit", () => {
   expect(browseTool("select_option")?.mcp).toBe("fill");
   expect(mapped("select_option", { target: "e5", option: "Yearly" })).toStrictEqual({
     tab: "t7",
     target: "e5",
-    text: "Yearly",
+    value: "Yearly",
     include_diff: true,
   });
   expect(mapped("search", { target: "e6", text: "lamp" })).toStrictEqual({
     tab: "t7",
     target: "e6",
-    text: "lamp",
+    value: "lamp",
     submit: true,
     include_diff: true,
   });
 });
 
-test("read_text reads the whole page scope and navigate never forces", () => {
+test("find becomes a snapshot query", () => {
+  expect(browseTool("find")?.mcp).toBe("snapshot");
+  expect(mapped("find", { query: "Yearly", regex: true })).toStrictEqual({
+    tab: "t7",
+    query: "Yearly",
+    regex: true,
+  });
+});
+
+test("extract becomes read_page with format structured", () => {
+  expect(browseTool("extract")?.mcp).toBe("read_page");
+  expect(mapped("extract", {})).toStrictEqual({ tab: "t7", format: "structured" });
+});
+
+test("close_tab becomes tabs closing that one tab with force", () => {
+  expect(browseTool("close_tab")?.mcp).toBe("tabs");
+  expect(browseTool("close_tab")?.toMcp({ tab: "t8" }, "t8")).toStrictEqual({
+    close: ["t8"],
+    force: true,
+  });
+});
+
+test("read_text becomes read_page on the whole page scope and navigate never forces", () => {
+  expect(browseTool("read_text")?.mcp).toBe("read_page");
   expect(mapped("read_text", { format: "markdown", offset: 12000 })).toStrictEqual({
     tab: "t7",
     scope: "page",

@@ -41,7 +41,7 @@ function assertName(name: string) {
   if (!name || name.startsWith("-") || /[\n\r\0]/.test(name)) {
     throw new ToolError(
       `Invalid secret name: ${JSON.stringify(name)}`,
-      "Use a name returned by secrets_list.",
+      "Use a name that site lists (secrets).",
     );
   }
 }

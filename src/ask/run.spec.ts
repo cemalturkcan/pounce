@@ -15,7 +15,7 @@ import { type AskAdapter, modelId } from "./adapter.ts";
 import { ASK_BROWSE_NOTE, ASK_SYSTEM, REVIEW_BROWSE_NOTE, REVIEW_SYSTEM } from "./prompt.ts";
 import { loadAdapterModule } from "./adapter-source.ts";
 import { parseEscalations } from "./reply.ts";
-import { renderAskResults } from "./render.ts";
+import { renderAskResults, renderAskStats } from "./render.ts";
 import { image, token } from "../../tests/askFixtures.ts";
 import { sleep } from "../shared/async.ts";
 
@@ -101,13 +101,14 @@ test("askPages runs batches concurrently through the adapter and merges the resu
   expect(report.batches.length).toBe(3);
   expect(peak).toBe(2);
   expect(calls.toSorted()).toStrictEqual(["bad.md,hit2.md", "hit1.md,miss1.md", "miss2.md"]);
-  const text = renderAskResults("Where?", report, "fake", "haiku");
+  const text = renderAskResults("Where?", report);
   expect(text).toMatch(/^- found it \[hit1\.md\]$/m);
   expect(text).not.toContain("[hit2.md]");
   expect(text).toMatch(/Nothing relevant in: miss1\.md, miss2\.md/);
   expect(text).toMatch(/call 2 \[bad\.md, hit2\.md\]: rate limited/);
-  expect(text).toMatch(/Adapter: fake, model haiku, 3 call\(s\)/);
-  expect(text).toMatch(/input tokens 200, output tokens 20, cost usd \$0\.0020/);
+  const stats = renderAskStats(report, "fake", "haiku");
+  expect(stats).toMatch(/Adapter: fake, model haiku, 3 call\(s\)/);
+  expect(stats).toMatch(/input tokens 200, output tokens 20, cost usd \$0\.0020/);
 });
 
 test("askPages reports a timed out call", async () => {
@@ -188,7 +189,7 @@ test("renderAskResults lists empty pages as empty", async () => {
     adapter,
     askOptions([doc(`${token()}.md`, 20), { source: empty, text: "" }]),
   );
-  expect(renderAskResults("q", report, "recording", "haiku")).toMatch(
+  expect(renderAskResults("q", report)).toMatch(
     new RegExp(`^Empty pages \\(not sent\\): ${empty.replace(/\./g, "\\.")}$`, "m"),
   );
 });
@@ -203,7 +204,7 @@ test("renderAskResults notes which pages were clipped", async () => {
       maxCharsPerPage: 1000,
     }),
   );
-  expect(renderAskResults("q", report, "recording", "haiku")).toMatch(
+  expect(renderAskResults("q", report)).toMatch(
     new RegExp(
       `^Clipped to their start and end: ${long.replace(/\./g, "\\.")} \\(${size} chars\\)$`,
       "m",
@@ -288,7 +289,7 @@ test("a batch cut off at the output limit keeps its partial lines and is marked 
   expect(report.batches.find((batch) => batch.sources.includes("short.md"))?.truncated).toBe(
     undefined,
   );
-  const text = renderAskResults("q", report, "limited", "m");
+  const text = renderAskResults("q", report);
   expect(text).toMatch(/^- first fact \[long\.md\]$/m);
   expect(text).toMatch(
     /call 1 \[long\.md\]: answer cut off at the output limit or the context window; raise max_output_tokens or lower batch_chars/,
@@ -302,7 +303,7 @@ test("an interrupted batch reports its partial answer separately from output cut
   };
   const report = await askPages(adapter, askOptions([doc("long.md", 10)]));
   expect(report.batches[0]?.interrupted).toBe(true);
-  expect(renderAskResults("q", report, adapter.name, "m")).toMatch(
+  expect(renderAskResults("q", report)).toMatch(
     /first fact \[long\.md\][\s\S]*Interrupted calls[\s\S]*call 1 \[long\.md\]/,
   );
 });
@@ -395,7 +396,7 @@ test("an empty reply cut off at the output limit or refused is reported, not rea
     adapter,
     askOptions([doc("cut.md", 10), doc("refused.md", 10)], { maxPagesPerBatch: 1 }),
   );
-  const text = renderAskResults("q", report, "empty", "m");
+  const text = renderAskResults("q", report);
   expect(text).toMatch(/call 1 \[cut\.md\]: answer cut off at the output limit/);
   expect(text).toMatch(/call 2 \[refused\.md\]: the model refused to answer/);
 });
@@ -505,7 +506,7 @@ test("a batch that exceeds the context window is split in half until it fits, an
   expect(failed?.error ?? "").toMatch(
     /^the page does not fit the model's context window on its own: .*prompt is too long/,
   );
-  const text = renderAskResults("q", report, adapter.name, "m");
+  const text = renderAskResults("q", report);
   expect(text).toMatch(
     /call 4 \[huge\.md\]: the page does not fit the model's context window on its own/,
   );
@@ -622,7 +623,7 @@ test("askPages in review mode sends the review prompt and merges issues from eve
     }),
   );
   expect([...systems]).toStrictEqual([REVIEW_SYSTEM]);
-  const text = renderAskResults("Check layouts", report, adapter.name, "m");
+  const text = renderAskResults("Check layouts", report);
   expect(text).toMatch(
     /^Review: Check layouts\n\n- \[high\] a\.md, tile 1\/2 hero: image missing\n- \[medium\] b\.md, nav: items overlap\n- \[low\] a\.md, footer: uneven gap\n\nNo issues in: c\.md/,
   );
@@ -631,7 +632,7 @@ test("askPages in review mode sends the review prompt and merges issues from eve
 test("a review with no issues says so", async () => {
   const adapter: AskAdapter = { name: "reviewer", complete: async () => ({ text: "OK: a.md" }) };
   const report = await askPages(adapter, askOptions([doc("a.md", 10)], { mode: "review" }));
-  expect(renderAskResults("Check", report, adapter.name, "m")).toMatch(
+  expect(renderAskResults("Check", report)).toMatch(
     /^Review: Check\n\nNo page had issues\.\n\nNo issues in: a\.md/,
   );
 });
@@ -718,4 +719,57 @@ test("26: browsing on appends the interaction notes and the example HIDDEN line 
   expect(
     parseEscalations(example, ["02-acme-com-pricing.md"], "answer").escalations[0]?.source,
   ).toBe("02-acme-com-pricing.md");
+});
+
+const countedHome = {
+  source: "01-home.md",
+  text: ["## Available Examples", "- A", "- B", "- C"].join("\n"),
+};
+const countingAdapter = (line: string): AskAdapter => ({
+  name: "counting",
+  complete: async () => ({ text: line }),
+});
+
+test("askPages flags a read-pass count that disagrees with the page it cites", async () => {
+  const report = await askPages(
+    countingAdapter(
+      '- The home page lists 4 examples {count 4: list items under "Available Examples"} [01-home.md]',
+    ),
+    askOptions([countedHome]),
+  );
+  expect(report.batches[0]?.answers).toStrictEqual([
+    "- The home page lists 4 examples [count checked: 3, not 4] [01-home.md]",
+  ]);
+});
+
+test("askPages marks a read-pass count that agrees with the page it cites as checked", async () => {
+  const report = await askPages(
+    countingAdapter(
+      '- The home page lists 3 examples {count 3: list items under "Available Examples"} [01-home.md]',
+    ),
+    askOptions([countedHome]),
+  );
+  expect(report.batches[0]?.answers).toStrictEqual([
+    "- The home page lists 3 examples [count checked] [01-home.md]",
+  ]);
+});
+
+test("askPages removes the count tag of a line that cites no page", async () => {
+  const report = await askPages(
+    countingAdapter("- The home page lists 3 examples {count 3: list items on the page}"),
+    askOptions([countedHome]),
+  );
+  expect(report.batches[0]?.answers).toStrictEqual(["- The home page lists 3 examples"]);
+});
+
+test("askPages removes the count tag of a line that cites a plain-text page, without a mark", async () => {
+  const report = await askPages(
+    countingAdapter("- The page lists 3 examples {count 3: list items on the page} [01-home.txt]"),
+    askOptions([{ source: "01-home.txt", text: "Examples\nAlpha\nBeta\nGamma", plain: true }]),
+  );
+  expect(report.batches[0]?.answers).toStrictEqual(["- The page lists 3 examples [01-home.txt]"]);
+});
+
+test("the answer prompt asks for a count tag on lines that count items", () => {
+  expect(ASK_SYSTEM).toMatch(/\{count N: list items under "<heading>"\}/);
 });

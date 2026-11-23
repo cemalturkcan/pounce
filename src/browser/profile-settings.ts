@@ -25,6 +25,8 @@ export const PERMISSION_NAMES = [
 
 type PermissionName = (typeof PERMISSION_NAMES)[number];
 
+type PermissionTarget = Pick<BrowserContext, "grantPermissions" | "clearPermissions">;
+
 type HttpCredential = { origin: string; secret: string; username: string; password: string };
 
 export function originOf(value: string) {
@@ -58,19 +60,39 @@ export class ProfileSettings {
   private readonly credentials = new Map<string, HttpCredential>();
   private readonly grants = new Map<string, Set<PermissionName>>();
   private readonly localOrigins = new Set<string>();
+  private readonly held = new Map<string, { origin: string; names: PermissionName[] }>();
 
   async apply(context: BrowserContext) {
     if (this.credentials.size) await this.applyCredentials(context);
     await this.applyGrants(context);
   }
 
-  private async applyGrants(context: BrowserContext) {
+  private async applyGrants(context: PermissionTarget) {
     await inSequence([...this.grants], ([origin, names]) =>
       context.grantPermissions([...names], { origin }),
     );
     await inSequence([...this.localOrigins], (origin) =>
       context.grantPermissions(["local-network-access"], { origin }),
     );
+    await inSequence([...this.held.values()], ({ origin, names }) =>
+      context.grantPermissions(names, { origin }),
+    );
+  }
+
+  private async regrant(context: PermissionTarget) {
+    await context.clearPermissions();
+    await this.applyGrants(context);
+  }
+
+  async hold(context: PermissionTarget, holder: string, origin: string, names: PermissionName[]) {
+    const previous = this.held.get(holder);
+    this.held.set(holder, { origin, names });
+    if (previous && previous.origin !== origin) await this.regrant(context);
+    else await context.grantPermissions(names, { origin });
+  }
+
+  async release(context: PermissionTarget, holder: string) {
+    if (this.held.delete(holder)) await this.regrant(context);
   }
 
   async allowLocalNetwork(context: BrowserContext, url: string) {
@@ -105,6 +127,10 @@ export class ProfileSettings {
     return [...this.credentials.values()].map(({ origin, secret }) => ({ origin, secret }));
   }
 
+  listGrants() {
+    return [...this.grants].map(([origin, names]) => ({ origin, names: [...names] }));
+  }
+
   private applyCredentials(context: BrowserContext) {
     return context.setHTTPCredentials(
       [...this.credentials.values()].map(({ origin, username, password }) => ({
@@ -115,7 +141,7 @@ export class ProfileSettings {
     );
   }
 
-  async grant(context: BrowserContext, origin: string, names: PermissionName[]) {
+  async grant(context: PermissionTarget, origin: string, names: PermissionName[]) {
     const merged = this.grants.get(origin) ?? new Set<PermissionName>();
     for (const name of names) merged.add(name);
     this.grants.set(origin, merged);
@@ -123,14 +149,13 @@ export class ProfileSettings {
     return [...merged];
   }
 
-  async clearGrants(context: BrowserContext, origin?: string) {
+  async clearGrants(context: PermissionTarget, origin?: string) {
     const cleared = origin
       ? [...(this.grants.get(origin) ?? [])]
       : [...this.grants.values()].flatMap((names) => Array.from(names));
     if (origin) this.grants.delete(origin);
     else this.grants.clear();
-    await context.clearPermissions();
-    await this.applyGrants(context);
+    await this.regrant(context);
     return cleared;
   }
 }

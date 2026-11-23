@@ -59,13 +59,13 @@ test("a tab id from before a daemon restart is not open afterwards and never nam
   const dataDir = path.join(workDir, "restart");
   const first = await startDaemon(dataDir);
   const before = await connect(first);
-  const old = openedId(await ok(before, "tab_open", { url: `${fixture.url}/article` }));
+  const old = openedId(await ok(before, "navigate", { url: `${fixture.url}/article` }));
   expect(old).toMatch(/^t\d+$/);
   await stopDaemon(first);
 
   const second = await startDaemon(dataDir);
   const after = await connect(second);
-  const fresh = openedId(await ok(after, "tab_open", { url: `${fixture.url}/doc` }));
+  const fresh = openedId(await ok(after, "navigate", { url: `${fixture.url}/doc` }));
   expect(fresh).not.toBe(old);
   const stale = await call(after, "snapshot", { tab: old });
   expect(stale.isError).toBe(true);
@@ -80,8 +80,8 @@ test("a tab id from before a daemon restart is not open afterwards and never nam
 test("a tab closed in this daemon is described with its last url and title", async () => {
   const daemon = await startDaemon(path.join(workDir, "closed"));
   const client = await connect(daemon);
-  const tab = openedId(await ok(client, "tab_open", { url: `${fixture.url}/doc` }));
-  await ok(client, "tab_close", { tab });
+  const tab = openedId(await ok(client, "navigate", { url: `${fixture.url}/doc` }));
+  await ok(client, "tabs", { close: [tab] });
   const gone = await call(client, "snapshot", { tab });
   expect(gone.isError).toBe(true);
   expect(gone.text).toMatch(
@@ -96,29 +96,29 @@ test("acting on a tab of another live session is allowed and noted at the start 
   const daemon = await startDaemon(path.join(workDir, "owners"));
   const owner = await connect(daemon);
   const other = await connect(daemon);
-  const tab = openedId(await ok(owner, "tab_open", { url: fixture.url }));
-  const foreign = await ok(other, "read_text", { tab, max_chars: 200 });
+  const tab = openedId(await ok(owner, "navigate", { url: fixture.url }));
+  const foreign = await ok(other, "read_page", { tab, max_chars: 200 });
   expect(foreign, foreign).toStartWith(`Note: ${tab} belongs to another session.\n`);
   expect(foreign).toMatch(/Fixture/);
-  expect(await ok(owner, "read_text", { tab, max_chars: 200 })).not.toMatch(
+  expect(await ok(owner, "read_page", { tab, max_chars: 200 })).not.toMatch(
     /belongs to another session/,
   );
   await stopDaemon(daemon);
 });
 
-test("a tab a tab_open call opens while its session ends is orphaned when the call ends", async () => {
+test("a tab a navigate call opens while its session ends is orphaned when the call ends", async () => {
   const daemon = await startDaemon(path.join(workDir, "ending"));
   const transport = new StreamableHTTPClientTransport(daemon.endpoint);
   const ending = new Client({ name: "daemon-tabs-e2e", version: "0" });
   await ending.connect(transport);
   daemon.clients.push(ending);
-  const opening = call(ending, "tab_open", { url: `${fixture.url}/doc` }).catch(() => undefined);
+  const opening = call(ending, "navigate", { url: `${fixture.url}/doc` }).catch(() => undefined);
   await sleep(50);
   await transport.terminateSession();
   await Promise.race([opening, sleep(5000)]);
   await sleep(500);
   const other = await connect(daemon);
-  const opened = tabLines(await ok(other, "tabs_list")).filter((line) =>
+  const opened = tabLines(await ok(other, "tabs")).filter((line) =>
     line.includes(`${fixture.url}/doc`),
   );
   expect(opened).toHaveLength(1);
@@ -126,13 +126,13 @@ test("a tab a tab_open call opens while its session ends is orphaned when the ca
   await stopDaemon(daemon);
 });
 
-const EVENT_PREFIX = String.raw`(?:Event \(\d\d:\d\d:\d\d\)|Earlier event \(\d\d:\d\d:\d\d, before this call\)): `;
+const EVENT_PREFIX = String.raw`(?:Event \(\d\d:\d\d:\d\d[+-]\d\d:\d\d\)|Earlier event \(\d\d:\d\d:\d\d[+-]\d\d:\d\d, before this call\)): `;
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 test("tabs that open or close outside a tool action name the opener, the time and any running tool", async () => {
   const daemon = await startDaemon(path.join(workDir, "events"));
   const client = await connect(daemon);
-  const tab = openedId(await ok(client, "tab_open", { url: `${fixture.url}/popups` }));
+  const tab = openedId(await ok(client, "navigate", { url: `${fixture.url}/popups` }));
   const opener = escaped(`${fixture.url}/popups`);
 
   const clicked = await ok(client, "click", { tab, target: "#open-popup" });
@@ -167,7 +167,7 @@ test("tabs that open or close outside a tool action name the opener, the time an
   const later = await ok(client, "press", { tab, key: "Shift" });
   expect(later).toMatch(
     new RegExp(
-      `^Earlier event \\(\\d\\d:\\d\\d:\\d\\d, before this call\\): opened new tab t\\d+ from ${tab} \\(${opener}\\), with no tool call running on ${tab}$`,
+      `^Earlier event \\(\\d\\d:\\d\\d:\\d\\d[+-]\\d\\d:\\d\\d, before this call\\): opened new tab t\\d+ from ${tab} \\(${opener}\\), with no tool call running on ${tab}$`,
       "m",
     ),
   );
@@ -186,7 +186,7 @@ test("a navigation blocked by the client names the Chrome policy file and patter
     WEB_AGENT_CHROME_POLICY_DIRS: `${path.join(policyRoot, "managed")}:${path.join(policyRoot, "recommended")}`,
   });
   const client = await connect(daemon);
-  const tab = openedId(await ok(client, "tab_open", { url: fixture.url }));
+  const tab = openedId(await ok(client, "navigate", { url: fixture.url }));
   await ok(client, "intercept", { tab, action: "add", url: "/blocked", mode: "block" });
   await ok(client, "intercept", { tab, action: "add", url: "/other-block", mode: "block" });
 
@@ -229,17 +229,17 @@ test("POST /open launches Chrome with exactly one user-owned page at the URL, th
   expect(cold.json?.url).toBe(url);
 
   const client = await connect(daemon);
-  const listed = tabLines(await ok(client, "tabs_list"));
+  const listed = tabLines(await ok(client, "tabs"));
   expect(listed).toStrictEqual([`${cold.json?.tab} [unclaimed] ${url} "Fixture Article"`]);
 
   const warm = await postOpen(daemon.port, JSON.stringify({ url: `${fixture.url}/doc` }));
   expect(warm.status).toBe(200);
   expect(warm.json).toStrictEqual({ launched: false, running: true });
-  expect(tabLines(await ok(client, "tabs_list")).length).toBe(1);
+  expect(tabLines(await ok(client, "tabs")).length).toBe(1);
 
-  const own = openedId(await ok(client, "tab_open", { url: fixture.url }));
+  const own = openedId(await ok(client, "navigate", { url: fixture.url }));
   expect(own).not.toBe(cold.json?.tab);
-  expect(tabLines(await ok(client, "tabs_list")).length).toBe(2);
+  expect(tabLines(await ok(client, "tabs")).length).toBe(2);
   await stopDaemon(daemon);
 });
 
@@ -255,7 +255,7 @@ test("POST /open without a URL opens the new tab page, and the route keeps the l
   expect(cold.json?.launched).toBe(true);
   expect(String(cold.json?.url)).toMatch(/^chrome:\/\/new/);
   const client = await connect(daemon);
-  const listed = tabLines(await ok(client, "tabs_list"));
+  const listed = tabLines(await ok(client, "tabs"));
   expect(listed.length).toBe(1);
   expect(listed[0] ?? "").toMatch(new RegExp(`^${cold.json?.tab} \\[unclaimed\\] chrome://new`));
   await stopDaemon(daemon);

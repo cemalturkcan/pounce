@@ -43,7 +43,7 @@ afterAll(async () => {
 });
 
 test.skipIf(!isLinux)("Chrome is launched with its sandbox enabled", async () => {
-  const result = await mcp.call("tab_open", { url: "about:blank" });
+  const result = await mcp.call("navigate", { url: "about:blank" });
   expect(result.isError).not.toBe(true);
   const browsers = await browserCommandLines(mcp.config.profileDir);
   expect(browsers.length).toBe(1);
@@ -53,7 +53,7 @@ test.skipIf(!isLinux)("Chrome is launched with its sandbox enabled", async () =>
 test.skipIf(!isLinux)(
   "Chrome is launched with --test-type to hide the unsupported flag infobar",
   async () => {
-    const result = await mcp.call("tab_open", { url: "about:blank" });
+    const result = await mcp.call("navigate", { url: "about:blank" });
     expect(result.isError).not.toBe(true);
     const browsers = await browserCommandLines(mcp.config.profileDir);
     expect(browsers.length).toBe(1);

@@ -20,14 +20,14 @@ afterAll(async () => {
   await fixture?.close();
 });
 
-describe("console_logs on a site outside the console hook", () => {
+describe("logs on a site outside the console hook", () => {
   let logs: string;
 
   beforeAll(async () => {
     const tab =
-      /Opened (t\d+)/.exec(await text("tab_open", { url: `${fixture.url}/console` }))?.[1] ?? "";
+      /Opened (t\d+)/.exec(await text("navigate", { url: `${fixture.url}/console` }))?.[1] ?? "";
     await sleep(500);
-    logs = await text("console_logs", { tab });
+    logs = await text("logs", { source: "page", tab });
   });
 
   test("still returns what the browser logs about the page", () => {
@@ -40,7 +40,7 @@ describe("console_logs on a site outside the console hook", () => {
 
   test("the description names both sources and where each is captured", async () => {
     const { tools } = await mcp.client.listTools();
-    const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
+    const description = tools.find((tool) => tool.name === "logs")?.description ?? "";
     expect(description).toMatch(
       /Messages Chrome itself logs about the page, such as a Permissions-Policy header error, are captured on every site/,
     );
@@ -48,15 +48,15 @@ describe("console_logs on a site outside the console hook", () => {
 
   test("the description states where the patchright engine captures page console calls", async () => {
     const { tools } = await mcp.client.listTools();
-    const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
+    const description = tools.find((tool) => tool.name === "logs")?.description ?? "";
     expect(description).toMatch(
-      /With the default patchright engine, the page's own console calls and uncaught errors are captured only on local development hosts \(localhost, 127\.0\.0\.1, \*\.localhost, \*\.test\) unless the server runs with WEB_AGENT_CONSOLE_HOOK=all \(every site\) or off \(none\)/,
+      /With the default patchright engine, uncaught errors and unhandled rejections are captured on every site but the page's own console calls only on local development hosts \(localhost, 127\.0\.0\.1, \*\.localhost, \*\.test\); WEB_AGENT_CONSOLE_HOOK=all captures console calls on every site and off captures neither/,
     );
   });
 
   test("the description states that the playwright engine captures page console calls everywhere", async () => {
     const { tools } = await mcp.client.listTools();
-    const description = tools.find((tool) => tool.name === "console_logs")?.description ?? "";
+    const description = tools.find((tool) => tool.name === "logs")?.description ?? "";
     expect(description).toMatch(
       /With WEB_AGENT_ENGINE=playwright they are captured on every site and WEB_AGENT_CONSOLE_HOOK has no effect/,
     );
@@ -64,7 +64,7 @@ describe("console_logs on a site outside the console hook", () => {
 });
 
 for (const hook of [undefined, "local", "all", "off"]) {
-  describe(`console_logs with the console hook ${hook ?? "at its default"}`, () => {
+  describe(`logs with the console hook ${hook ?? "at its default"}`, () => {
     const hookMcp = useMcpHarness({ name: "console-hook", env: { WEB_AGENT_CONSOLE_HOOK: hook } });
     const capturesPageCalls = !stealth || hook !== "off";
 
@@ -82,10 +82,10 @@ for (const hook of [undefined, "local", "all", "off"]) {
       beforeAll(async () => {
         const tab =
           /Opened (t\d+)/.exec(
-            await hookText("tab_open", { url: `${fixture.url}/console` }),
+            await hookText("navigate", { url: `${fixture.url}/console` }),
           )?.[1] ?? "";
         await sleep(500);
-        logs = await hookText("console_logs", { tab });
+        logs = await hookText("logs", { source: "page", tab });
       });
 
       test("the console call appears once", () => {
@@ -103,10 +103,10 @@ for (const hook of [undefined, "local", "all", "off"]) {
       beforeAll(async () => {
         const tab =
           /Opened (t\d+)/.exec(
-            await hookText("tab_open", { url: `${fixture.url}/console-malformed` }),
+            await hookText("navigate", { url: `${fixture.url}/console-malformed` }),
           )?.[1] ?? "";
         await sleep(500);
-        logs = await hookText("console_logs", { tab });
+        logs = await hookText("logs", { source: "page", tab });
       });
 
       test("the call before it is still returned", () => {
@@ -125,10 +125,10 @@ for (const hook of [undefined, "local", "all", "off"]) {
       beforeAll(async () => {
         const tab =
           /Opened (t\d+)/.exec(
-            await hookText("tab_open", { url: `${fixture.url}/site-globals` }),
+            await hookText("navigate", { url: `${fixture.url}/site-globals` }),
           )?.[1] ?? "";
         await sleep(500);
-        logs = await hookText("console_logs", { tab });
+        logs = await hookText("logs", { source: "page", tab });
         siteValue = await hookText("evaluate", {
           tab,
           expression: "window.webAgentConsole.join(',')",

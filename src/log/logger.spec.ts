@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { z } from "zod";
+import { inTimeZone } from "../../tests/timeZone.ts";
 import { parseJsonOrThrow } from "../shared/decode.ts";
 import {
   activeLogger,
@@ -12,10 +13,11 @@ import {
   logFileName,
   parseLogLevel,
   readLog,
+  shownEntry,
   summarizeInput,
   useLogger,
 } from "./logger.ts";
-import { Redactor } from "../shared/output.ts";
+import { localDateTime, Redactor } from "../shared/output.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
 const START = Date.parse("2026-11-20T10:00:00.000Z");
@@ -95,17 +97,36 @@ describe("summarizeInput", () => {
     expect(JSON.stringify(summary)).not.toMatch(/hunter2|bank\/login|document\.cookie|pw-1234/);
   });
 
-  test("summarizes arrays by length and nested objects by keys", () => {
+  test("summarizes arrays of objects by length and nested objects by keys", () => {
     const summary = summarizeInput({
-      urls: ["a", "b", "c"],
       viewport: { width: 300, height: 200 },
       fields: [{ target: "#a", text: "secret" }],
+      steps: [{ a: 1 }, { b: 2 }],
     });
     expect(summary).toStrictEqual({
-      urls: "[3 items]",
       viewport: { width: 300, height: 200 },
-      fields: "[1 items]",
+      fields: "[1 item]",
+      steps: "[2 items]",
     });
+  });
+
+  test("keeps the values of a short array of plain values", () => {
+    expect(summarizeInput({ close: ["t5", "t6"] })).toStrictEqual({ close: ["t5", "t6"] });
+  });
+
+  test("summarizes a long array of plain values by length", () => {
+    const close = Array.from({ length: 60 }, (_value, index) => `t${100_000 + index}`);
+    expect(summarizeInput({ close })).toStrictEqual({ close: "[60 items]" });
+  });
+
+  test("masks the query values of URLs in a short array", () => {
+    expect(summarizeInput({ urls: ["https://a.test/p?token=abc"] })).toStrictEqual({
+      urls: ["https://a.test/p?token=[3 chars]"],
+    });
+  });
+
+  test("summarizes a short array under a sensitive key by its length only", () => {
+    expect(summarizeInput({ secret: ["hunter2"] })).toStrictEqual({ secret: "[11 chars]" });
   });
 
   test("masks query values and post bodies but keeps keys and lengths", () => {
@@ -259,9 +280,9 @@ describe("Logger", () => {
     expect(written[0] ?? "").toMatch(/at here/);
   });
 
-  test("starts a new file each UTC day", async () => {
+  test("starts a new file each local day", async () => {
     const dir = await freshDir();
-    const time = clock(Date.parse("2026-11-20T23:59:59.000Z"));
+    const time = clock(new Date(2026, 10, 20, 23, 59, 59).getTime());
     const logger = new Logger({ dir, now: time.now, stderr: () => undefined });
     logger.log("info", "first");
     time.advance(2000);
@@ -493,12 +514,75 @@ describe("readLog", () => {
       input: { target: "e9" },
     });
     expect(line).toBe(
-      '2026-11-20 01:30:00 warn tool_call req=aaa111 session=0f3e9c1a tab=t2 tool=click ms=12 ok=false error="Ref e9 is not in\\nthe latest snapshot" input={"target":"e9"}',
+      `${localDateTime("2026-11-20T01:30:00.000Z")} warn tool_call req=aaa111 session=0f3e9c1a tab=t2 tool=click ms=12 ok=false error="Ref e9 is not in\\nthe latest snapshot" input={"target":"e9"}`,
     );
   });
 
-  test("log file names use the UTC date", () => {
-    expect(logFileName(Date.parse("2026-01-02T23:00:00.000Z"))).toBe("daemon-2026-01-02.jsonl");
+  const loggedEntry = {
+    time: "2026-11-20T01:30:00.000Z",
+    level: "warn" as const,
+    event: "tool_call",
+    session: "0f3e9c1a-1111-2222-3333-444455556666",
+    tool: "click",
+  };
+
+  test("a shown entry gives its time as the local time of its line", () => {
+    expect(shownEntry(loggedEntry).time).toBe(localDateTime("2026-11-20T01:30:00.000Z"));
+  });
+
+  test("a shown entry gives the session as shortened in its line", () => {
+    expect(shownEntry(loggedEntry).session).toBe("0f3e9c1a");
+  });
+
+  test("a shown entry keeps the fields its line shows whole", () => {
+    expect(shownEntry({ ...loggedEntry, first: "a".repeat(300) }).first).toBe("a".repeat(300));
+  });
+
+  const cutEntry = {
+    ...loggedEntry,
+    first: "a".repeat(300),
+    second: "b".repeat(300),
+    third: "c".repeat(300),
+    fourth: "d",
+  };
+
+  test("a shown entry keeps a field its clipped line cuts as the part the line shows with the cut mark", () => {
+    const shownThird = formatEntry(cutEntry).split(" third=")[1];
+    expect(shownEntry(cutEntry).third).toBe(shownThird);
+  });
+
+  test("a shown entry keeps a quoted field its line cuts as the text the line shows", () => {
+    const quotedEntry = { ...cutEntry, third: '"'.repeat(300) };
+    const escaped = (formatEntry(quotedEntry).split(" third=")[1] ?? "").slice(1, -1);
+    expect(shownEntry(quotedEntry).third).toBe(`${'"'.repeat(Math.floor(escaped.length / 2))}…`);
+  });
+
+  const cutInput = {
+    ...loggedEntry,
+    error: "e".repeat(600),
+    input: { tab: "t357095", target: `text=Nope it's "${"x".repeat(300)}"` },
+  };
+
+  test("a shown entry keeps an object field its line cuts as an object with its leading fields whole", () => {
+    expect(shownEntry(cutInput).input).toMatchObject({ tab: "t357095" });
+  });
+
+  test("a shown entry keeps a text inside an object field its line cuts as the part that fits with the cut mark", () => {
+    expect(shownEntry(cutInput).input).toMatchObject({
+      target: expect.stringMatching(/^text=Nope it's "x+…$/),
+    });
+  });
+
+  test("a shown entry marks a field after the cut of its line as cut", () => {
+    expect(shownEntry(cutEntry).fourth).toBe("…");
+  });
+
+  test("log file names use the local date", async () => {
+    expect(
+      await inTimeZone("Europe/Istanbul", () =>
+        logFileName(Date.parse("2026-01-02T23:00:00.000Z")),
+      ),
+    ).toBe("daemon-2026-01-03.jsonl");
   });
 
   test("entries older than the retention window are not searched beyond 14 days", async () => {

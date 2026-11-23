@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DEFAULT_MAX_OUTPUT_TOKENS } from "../ask/run.ts";
-import { untrusted } from "../shared/output.ts";
+import { shownUrl, untrusted } from "../shared/output.ts";
 import { compareDesign, DEFAULTS } from "../visual/compare.ts";
 import { defineTool, tabParam, targetParam, type ToolDeps } from "./common.ts";
 
@@ -11,8 +11,8 @@ export function registerVisualTools(server: McpServer, deps: ToolDeps) {
     title: "Compare page with design",
     description: [
       "Compare a live page with a reference image of how it should look and return a short list of differing regions, without either image entering this conversation. The reference can be any image: a Figma or other design export, a mockup, an earlier screenshot of the same page kept as a baseline, or a screenshot of another site. Use it for design QA of a page you built, for visual regression after a change, and whenever the user gives a picture the page should match. For open-ended visual QA with no reference image, ask_pages with mode review fits; screenshot shows one page to you directly.",
-      "Pixel layer, always: the tab is captured at the reference's size (viewport width and height = reference size / device_scale_factor), compared pixel by pixel with an anti-aliasing tolerance, and differing pixels are grouped into regions with a bounding box in reference pixels, area and share of differing pixels. Model layer, unless model is none: each of the largest regions is cropped from both images and described by a model through the model adapter (element, property, design value vs. page value, severity), and one whole-image call lists design elements missing on the page. There are no default limits on the model calls: no time limit, and the output limit is the model maximum; a call ends early only when the client cancels.",
-      "The pixel layer knows nothing about layout: one shifted section shows up as one large region, and without the model the regions are only boxes. Haiku can miss one or two pixel differences in spacing or shade; use sonnet or opus when those matter. Files are written to a folder under the output directory: the page screenshot, a diff image with regions outlined, crops of design and page per region, and report.json with the regions; their paths are in the result. At most the 200 largest regions are reported and outlined, and the result says how many were found. Large images are compared in a worker thread, so other calls keep being answered meanwhile. The viewport is restored after the capture.",
+      "Pixel layer, always: the tab is captured at the reference's size (viewport width and height = reference size / device_scale_factor), compared pixel by pixel with an anti-aliasing tolerance, and differing pixels are grouped into regions with a bounding box in reference pixels, area and share of differing pixels. Model layer, unless model is none: each of the largest regions is cropped from both images and described by a model through the model adapter (element, property, design value vs. page value, severity), and one whole-image call lists design elements missing on the page.",
+      "The pixel layer knows nothing about layout: one shifted section shows up as one large region, and without the model the regions are only boxes. Haiku can miss one or two pixel differences in spacing or shade; use sonnet or opus when those matter. Files are written to a folder under the output directory: the page screenshot, a diff image with regions outlined, crops of design and page per region, and report.json with the regions; their paths are in the result. At most the 200 largest regions are reported and outlined, and the result says how many were found. The viewport is restored after the capture.",
     ].join("\n"),
     input: {
       tab: tabParam,
@@ -102,9 +102,7 @@ export function registerVisualTools(server: McpServer, deps: ToolDeps) {
         .min(1000)
         .max(DEFAULT_MAX_OUTPUT_TOKENS)
         .optional()
-        .describe(
-          "Output token limit per model call, thinking included. Default 128000, the model's maximum.",
-        ),
+        .describe("Output token limit per model call, thinking included. Default 128000."),
     },
     readOnly: true,
     handler: async (input, _owner, signal) => {
@@ -123,7 +121,7 @@ export function registerVisualTools(server: McpServer, deps: ToolDeps) {
         maxOutputTokens: input.max_output_tokens,
         signal,
       });
-      const heading = `Compared ${tab.id} (${report.url}) with ${report.reference}`;
+      const heading = `Compared ${tab.id} (${shownUrl(report.url)}) with ${report.reference}`;
       return report.model
         ? untrusted(report.url, `${heading}\n${report.text}`)
         : `${heading}\n${report.text}`;

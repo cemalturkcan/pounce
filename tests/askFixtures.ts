@@ -39,19 +39,6 @@ export const absence = [
   "The text has no pricing data",
 ];
 
-export const uncertainOnly = [
-  "It is unclear whether the Pro plan (annual) includes SSO",
-  "The Acme Pro billing period is unclear",
-  "It is not clear from the page whether the $96 price includes VAT",
-  "Whether Acme Pro (billed yearly) includes SSO is unclear",
-];
-
-export const uncertainWithFact = [
-  "Acme Pro costs $16 per month, unclear whether taxes are included",
-  "It is unclear whether the Pro plan includes SSO, but it includes SCIM",
-  "Acme Pro includes SSO; whether SCIM is included is unclear",
-];
-
 export const image = (label: string) => ({
   mediaType: "image/jpeg" as const,
   data: Buffer.from(label).toString("base64"),

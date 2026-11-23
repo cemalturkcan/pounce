@@ -19,11 +19,11 @@ const prefersDark = async (tab: string) =>
 test("pages follow the system color scheme and emulate overrides it for one tab only", async () => {
   const tab =
     /Opened (t\d+)/.exec(
-      await ok("tab_open", { url: "data:text/html,<title>Scheme</title><p>scheme</p>" }),
+      await ok("navigate", { url: "data:text/html,<title>Scheme</title><p>scheme</p>" }),
     )?.[1] ?? "";
   const other =
     /Opened (t\d+)/.exec(
-      await ok("tab_open", { url: "data:text/html,<title>Other</title><p>other</p>" }),
+      await ok("navigate", { url: "data:text/html,<title>Other</title><p>other</p>" }),
     )?.[1] ?? "";
   expect(await prefersDark(tab)).toBe("true");
   await ok("emulate", { tab, color_scheme: "light" });

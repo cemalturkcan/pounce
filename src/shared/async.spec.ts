@@ -130,3 +130,80 @@ test("deadline, abort and pool helpers", async () => {
   expect(results).toStrictEqual([2, 4, 6, 8, 10]);
   expect(peak).toBe(2);
 });
+
+const pagesOn = (host: string, count: number) =>
+  Array.from({ length: count }, (_unused, index) => ({ host, name: `${host}${index}` }));
+
+async function startTimes(items: { host: string; name: string }[], concurrency: number) {
+  const began = Date.now();
+  const starts = new Map<string, number>();
+  await runPool(
+    items,
+    concurrency,
+    async (item, _index, started) => {
+      starts.set(item.name, Date.now() - began);
+      started();
+      await sleep(5);
+    },
+    undefined,
+    { gapMs: 200, keyOf: (item) => item.host },
+  );
+  return starts;
+}
+
+describe("runPool pacing", () => {
+  test("spaces consecutive starts with the same key by the gap", async () => {
+    const starts = await startTimes(pagesOn("a", 2), 2);
+    expect((starts.get("a1") ?? 0) - (starts.get("a0") ?? 0)).toBeGreaterThanOrEqual(190);
+  });
+
+  test("starts an item with another key without waiting for a paced one", async () => {
+    const starts = await startTimes([...pagesOn("a", 2), ...pagesOn("b", 1)], 1);
+    expect(starts.get("b0") ?? Infinity).toBeLessThan(starts.get("a1") ?? 0);
+  });
+
+  test("counts the gap from when the work says it started", async () => {
+    const began = Date.now();
+    const starts: number[] = [];
+    await runPool(
+      ["a1", "a2"],
+      2,
+      async (_item, _index, started) => {
+        starts.push(Date.now() - began);
+        await sleep(100);
+        started();
+      },
+      undefined,
+      { gapMs: 200, keyOf: (item) => item.slice(0, 1) },
+    );
+    expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(290);
+  });
+
+  test("starts the next item with the same key only after the previous one finished", async () => {
+    const began = Date.now();
+    const starts: number[] = [];
+    await runPool(
+      ["a1", "a2"],
+      2,
+      async (_item, _index, started) => {
+        starts.push(Date.now() - began);
+        started();
+        await sleep(150);
+      },
+      undefined,
+      { gapMs: 0, keyOf: (item) => item.slice(0, 1) },
+    );
+    expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(140);
+  });
+
+  test("still returns the results in item order", async () => {
+    const results = await runPool(
+      ["a1", "a2", "b1"],
+      1,
+      async (item) => item.toUpperCase(),
+      undefined,
+      { gapMs: 50, keyOf: (item) => item.slice(0, 1) },
+    );
+    expect(results).toStrictEqual(["A1", "A2", "B1"]);
+  });
+});

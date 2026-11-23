@@ -26,7 +26,7 @@ beforeAll(async () => {
       ),
   });
   tab =
-    /Opened (t\d+)/.exec(await text("tab_open", { url: app.url.href, wait_until: "load" }))?.[1] ??
+    /Opened (t\d+)/.exec(await text("navigate", { url: app.url.href, wait_until: "load" }))?.[1] ??
     "";
 });
 

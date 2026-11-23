@@ -143,10 +143,10 @@ export async function compareDesign(
   const aligned = { reference: analysis.reference, page: analysis.page };
   const regions: ComparedRegion[] = analysis.regions;
 
-  const name = deps.store
-    .uniqueName(`${tab.id}-${path.basename(referencePath)}`, "run")
-    .replace(/\.run$/, "");
-  const dir = await deps.store.dir("visual", name);
+  const { name, dir } = await deps.store.uniqueDir(
+    "visual",
+    `${tab.id}-${path.basename(referencePath)}`,
+  );
   const save = (file: string, content: string | Buffer) =>
     deps.store.write("visual", path.join(name, file), content);
   const files = {

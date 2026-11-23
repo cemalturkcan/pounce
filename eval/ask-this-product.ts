@@ -6,7 +6,7 @@ import { askPages } from "../src/ask/run.ts";
 import type { AskDocument } from "../src/ask/types.ts";
 import { type AskAdapter, modelId } from "../src/ask/adapter.ts";
 import { loadAdapterModule } from "../src/ask/adapter-source.ts";
-import { renderAskResults } from "../src/ask/render.ts";
+import { renderAskResults, renderAskStats } from "../src/ask/render.ts";
 
 const EVAL_DIR = import.meta.dirname;
 
@@ -223,7 +223,7 @@ async function main() {
   await mkdir(values.out ?? "", { recursive: true });
   await writeFile(
     path.join(values.out ?? "", `${values.label}-ask-this-product.md`),
-    `${renderAskResults(QUESTION, report, adapter.name, model)}\n\n${JSON.stringify(rows, null, 2)}\n`,
+    `${renderAskResults(QUESTION, report)}\n\n${renderAskStats(report, adapter.name, model)}\n\n${JSON.stringify(rows, null, 2)}\n`,
   );
   process.stdout.write(
     `${[

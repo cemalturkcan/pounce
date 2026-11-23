@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { repeatUntil, sleep } from "../src/shared/async.ts";
+import { inSequence, repeatUntil, sleep } from "../src/shared/async.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
 import { type McpHarness, startMcpHarness } from "../tests/mcpHarness.ts";
 
@@ -49,17 +49,17 @@ async function eventually(read: () => Promise<string | undefined>, expected: str
 
 test("cookie banners are accepted automatically by default", async () => {
   await withServer(undefined, async (server) => {
-    const english = await server.ok("tab_open", { url: `${fixture.url}/consent/en` });
+    const english = await server.ok("navigate", { url: `${fixture.url}/consent/en` });
     expect(english).toMatch(/^Event: accepted the cookie banner \(Accept all\)$/m);
     await eventually(() => stateOf(server, opened(english)), "accepted");
 
-    const turkish = await server.ok("tab_open", { url: `${fixture.url}/consent/tr` });
+    const turkish = await server.ok("navigate", { url: `${fixture.url}/consent/tr` });
     await eventually(() => stateOf(server, opened(turkish)), "accepted");
 
-    const framed = opened(await server.ok("tab_open", { url: `${fixture.url}/consent/frame` }));
+    const framed = opened(await server.ok("navigate", { url: `${fixture.url}/consent/frame` }));
     await eventually(() => stateOf(server, framed), "accepted");
 
-    const delayed = opened(await server.ok("tab_open", { url: `${fixture.url}/consent/delayed` }));
+    const delayed = opened(await server.ok("navigate", { url: `${fixture.url}/consent/delayed` }));
     await eventually(() => stateOf(server, delayed), "accepted");
     expect(await server.ok("scroll", { tab: delayed, direction: "down" })).toMatch(
       /Earlier event .*: accepted the cookie banner \(OK\)/,
@@ -71,7 +71,7 @@ test("cookie banners are accepted automatically by default", async () => {
     });
     expect(navigated).toMatch(/^Event: accepted the cookie banner \(Accept all\)$/m);
 
-    const collected = await server.ok("collect_pages", {
+    const collected = await server.ok("save_pages", {
       urls: [`${fixture.url}/consent/tr`],
       include: ["text"],
     });
@@ -81,7 +81,7 @@ test("cookie banners are accepted automatically by default", async () => {
 
 test("automatic consent never commits an order and leaves other dialogs alone", async () => {
   await withServer(undefined, async (server) => {
-    const tab = opened(await server.ok("tab_open", { url: `${fixture.url}/checkout` }));
+    const tab = opened(await server.ok("navigate", { url: `${fixture.url}/checkout` }));
     await sleep(1800);
     expect(await stateOf(server, tab, "order-state")).toBe("pending");
     const text = await server.ok("dismiss_overlays", { tab });
@@ -93,12 +93,12 @@ test("automatic consent never commits an order and leaves other dialogs alone", 
 
 test("WEB_AGENT_AUTO_CONSENT=reject rejects and off leaves the banner", async () => {
   await withServer("reject", async (server) => {
-    const text = await server.ok("tab_open", { url: `${fixture.url}/consent/en` });
+    const text = await server.ok("navigate", { url: `${fixture.url}/consent/en` });
     expect(text).toMatch(/^Event: rejected the cookie banner \(Reject all\)$/m);
     await eventually(() => stateOf(server, opened(text)), "rejected");
   });
   await withServer("off", async (server) => {
-    const text = await server.ok("tab_open", { url: `${fixture.url}/consent/en` });
+    const text = await server.ok("navigate", { url: `${fixture.url}/consent/en` });
     const tab = opened(text);
     expect(text).not.toMatch(/cookie banner/);
     await sleep(1800);
@@ -106,7 +106,7 @@ test("WEB_AGENT_AUTO_CONSENT=reject rejects and off leaves the banner", async ()
     expect(await server.ok("dismiss_overlays", { tab, consent: "reject" })).toMatch(
       /Clicked "Reject all" \(reject\)/,
     );
-    const again = opened(await server.ok("tab_open", { url: `${fixture.url}/consent/tr` }));
+    const again = opened(await server.ok("navigate", { url: `${fixture.url}/consent/tr` }));
     expect(await server.ok("dismiss_overlays", { tab: again })).toMatch(
       /Clicked "Tümünü kabul et" \(accept\)/,
     );
@@ -122,5 +122,22 @@ test("automatic consent never acts on a tab the session does not own", async () 
     await server.ok("navigate", { tab, url: `${fixture.url}/consent/en` });
     await sleep(1800);
     expect(await stateOf(server, tab)).toBe("pending");
+  });
+});
+
+test("a navigation reports the banners it accepted while earlier navigations of the tab still watch", async () => {
+  await withServer(undefined, async (server) => {
+    const tab = opened(await server.ok("navigate", { url: `${fixture.url}/` }));
+    const events = await inSequence([0, 1, 2, 3, 4], async () => {
+      await inSequence([0, 1, 2, 3, 4, 5], async () => {
+        await server.ok("navigate", { tab, url: `${fixture.url}/` });
+        await sleep(15);
+      });
+      const text = await server.ok("navigate", { tab, url: `${fixture.url}/consent` });
+      return text.match(/^Event: .*$/gm)?.join(" | ");
+    });
+    expect(events).toStrictEqual(
+      Array.from({ length: 5 }, () => "Event: accepted the cookie banner (Accept all)"),
+    );
   });
 });

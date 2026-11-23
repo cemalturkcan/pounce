@@ -22,6 +22,8 @@ export type Config = {
   dataDir: string;
   profileDir: string;
   outputDir: string;
+  homeDir: string;
+  userDirsFile: string;
   sitesDir: string;
   logDir: string;
   logLevel: LogLevel;
@@ -95,6 +97,7 @@ const flag = raw.transform(parseBoolean);
 const environment = z.object({
   HOME: text,
   XDG_DATA_HOME: text,
+  XDG_CONFIG_HOME: text,
   DISPLAY: raw,
   WAYLAND_DISPLAY: raw,
   WEB_AGENT_DAEMON_DATA_DIR: text,
@@ -152,6 +155,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     dataDir,
     profileDir: env.WEB_AGENT_CHROME_USER_DATA_DIR ?? path.join(dataDir, "profile"),
     outputDir: env.WEB_AGENT_OUTPUT_DIR ?? path.join(dataDir, "output"),
+    homeDir: home,
+    userDirsFile: path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "user-dirs.dirs"),
     sitesDir: env.WEB_AGENT_SITES_DIR ?? path.join(dataDir, "sites"),
     logDir: env.WEB_AGENT_LOG_DIR ?? path.join(dataDir, "logs"),
     logLevel: env.WEB_AGENT_LOG_LEVEL,

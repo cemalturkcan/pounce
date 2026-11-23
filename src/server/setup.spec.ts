@@ -63,7 +63,7 @@ test("a later server built from the same deps lists the same tools as the first"
 test("a later server built from the same deps answers a tool call", async () => {
   await connectClient(createServer(config, deps));
   const later = await connectClient(createServer(config, deps));
-  const result = await callTool(later, "tabs_list");
+  const result = await callTool(later, "tabs");
   expect(result.text).toMatch(/^Browser not started/);
 });
 
@@ -80,4 +80,30 @@ test("servers built from the same deps share their tool definitions", () => {
   } finally {
     registered.mockRestore();
   }
+});
+
+const RETIRED_TOOLS =
+  /\b(tabs_list|tab_close|tab_open|tab_resize|read_text|fill_form|network_requests|network_export|site_notes|secrets_list|collect_pages|save_page|console_logs|server_log)\b/g;
+
+test("the server instructions name no retired tool", async () => {
+  const client = await connectClient(createServer(config, deps));
+  expect(client.getInstructions()?.match(RETIRED_TOOLS) ?? []).toStrictEqual([]);
+});
+
+test("the server instructions tell code that a structured result arrives as JSON text to parse", async () => {
+  const client = await connectClient(createServer(config, deps));
+  expect(client.getInstructions()).toContain(
+    "When you call these tools from code, a result with structured fields (such as save_pages, read_page or evaluate) arrives as JSON text: parse it, for example with JSON.parse, before reading fields such as dir; other results arrive as plain text. read_page's text is always in content, and evaluate's and run_script's returned value always in value; when it is over max_chars, that field holds a clipped preview, clipped is true, totalChars is the full size and file is the path of the whole result. run_script logs over max_chars beside a value that fits come the same way, in logs.",
+  );
+});
+
+test("no tool description or parameter text names a retired tool", async () => {
+  const client = await connectClient(createServer(config, deps));
+  const { tools } = await client.listTools();
+  const named = tools.flatMap((tool) =>
+    (JSON.stringify([tool.description, tool.inputSchema]).match(RETIRED_TOOLS) ?? []).map(
+      (name) => `${tool.name}: ${name}`,
+    ),
+  );
+  expect(named).toStrictEqual([]);
 });

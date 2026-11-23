@@ -54,7 +54,7 @@ const mcp = useMcpHarness({ name: "visual", secrets: noSecrets, askAdapter: fake
 const { call, ok } = mcp;
 
 async function openTab(variant: string) {
-  const text = await ok("tab_open", { url: `${base}/design?v=${variant}` });
+  const text = await ok("navigate", { url: `${base}/design?v=${variant}` });
   const tab = /Opened (t\d+)/.exec(text)?.[1];
   expect(tab).toMatch(/^t\d+$/);
   return tab ?? "";
@@ -123,7 +123,7 @@ describe("compare_design", () => {
     design = await openTab("a");
     page = await openTab("b");
     reference = await captureReference(design, 400, 300);
-    tabsBefore = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+    tabsBefore = (await ok("tabs")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
   });
 
   test("the reference capture is the viewport at the reference size", async () => {
@@ -318,14 +318,14 @@ return shot.data;`,
     expect(regionLines(text)[0] ?? "").toMatch(/^R1 x 0 y 0, 160x48 px/);
   });
 
-  test("the viewport is restored after the capture, with and without tab_resize or emulate", async () => {
+  test("the viewport is restored after the capture, with and without a viewport or device emulation", async () => {
     const initial = await metricsOf(page);
     await ok("compare_design", { tab: page, reference, model: "none" });
     expect(await metricsOf(page)).toBe(initial);
-    await ok("tab_resize", { tab: page, width: 900, height: 700 });
+    await ok("emulate", { tab: page, viewport: { width: 900, height: 700 } });
     await ok("compare_design", { tab: page, reference, model: "none" });
     expect(await metricsOf(page)).toBe("900x700x1");
-    await ok("emulate", { tab: page, viewport: { preset: "mobile" } });
+    await ok("emulate", { tab: page, device: "iPhone 15" });
     const emulated = await metricsOf(page);
     const text = await ok("compare_design", { tab: page, reference, model: "none" });
     expect(await metricsOf(page)).toBe(emulated);
@@ -350,9 +350,7 @@ return shot.data;`,
     });
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/Cannot read the reference image/);
-    const tabsAfter = (await ok("tabs_list"))
-      .split("\n")
-      .filter((line) => /^t\d+ /.test(line)).length;
+    const tabsAfter = (await ok("tabs")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
     expect(tabsAfter).toBe(tabsBefore);
   });
 });
@@ -371,7 +369,7 @@ test("a large speckled comparison keeps the server answering", async () => {
   }
   const file = path.join(mcp.workDir, "speckled-1440x8000.png");
   await writeFile(file, await encodePng(reference));
-  const tab = /Opened (t\d+)/.exec(await ok("tab_open", { url: `${base}/tall` }))?.[1] ?? "";
+  const tab = /Opened (t\d+)/.exec(await ok("navigate", { url: `${base}/tall` }))?.[1] ?? "";
   const started = Date.now();
   let done = false;
   const comparing = ok("compare_design", {
@@ -386,7 +384,7 @@ test("a large speckled comparison keeps the server answering", async () => {
     async () => {
       if (done) return true;
       const asked = Date.now();
-      await ok("tabs_list");
+      await ok("tabs");
       slowest = Math.max(slowest, Date.now() - asked);
       answered += 1;
       return undefined;
@@ -400,5 +398,5 @@ test("a large speckled comparison keeps the server answering", async () => {
   expect(elapsed).toBeLessThan(20_000);
   expect(answered).toBeGreaterThan(1);
   expect(slowest).toBeLessThan(1500);
-  await ok("tab_close", { tab });
+  await ok("tabs", { close: [tab] });
 });

@@ -2,8 +2,9 @@ import { execFile } from "node:child_process";
 import type { BrowserContext, Page } from "playwright-core";
 import { z } from "zod";
 import { TIMED_OUT, withDeadline } from "../shared/async.ts";
+import { messageOf } from "../shared/errors.ts";
 import type { OutputStore } from "../shared/output.ts";
-import type { Tab } from "../browser/tab.ts";
+import { showsResponse, type Tab } from "../browser/tab.ts";
 
 type BodyKind = "html" | "pdf" | "json" | "csv" | "text" | "image" | "binary";
 
@@ -85,6 +86,39 @@ export function extractPdfText(
       },
     );
   });
+}
+
+export function emptyErrorResponse(tab: Tab, cause: unknown) {
+  if (!/net::ERR_HTTP_RESPONSE_CODE_FAILURE/.test(messageOf(cause))) return undefined;
+  const response = tab.document?.response;
+  return response?.request().failure()?.errorText.includes("ERR_HTTP_RESPONSE_CODE_FAILURE")
+    ? response
+    : undefined;
+}
+
+const ERROR_PAGE_SETTLE_MS = 2000;
+
+export async function settleErrorPage(page: Page) {
+  if (page.url().startsWith("chrome-error:")) return;
+  await page
+    .waitForEvent("framenavigated", {
+      predicate: (frame) => frame === page.mainFrame() && frame.url().startsWith("chrome-error:"),
+      timeout: ERROR_PAGE_SETTLE_MS,
+    })
+    .catch(() => undefined);
+}
+
+export function noContentResponse(tab: Tab, since: number, cause: unknown) {
+  if (!/net::ERR_ABORTED/.test(messageOf(cause))) return undefined;
+  const answered = tab.network.findLast(
+    (entry) =>
+      entry.response !== undefined &&
+      !showsResponse(entry.status) &&
+      Date.parse(entry.time) >= since &&
+      entry.request.isNavigationRequest() &&
+      entry.request.frame() === tab.page.mainFrame(),
+  );
+  return answered?.response;
 }
 
 export function isDownloadError(cause: unknown) {
@@ -169,7 +203,7 @@ export async function readTabBody(tab: Tab, type: BodyType, store: OutputStore) 
   }
   if (!body)
     return {
-      note: `This tab shows ${type.mime}, but the browser no longer holds the response body of ${url}. Load it again with navigate and call read_text again.`,
+      note: `This tab shows ${type.mime}, but the browser no longer holds the response body of ${url}. Load it again with navigate and call read_page again.`,
     };
   const kind = type.kind === "pdf" ? "pages" : "downloads";
   const file = await store.write(kind, store.uniqueName(url, type.extension), body);
@@ -177,11 +211,13 @@ export async function readTabBody(tab: Tab, type: BodyType, store: OutputStore) 
   if (type.kind !== "pdf")
     return {
       note: `This tab shows ${type.mime} (${size}), which has no text to read; it was saved to ${file}. Use screenshot to look at an image.`,
+      file,
     };
   const extracted = await extractPdfText(file);
   if (extracted.text === undefined)
     return {
       note: `This tab shows a PDF (${size}); it was saved to ${file}, but ${extracted.unavailable}.`,
+      file,
     };
   return {
     text: extracted.text,

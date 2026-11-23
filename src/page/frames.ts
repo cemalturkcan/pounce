@@ -1,5 +1,6 @@
 import type { Frame, Page } from "playwright-core";
 import { TIMED_OUT, withDeadline } from "../shared/async.ts";
+import { shownUrl } from "../shared/output.ts";
 import { frameMarkdown } from "./markdown.ts";
 
 const FRAME_READ_MS = 5000;
@@ -21,7 +22,7 @@ export async function framesText(page: Page, format: "text" | "markdown") {
   const sections = await Promise.all(
     frames.map(async (frame) => {
       const text = await readFrame(frame, format);
-      return text ? `--- frame: ${frame.url()} ---\n${text}` : "";
+      return text ? `--- frame: ${shownUrl(frame.url())} ---\n${text}` : "";
     }),
   );
   return sections.filter(Boolean).join("\n\n");

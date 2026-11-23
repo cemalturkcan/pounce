@@ -1,5 +1,5 @@
 import type { AskReport, BrowseResult, BrowseSelection } from "./run.ts";
-import { CITATION, citedSources } from "./reply.ts";
+import { CITATION, citedSources, issueSource } from "./reply.ts";
 
 const PAGE_NOUN = String.raw`(?:page|site|document|text|screenshot|listing)s?`;
 const CONTENT_NOUN = String.raw`(?:page|document|text|screenshot|listing)s?`;
@@ -31,18 +31,6 @@ const ABSENCE = [
 const BEYOND_ABSENCE = /[,;:()\d$€£¥—–]|\b(?:but|which|while|although|only|except|instead)\b/i;
 const UNCERTAIN_WORD = String.raw`(?:unclear|not clear|ambiguous|uncertain)`;
 const UNCERTAIN = new RegExp(String.raw`\b${UNCERTAIN_WORD}\b`, "i");
-const ONLY_UNCERTAIN = [
-  new RegExp(
-    String.raw`^(?:it\s+(?:is|was|remains|seems)\s+)?(?:still\s+)?${UNCERTAIN_WORD}\s+(?:from\s+.+?\s+)?(?:whether|if|what|which|how|when|who|why)\b`,
-    "i",
-  ),
-  new RegExp(
-    String.raw`^.+?\s+(?:is|are|was|were|remains?)\s+(?:still\s+)?${UNCERTAIN_WORD}\.?$`,
-    "i",
-  ),
-];
-const CLAUSE_BREAK =
-  /[;—–]|\b(?:but|however|although|though|while|whereas)\b|,\s*(?:and|so|yet)\b/i;
 
 function factOf(answer: string) {
   return answer.replace(CITATION, "").replace(/^-\s*/, "").trim();
@@ -55,15 +43,6 @@ export function onlyStatesAbsence(answer: string) {
 
 function isUnclear(answer: string) {
   return UNCERTAIN.test(factOf(answer));
-}
-
-function onlyStatesUncertainty(answer: string) {
-  const fact = factOf(answer);
-  return !CLAUSE_BREAK.test(fact) && ONLY_UNCERTAIN.some((pattern) => pattern.test(fact));
-}
-
-export function resolvedByBrowsing(answer: string) {
-  return onlyStatesAbsence(answer) || onlyStatesUncertainty(answer);
 }
 
 export function selectEscalations(report: AskReport, browse: "auto" | "all"): BrowseSelection[] {
@@ -93,12 +72,14 @@ export function selectEscalations(report: AskReport, browse: "auto" | "all"): Br
           ? "all"
           : undefined;
     if (!reason) continue;
-    const cited = review ? [] : answers.filter((answer) => CITATION.exec(answer)?.[1] === source);
-    const unclear = cited.filter(isUnclear);
+    const cited = answers.filter((answer) =>
+      review ? issueSource(answer, [source]) === source : CITATION.exec(answer)?.[1] === source,
+    );
+    const unclear = review ? [] : cited.filter(isUnclear);
     const selection: BrowseSelection = {
       source,
       reason,
-      found: cited.filter((answer) => !isUnclear(answer)),
+      found: review ? cited : cited.filter((answer) => !isUnclear(answer)),
     };
     if (hint) selection.hint = hint;
     if (unclear.length) selection.unclear = unclear;
@@ -117,17 +98,22 @@ export function mergeBrowse(
   return { ...report, browse };
 }
 
+export function foundNothing(result: BrowseResult) {
+  return result.outcome === "not_found" || result.outcome === "blocked";
+}
+
 export function browsedLines(report: AskReport) {
   const results = report.browse?.results ?? [];
   if (report.mode === "review")
     return results.flatMap((result) =>
       (result.issues ?? []).map(
-        (issue) => `- [${issue.severity}] ${result.source}, ${issue.where}: ${issue.issue}`,
+        (issue) =>
+          `- [${issue.severity}] [browsed] ${result.source}, ${issue.where}: ${issue.issue}`,
       ),
     );
   return results
-    .filter((result) => result.outcome !== "not_found")
+    .filter((result) => !foundNothing(result))
     .flatMap((result) =>
-      result.lines.map((line) => `- ${line.replace(/^[-*•]\s*/, "")} [${result.source}]`),
+      result.lines.map((line) => `- [browsed] ${line.replace(/^[-*•]\s*/, "")} [${result.source}]`),
     );
 }

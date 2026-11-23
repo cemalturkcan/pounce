@@ -1,18 +1,16 @@
-import type { BrowserContext, CDPSession, Page } from "playwright-core";
+import { randomUUID } from "node:crypto";
+import { type BrowserContext, type CDPSession, devices, type Page } from "playwright-core";
 import { z } from "zod";
+import { withDeadline } from "../shared/async.ts";
+import { ToolError } from "../shared/errors.ts";
+import { DRAW_WAIT_MS } from "./manager.ts";
+import type { ProfileSettings } from "./profile-settings.ts";
 
 declare global {
   interface Navigator {
     userAgentData?: { getHighEntropyValues(hints: string[]): Promise<object> };
   }
 }
-
-export const VIEWPORT_PRESETS = {
-  mobile: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true },
-  tablet: { width: 820, height: 1180, deviceScaleFactor: 2, mobile: true },
-  laptop: { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false },
-  desktop: { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false },
-} as const;
 
 const NETWORK_PRESETS = {
   slow3g: {
@@ -29,14 +27,32 @@ const NETWORK_PRESETS = {
   },
 };
 
+const screenSchema = z.object({
+  screen: z.object({ width: z.number(), height: z.number() }).optional(),
+});
+
+const DEVICES = Object.entries(devices).map(([name, descriptor]) => ({
+  name,
+  userAgent: descriptor.userAgent,
+  viewport: descriptor.viewport,
+  deviceScaleFactor: descriptor.deviceScaleFactor,
+  isMobile: descriptor.isMobile,
+  hasTouch: descriptor.hasTouch,
+  screen: screenSchema.safeParse(descriptor).data?.screen,
+}));
+
+type Device = (typeof DEVICES)[number];
+
+const EXAMPLE_DEVICES =
+  '"iPhone 15", "iPhone 15 Pro Max", "Pixel 8", "Galaxy S24", "iPad (gen 11)", "iPad Pro 11" or "Desktop Chrome"';
+
+const HIDE_CLIENT_HINTS = "delete Navigator.prototype.userAgentData;";
+
+type Size = { width: number; height: number };
+
 type EmulateInput = {
-  viewport?: {
-    preset?: keyof typeof VIEWPORT_PRESETS;
-    width?: number;
-    height?: number;
-    mobile?: boolean;
-    scale?: number;
-  };
+  device?: Device | "";
+  viewport?: Size & { mobile?: boolean; scale?: number };
   colorScheme?: "light" | "dark" | "none";
   reducedMotion?: "reduce" | "no-preference" | "none";
   geolocation?: { latitude: number; longitude: number; accuracy?: number };
@@ -77,9 +93,27 @@ type UserAgentMetadata = {
   wow64?: boolean;
 };
 
+type Identity = { userAgent: string; platform?: string; metadata?: UserAgentMetadata };
+
 type RealUserAgent = { userAgent: string; metadata: UserAgentMetadata; observed: boolean };
 
 const realAgents = new WeakMap<BrowserContext, RealUserAgent>();
+
+export function resolveDevice(name: string): Device {
+  const wanted = name.trim().toLowerCase();
+  const exact = DEVICES.find((device) => device.name.toLowerCase() === wanted);
+  if (exact) return exact;
+  const portrait = DEVICES.filter((device) => !device.name.endsWith(" landscape"));
+  const close = portrait
+    .filter((device) => device.name.toLowerCase().includes(wanted))
+    .map((device) => `"${device.name}"`);
+  throw new ToolError(
+    `There is no device named "${name}".`,
+    close.length
+      ? `Devices with that in their name: ${close.join(", ")}.`
+      : `Use a name such as ${EXAMPLE_DEVICES}; add " landscape" for the landscape version. All names: ${portrait.map((device) => `"${device.name}"`).join(", ")}.`,
+  );
+}
 
 async function readHints(page: Page) {
   const hints = await page
@@ -104,18 +138,44 @@ async function readHints(page: Page) {
   return decoded.success ? decoded.data : undefined;
 }
 
+const versionTriple = (version: string) =>
+  [...version.split(/[._]/), "0", "0"].slice(0, 3).join(".");
+
+function systemOf(userAgent: string) {
+  const android = /Android ([\d.]+)/.exec(userAgent);
+  const apple = /OS ([\d_]+) like Mac OS X/.exec(userAgent);
+  const mac = /Mac OS X ([\d_]+)/.exec(userAgent);
+  if (/Windows/.test(userAgent))
+    return { platform: "Windows", navigator: "Win32", version: "10.0.0", desktop: true };
+  if (/iPhone/.test(userAgent))
+    return { platform: "iOS", navigator: "iPhone", version: versionTriple(apple?.[1] ?? "") };
+  if (/iPad/.test(userAgent))
+    return { platform: "iOS", navigator: "iPad", version: versionTriple(apple?.[1] ?? "") };
+  if (android)
+    return {
+      platform: "Android",
+      navigator: "Linux armv8l",
+      version: versionTriple(android[1] ?? ""),
+    };
+  if (/CrOS/.test(userAgent))
+    return { platform: "Chrome OS", navigator: "Linux x86_64", version: "", desktop: true };
+  if (mac)
+    return {
+      platform: "macOS",
+      navigator: "MacIntel",
+      version: versionTriple(mac[1] ?? ""),
+      desktop: true,
+    };
+  if (/Linux/.test(userAgent))
+    return { platform: "Linux", navigator: "Linux x86_64", version: "", desktop: true };
+  return { platform: "", navigator: undefined, version: "" };
+}
+
 export function synthesizeMetadata(userAgent: string, product: string): UserAgentMetadata {
   const version =
     /Chrome\/([\d.]+)/.exec(product)?.[1] ?? /Chrome\/([\d.]+)/.exec(userAgent)?.[1] ?? "0.0.0.0";
   const major = version.split(".")[0] ?? "0";
   const brand = /Headless/i.test(product) ? "HeadlessChrome" : "Google Chrome";
-  const platform = /Windows/.test(userAgent)
-    ? "Windows"
-    : /Mac OS X/.test(userAgent)
-      ? "macOS"
-      : /Android/.test(userAgent)
-        ? "Android"
-        : "Linux";
   return {
     brands: [
       { brand: "Not_A Brand", version: "99" },
@@ -128,12 +188,81 @@ export function synthesizeMetadata(userAgent: string, product: string): UserAgen
       { brand, version },
     ],
     fullVersion: version,
-    platform,
+    platform: systemOf(userAgent).platform || "Linux",
     platformVersion: "",
     architecture: /arm|aarch64/i.test(userAgent) ? "arm" : "x86",
     model: "",
     mobile: /Mobile|Android/.test(userAgent),
   };
+}
+
+const isOwnBrand = (brand: Brand) =>
+  brand.brand !== "Chromium" && !/Not.?A.?Brand/i.test(brand.brand);
+
+function brandsFor(userAgent: string, version: string, real: UserAgentMetadata) {
+  const major = version.split(".")[0] ?? "0";
+  const brand = /Edg\//.test(userAgent) ? "Microsoft Edge" : "Google Chrome";
+  const rename = (entry: Brand) => (isOwnBrand(entry) ? { ...entry, brand } : entry);
+  const sameMajor = real.brands.some(
+    (entry) => entry.brand === "Chromium" && entry.version === major,
+  );
+  const source = sameMajor ? real : synthesizeMetadata(userAgent, `Chrome/${version}`);
+  return {
+    brands: source.brands.map(rename),
+    fullVersionList: source.fullVersionList?.map(rename),
+    fullVersion: source.fullVersion,
+  };
+}
+
+function androidModel(userAgent: string) {
+  const model = /Android [\d.]+; ([^;)]+?)(?: Build\/[^;)]*)?\)/.exec(userAgent)?.[1] ?? "";
+  return model === "K" ? "" : model;
+}
+
+export function identityFor(
+  userAgent: string,
+  real: UserAgentMetadata,
+  device: { model?: string; platformVersion?: string } = {},
+): Identity {
+  const system = systemOf(userAgent);
+  const version = /Chrome\/([\d.]+)/.exec(userAgent)?.[1];
+  if (!version) return { userAgent, platform: system.navigator };
+  const desktop = system.desktop === true;
+  return {
+    userAgent,
+    platform: system.navigator,
+    metadata: {
+      ...brandsFor(userAgent, version, real),
+      platform: system.platform,
+      platformVersion: device.platformVersion ?? system.version,
+      architecture: desktop ? "x86" : "",
+      bitness: desktop ? "64" : "",
+      model: device.model ?? androidModel(userAgent),
+      mobile: /Mobile/.test(userAgent),
+      wow64: false,
+    },
+  };
+}
+
+export function deviceIdentity(device: Device, real: UserAgentMetadata): Identity {
+  const original = device.userAgent;
+  const apple = /OS (\d+)_(\d+)[\d_]* like Mac OS X/.exec(original);
+  if (apple)
+    return identityFor(
+      original.replace(/Version\/[\d.]+/, `Version/${apple[1]}.${apple[2]}`),
+      real,
+    );
+  if (!/Chrome\//.test(original)) return identityFor(original, real);
+  const major = real.brands.find((entry) => entry.brand === "Chromium")?.version ?? "0";
+  const reduced = original
+    .replace(/Chrome\/[\d.]+/, `Chrome/${major}.0.0.0`)
+    .replace(/Edg\/[\d.]+/, `Edg/${major}.0.0.0`)
+    .replace(/\(Linux; Android [^)]*\)/, "(Linux; Android 10; K)");
+  const android = /Android ([\d.]+)/.exec(original)?.[1];
+  return identityFor(reduced, real, {
+    model: androidModel(original),
+    platformVersion: android ? versionTriple(android) : undefined,
+  });
 }
 
 async function realUserAgent(page: Page, session: CDPSession): Promise<RealUserAgent> {
@@ -171,6 +300,13 @@ async function realUserAgent(page: Page, session: CDPSession): Promise<RealUserA
   return real;
 }
 
+type Metrics = Size & {
+  deviceScaleFactor: number;
+  mobile: boolean;
+  screenWidth?: number;
+  screenHeight?: number;
+};
+
 type EmulationState = {
   real: RealUserAgent;
   session: CDPSession;
@@ -180,13 +316,57 @@ type EmulationState = {
   network: keyof typeof NETWORK_PRESETS | "none";
   userAgent?: string;
   locale?: string;
-  geolocationOrigin?: string;
-  viewport?: { width: number; height: number; deviceScaleFactor: number; mobile: boolean };
+  device?: { name: string; identity: Identity; touch: boolean };
+  metrics?: Metrics;
+  touch: boolean;
+  size?: Size;
+  sizeBefore?: Size;
+  hidingHints?: string;
+  grantHolder: string;
 };
 
 const states = new WeakMap<Page, EmulationState>();
 
-async function stateFor(page: Page) {
+const THIS_BROWSER = "this browser";
+
+const loadedAs = new WeakMap<Page, string>();
+
+function presentedAs(state: EmulationState | undefined) {
+  if (state?.userAgent) return `user agent ${state.userAgent}`;
+  return state?.device?.name ?? THIS_BROWSER;
+}
+
+async function watchLoads(page: Page) {
+  if (loadedAs.has(page)) return;
+  loadedAs.set(page, THIS_BROWSER);
+  const watcher = await page.context().newCDPSession(page);
+  watcher.on("Page.frameNavigated", ({ frame }) => {
+    if (!frame.parentId) loadedAs.set(page, presentedAs(states.get(page)));
+  });
+  await watcher.send("Page.enable");
+}
+
+async function repaint(state: EmulationState) {
+  await withDeadline(
+    state.session.send("Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 1,
+      clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 },
+    }),
+    DRAW_WAIT_MS,
+  ).catch(() => undefined);
+}
+
+function reloadNote(page: Page, state: EmulationState) {
+  const now = presentedAs(state);
+  const before = loadedAs.get(page) ?? THIS_BROWSER;
+  if (now === before || !/^(https?|file):/i.test(page.url())) return undefined;
+  return `The page was loaded as ${before} and keeps what it detected then; reload it (navigate with url "reload") so it loads as ${now}.`;
+}
+
+export const emulatesOffline = (page: Page) => states.get(page)?.offline === true;
+
+async function stateFor(page: Page, profile: ProfileSettings) {
   const existing = states.get(page);
   if (existing) return existing;
   const session = await page.context().newCDPSession(page);
@@ -198,9 +378,16 @@ async function stateFor(page: Page) {
     media: new Map(),
     offline: false,
     network: "none",
+    touch: false,
+    grantHolder: randomUUID(),
   };
   states.set(page, state);
-  page.once("close", () => states.delete(page));
+  await watchLoads(page);
+  const context = page.context();
+  page.once("close", () => {
+    states.delete(page);
+    void profile.release(context, state.grantHolder).catch(() => undefined);
+  });
   return state;
 }
 
@@ -225,39 +412,133 @@ async function applyNetwork(state: EmulationState) {
   });
 }
 
+async function hideClientHints(state: EmulationState, hide: boolean) {
+  if (hide && !state.hidingHints) {
+    await state.session.send("Page.enable");
+    const { identifier } = await state.session.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: HIDE_CLIENT_HINTS,
+    });
+    state.hidingHints = identifier;
+  }
+  if (!hide && state.hidingHints) {
+    await state.session.send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: state.hidingHints,
+    });
+    state.hidingHints = undefined;
+  }
+}
+
+function chosenIdentity(state: EmulationState) {
+  if (state.userAgent) return identityFor(state.userAgent, state.real.metadata);
+  return state.device?.identity;
+}
+
 async function applyUserAgent(state: EmulationState) {
-  if (!state.userAgent && !state.locale) {
+  const identity = chosenIdentity(state);
+  await hideClientHints(state, identity !== undefined && !identity.metadata);
+  if (!identity && !state.locale) {
     await state.session.send("Emulation.setUserAgentOverride", { userAgent: "" });
     return;
   }
   await state.session.send("Emulation.setUserAgentOverride", {
-    userAgent: state.userAgent ?? state.real.userAgent,
+    userAgent: identity?.userAgent ?? state.real.userAgent,
     acceptLanguage: state.locale,
-    userAgentMetadata: state.real.metadata,
+    platform: identity?.platform,
+    userAgentMetadata: identity ? identity.metadata : state.real.metadata,
   });
 }
 
-export async function emulate(page: Page, input: EmulateInput) {
-  const state = await stateFor(page);
-  const { session, settings } = state;
+async function applyMetrics(state: EmulationState) {
+  if (state.metrics) await state.session.send("Emulation.setDeviceMetricsOverride", state.metrics);
+  else await state.session.send("Emulation.clearDeviceMetricsOverride");
+  await state.session.send("Emulation.setTouchEmulationEnabled", {
+    enabled: state.touch,
+    maxTouchPoints: state.touch ? 5 : undefined,
+  });
+}
 
-  if (input.viewport) {
-    const preset = input.viewport.preset ? VIEWPORT_PRESETS[input.viewport.preset] : undefined;
-    const width = input.viewport.width ?? preset?.width ?? 1280;
-    const height = input.viewport.height ?? preset?.height ?? 800;
-    const mobile = input.viewport.mobile ?? preset?.mobile ?? false;
-    const deviceScaleFactor = input.viewport.scale ?? preset?.deviceScaleFactor ?? 1;
-    state.viewport = { width, height, deviceScaleFactor, mobile };
-    await session.send("Emulation.setDeviceMetricsOverride", state.viewport);
-    await session.send("Emulation.setTouchEmulationEnabled", {
-      enabled: mobile,
-      maxTouchPoints: mobile ? 5 : undefined,
-    });
-    settings.set(
-      "viewport",
-      `${width}x${height} @${deviceScaleFactor}x${mobile ? " mobile+touch" : ""}`,
+function describeViewport(state: EmulationState) {
+  const { metrics, size } = state;
+  if (metrics) {
+    const mode = [metrics.mobile ? "mobile" : "", state.touch ? "touch" : ""].filter(Boolean);
+    return `${metrics.width}x${metrics.height} @${metrics.deviceScaleFactor}x${mode.length ? ` ${mode.join("+")}` : ""}`;
+  }
+  return size ? `${size.width}x${size.height}` : undefined;
+}
+
+function noteViewport(state: EmulationState) {
+  const described = describeViewport(state);
+  if (described) state.settings.set("viewport", described);
+  else state.settings.delete("viewport");
+}
+
+async function windowSize(page: Page): Promise<Size> {
+  return (
+    page.viewportSize() ??
+    page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+  );
+}
+
+async function applyDevice(state: EmulationState, device: Device | "") {
+  if (device === "") {
+    state.device = undefined;
+    state.metrics = undefined;
+    state.touch = false;
+    state.settings.delete("device");
+  } else {
+    const identity = deviceIdentity(device, state.real.metadata);
+    state.device = { name: device.name, identity, touch: device.hasTouch };
+    state.metrics = {
+      width: device.viewport.width,
+      height: device.viewport.height,
+      deviceScaleFactor: device.deviceScaleFactor,
+      mobile: device.isMobile,
+      screenWidth: device.screen?.width,
+      screenHeight: device.screen?.height,
+    };
+    state.touch = device.hasTouch;
+    const system = systemOf(identity.userAgent).platform || "browser";
+    state.settings.set(
+      "device",
+      `${device.name} (${system} user agent, ${identity.metadata ? "with matching client hints" : "no client hints"})`,
     );
   }
+  await applyMetrics(state);
+  await applyUserAgent(state);
+  noteViewport(state);
+}
+
+async function applyViewport(
+  page: Page,
+  state: EmulationState,
+  viewport: NonNullable<EmulateInput["viewport"]>,
+) {
+  const mobile = viewport.mobile ?? state.metrics?.mobile ?? false;
+  const deviceScaleFactor = viewport.scale ?? state.metrics?.deviceScaleFactor ?? 1;
+  const { width, height } = viewport;
+  if (state.device || mobile || deviceScaleFactor !== 1) {
+    state.metrics = { width, height, deviceScaleFactor, mobile };
+    state.touch = state.device?.touch ?? mobile;
+    await applyMetrics(state);
+  } else {
+    if (state.metrics) {
+      state.metrics = undefined;
+      state.touch = false;
+      await applyMetrics(state);
+    }
+    state.sizeBefore ??= await windowSize(page);
+    await page.setViewportSize({ width, height });
+    state.size = { width, height };
+  }
+  noteViewport(state);
+}
+
+export async function emulate(page: Page, input: EmulateInput, profile: ProfileSettings) {
+  const state = await stateFor(page, profile);
+  const { session, settings } = state;
+
+  if (input.device !== undefined) await applyDevice(state, input.device);
+  if (input.viewport) await applyViewport(page, state, input.viewport);
   if (input.colorScheme || input.reducedMotion) {
     if (input.colorScheme)
       state.media.set(
@@ -279,10 +560,8 @@ export async function emulate(page: Page, input: EmulateInput) {
   }
   if (input.geolocation) {
     const origin = new URL(page.url()).origin;
-    if (origin !== "null") {
-      await page.context().grantPermissions(["geolocation"], { origin });
-      state.geolocationOrigin = origin;
-    }
+    if (origin !== "null")
+      await profile.hold(page.context(), state.grantHolder, origin, ["geolocation"]);
     await session.send("Emulation.setGeolocationOverride", { accuracy: 10, ...input.geolocation });
     settings.set(
       "geolocation",
@@ -317,35 +596,42 @@ export async function emulate(page: Page, input: EmulateInput) {
     if (state.network !== "none") settings.set("network", state.network);
     else settings.delete("network");
   }
-  return settings;
+  if (input.device !== undefined || input.viewport || input.colorScheme || input.reducedMotion)
+    await repaint(state);
+  return { settings, reload: reloadNote(page, state) };
 }
 
-export async function resetEmulation(page: Page) {
+export async function resetEmulation(page: Page, profile: ProfileSettings) {
   const state = states.get(page);
-  if (!state) return [];
+  if (!state) return { cleared: [], size: undefined };
   states.delete(page);
   const cleared = [...state.settings.keys()];
-  if (state.userAgent || state.locale)
+  if (state.userAgent || state.locale || state.device)
     await state.session
       .send("Emulation.setUserAgentOverride", { userAgent: "" })
       .catch(() => undefined);
+  await hideClientHints(state, false).catch(() => undefined);
   await state.session.detach().catch(() => undefined);
-  if (state.geolocationOrigin)
-    await page
-      .context()
-      .clearPermissions()
-      .catch(() => undefined);
-  return cleared;
+  if (state.sizeBefore) await page.setViewportSize(state.sizeBefore);
+  await profile.release(page.context(), state.grantHolder);
+  return { cleared, size: state.sizeBefore };
+}
+
+export const emulationSession = (page: Page) => states.get(page)?.session;
+
+export function emulatedViewport(page: Page): Size | undefined {
+  const metrics = states.get(page)?.metrics;
+  return metrics && { width: metrics.width, height: metrics.height };
 }
 
 export async function reapplyEmulatedViewport(page: Page) {
   const state = states.get(page);
-  if (!state?.viewport) return false;
+  if (!state?.metrics) return false;
   await state.session.send("Emulation.setDeviceMetricsOverride", {
-    ...state.viewport,
-    width: state.viewport.width + 1,
+    ...state.metrics,
+    width: state.metrics.width + 1,
   });
-  await state.session.send("Emulation.setDeviceMetricsOverride", state.viewport);
+  await state.session.send("Emulation.setDeviceMetricsOverride", state.metrics);
   return true;
 }
 

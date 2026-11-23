@@ -5,6 +5,7 @@ import type { CDPSession, Locator, Page } from "playwright-core";
 import { withDeadline, withTimeout, TIMED_OUT } from "../shared/async.ts";
 import { capture, pageZoom } from "../page/capture.ts";
 import { reapplyEmulatedViewport } from "../browser/emulate.ts";
+import { pageSession } from "../browser/page-session.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
 import { imageSize } from "../ask/model-images.ts";
 import { isDecodablePng, isPng } from "./png.ts";
@@ -106,7 +107,6 @@ async function settle(page: Page) {
 
 async function restoreViewport(page: Page, session: CDPSession, before: Metrics) {
   await withDeadline(session.send("Emulation.clearDeviceMetricsOverride"), 5000);
-  await withDeadline(session.detach(), 5000);
   if (page.isClosed()) return undefined;
   const emulated = await withDeadline(reapplyEmulatedViewport(page), 5000);
   const playwrightViewport = page.viewportSize();
@@ -129,7 +129,7 @@ async function restoreViewport(page: Page, session: CDPSession, before: Metrics)
     after.height !== before.height ||
     after.deviceScaleFactor !== before.deviceScaleFactor
   ) {
-    return `The viewport was ${before.width}x${before.height} @${before.deviceScaleFactor}x before the capture and is ${after.width}x${after.height} @${after.deviceScaleFactor}x now; use tab_resize or emulate to set it back.`;
+    return `The viewport was ${before.width}x${before.height} @${before.deviceScaleFactor}x before the capture and is ${after.width}x${after.height} @${after.deviceScaleFactor}x now; use emulate to set it back.`;
   }
   return undefined;
 }
@@ -191,7 +191,7 @@ export async function captureAt(
   mode: { locator?: Locator; fullPage: boolean },
 ) {
   const before = await readMetrics(page);
-  const session = await bounded(page.context().newCDPSession(page), "opening a DevTools session");
+  const session = await bounded(pageSession(page), "opening a DevTools session");
   let png: Buffer | undefined;
   let restoreNote: string | undefined;
   try {

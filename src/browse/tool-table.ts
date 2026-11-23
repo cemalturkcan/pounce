@@ -24,7 +24,7 @@ export const browseInput = z
   .catchall(toolValue);
 
 export type BrowseInput = z.infer<typeof browseInput>;
-export type McpArguments = Partial<Record<string, z.infer<typeof toolValue>>>;
+export type McpArguments = Partial<Record<string, z.infer<typeof toolValue> | string[]>>;
 
 export type BrowseTool = {
   name: string;
@@ -78,7 +78,7 @@ export const BROWSE_TOOLS: BrowseTool[] = [
       regex: z.boolean().optional().describe("Treat query as a regular expression."),
       tab,
     }),
-    mcp: "find",
+    mcp: "snapshot",
     toMcp: plain,
   },
   {
@@ -97,15 +97,16 @@ export const BROWSE_TOOLS: BrowseTool[] = [
       frames: z.boolean().optional().describe("Also read the text inside iframes."),
       tab,
     }),
-    mcp: "read_text",
+    mcp: "read_page",
     toMcp: (input, current) => ({ ...onTab(input, current), scope: "page", ...strip(input) }),
   },
   {
     name: "snapshot",
     description:
-      "List the page's elements as an indented tree with a ref on each, to see what you can act on. interactive true lists only buttons, links and fields, which is much shorter; target lists only one part of the page. Prefer find when you know the words you are after.",
+      "List the page's elements as an indented tree with a ref on each, to see what you can act on. It shows only an open dialog, or else the page's main part, folds menus of links into one line and says at the top what it left out; scope full shows the whole page. interactive true lists only buttons, links and fields, which is much shorter; target lists only one part of the page, such as a folded menu. Prefer find when you know the words you are after.",
     schema: z.strictObject({
       target: target.optional(),
+      scope: z.enum(["auto", "full"]).optional().describe("full shows the whole page."),
       interactive: z.boolean().optional().describe("Only buttons, links and fields."),
       boxes: z.boolean().optional().describe("Add each element's position on screen."),
       tab,
@@ -130,8 +131,8 @@ export const BROWSE_TOOLS: BrowseTool[] = [
     description:
       "Return the data the page declares for machines: product prices and availability, and every table as rows. Often the most exact source of a price or a spec.",
     schema: z.strictObject({ tab }),
-    mcp: "extract",
-    toMcp: plain,
+    mcp: "read_page",
+    toMcp: (input, current) => ({ ...onTab(input, current), format: "structured" }),
   },
   {
     name: "click",
@@ -171,7 +172,12 @@ export const BROWSE_TOOLS: BrowseTool[] = [
       tab,
     }),
     mcp: "scroll",
-    toMcp: withDiff,
+    toMcp: ({ direction, ...input }, current) => {
+      const mapped: McpArguments = withDiff(input, current);
+      if (direction === "top" || direction === "bottom") mapped.to = direction;
+      else if (direction !== undefined) mapped.direction = direction;
+      return mapped;
+    },
   },
   {
     name: "press",
@@ -200,7 +206,7 @@ export const BROWSE_TOOLS: BrowseTool[] = [
     toMcp: (input, current) => ({
       ...onTab(input, current),
       target: input.target,
-      text: input.option,
+      value: input.option,
       include_diff: true,
     }),
     guard: "select",
@@ -219,7 +225,7 @@ export const BROWSE_TOOLS: BrowseTool[] = [
     toMcp: (input, current) => ({
       ...onTab(input, current),
       target: input.target,
-      text: input.text,
+      value: input.text,
       submit: true,
       include_diff: true,
     }),
@@ -271,8 +277,8 @@ export const BROWSE_TOOLS: BrowseTool[] = [
     name: "close_tab",
     description: "Close a tab that a click opened during this task, when you are done with it.",
     schema: z.strictObject({ tab: z.string().min(1).describe("The tab to close, such as t15.") }),
-    mcp: "tab_close",
-    toMcp: (input) => ({ tab: input.tab, force: true }),
+    mcp: "tabs",
+    toMcp: (_input, current) => ({ close: [current], force: true }),
   },
 ];
 

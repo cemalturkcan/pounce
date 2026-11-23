@@ -2,10 +2,11 @@ import { afterAll, beforeAll, expect } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import type { Page } from "playwright-core";
 import type { AskAdapter } from "../src/ask/adapter.ts";
 import type { Notifier } from "../src/shared/notify.ts";
 import type { SecretStore } from "../src/shared/secrets.ts";
-import { type ToolArgs, useMcpHarness } from "../tests/mcpHarness.ts";
+import { type McpHarness, type ToolArgs, useMcpHarness } from "../tests/mcpHarness.ts";
 import { type Fixture, startFixture } from "./fixture.ts";
 
 export const TEST_SECRET = `fixture-${randomBytes(9).toString("hex")}`;
@@ -41,19 +42,51 @@ function paragraphAdapter(prompts: string[]): AskAdapter {
   };
 }
 
-function openedTab(text: string) {
+export async function holdsFocus(page: Page) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Emulation.setFocusEmulationEnabled", { enabled: false });
+    return await page.evaluate(() => document.hasFocus());
+  } finally {
+    await session.detach();
+  }
+}
+
+export async function focusEvents(page: Page) {
+  await page.evaluate(() => {
+    const root = document.documentElement;
+    root.dataset.focuses = "0";
+    addEventListener(
+      "focus",
+      () => (root.dataset.focuses = String(Number(root.dataset.focuses) + 1)),
+    );
+  });
+  return () => page.evaluate(() => Number(document.documentElement.dataset.focuses));
+}
+
+export function openedTab(text: string) {
   const id = /Opened (t\d+)/.exec(text)?.[1];
   expect(id, text).toMatch(/^t\d+$/);
   return id ?? "";
 }
 
+export async function failedCall(harness: Pick<McpHarness, "call">, name: string, args: ToolArgs) {
+  const result = await harness.call(name, args);
+  expect(result.isError, `${name} should have failed: ${result.text}`).toBe(true);
+  return result.text;
+}
+
+export const savedDir = (text: string) => /pages into (\S+)/.exec(text)?.[1] ?? "";
+
 async function collectedText(index: string) {
-  const dir = /pages into (\S+)/.exec(index)?.[1] ?? "";
+  const dir = savedDir(index);
   const file = (await readdir(dir)).find((entry) => entry.endsWith(".txt")) ?? "";
   return { index, text: await readFile(path.join(dir, file), "utf8") };
 }
 
-export function useToolsHarness(name: string) {
+type ToolsHarnessOptions = { env?: NodeJS.ProcessEnv; secrets?: SecretStore };
+
+export function useToolsHarness(name: string, options: ToolsHarnessOptions = {}) {
   const askPrompts: string[] = [];
   const notifications: [string, string][] = [];
   const recordingNotifier: Notifier = async (title, body) => {
@@ -64,8 +97,8 @@ export function useToolsHarness(name: string) {
   let current: Fixture | undefined;
   const mcp = useMcpHarness({
     name,
-    env: { WEB_AGENT_LOG_LEVEL: "debug" },
-    secrets: fakeSecrets,
+    env: { WEB_AGENT_LOG_LEVEL: "debug", ...options.env },
+    secrets: options.secrets ?? fakeSecrets,
     askAdapter: fakeAdapter,
     notify: recordingNotifier,
   });
@@ -92,6 +125,12 @@ export function useToolsHarness(name: string) {
     askPrompts,
     notifications,
     openedTab,
+    failure: (tool: string, args: ToolArgs) => failedCall(mcp, tool, args),
+    openTab: async (route: string, waitUntil: "load" | "commit" = "load") => {
+      const tab = await mcp.deps.manager.openTab("stdio");
+      await tab.page.goto(`${fixture().url}${route}`, { waitUntil });
+      return tab;
+    },
     refOf: (snapshot: string, label: string) => {
       const line = snapshot.split("\n").find((candidate) => candidate.includes(label));
       const ref = line ? /\[ref=([a-z0-9]+)\]/.exec(line)?.[1] : undefined;
@@ -100,7 +139,7 @@ export function useToolsHarness(name: string) {
     },
     collectFeed: async (extra: ToolArgs) =>
       collectedText(
-        await ok("collect_pages", {
+        await ok("save_pages", {
           urls: [`${fixture().url}/feed`],
           include: ["text"],
           settle_ms: 0,
@@ -109,15 +148,15 @@ export function useToolsHarness(name: string) {
       ),
     collectText: async (route: string, extra: ToolArgs = {}) =>
       collectedText(
-        await ok("collect_pages", { urls: [fixture().url + route], include: ["text"], ...extra }),
+        await ok("save_pages", { urls: [fixture().url + route], include: ["text"], ...extra }),
       ),
     dismissIn: async (route: string) => {
-      const tab = openedTab(await ok("tab_open", { url: `${fixture().url}${route}` }));
+      const tab = openedTab(await ok("navigate", { url: `${fixture().url}${route}` }));
       try {
         const text = await ok("dismiss_overlays", { tab });
-        return { text, state: await ok("read_text", { tab, target: "#modal-state" }) };
+        return { text, state: await ok("read_page", { tab, target: "#modal-state" }) };
       } finally {
-        await ok("tab_close", { tab });
+        await ok("tabs", { close: [tab] });
       }
     },
     counter: async (tab: string) =>

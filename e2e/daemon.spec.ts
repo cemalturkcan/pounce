@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { repeatUntil, sleep } from "../src/shared/async.ts";
-import { freePort, healthy, type SpawnedDaemon, spawnDaemon } from "../tests/daemon.ts";
+import { healthy, heldPort, type SpawnedDaemon, spawnDaemon } from "../tests/daemon.ts";
 import { callTool, okTool, type ToolArgs } from "../tests/mcpHarness.ts";
 import { parseJsonOrThrow } from "../src/shared/decode.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
@@ -61,7 +61,7 @@ async function jobStatusMatching(session: Session, id: string, pattern: RegExp) 
   let status = "";
   await repeatUntil(
     async () => {
-      status = await ok(session, "jobs", { action: "status", id });
+      status = await ok(session, "run_script", { job: id });
       return pattern.test(status) ? true : undefined;
     },
     { delayMs: () => 100, giveUp: (made) => made >= 50 },
@@ -89,7 +89,7 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
 
   beforeAll(async () => {
     session = await connect();
-    tab = /Opened (t\d+)/.exec(await ok(session, "tab_open", { url: fixture.url }))?.[1] ?? "";
+    tab = /Opened (t\d+)/.exec(await ok(session, "navigate", { url: fixture.url }))?.[1] ?? "";
     expect(tab).toMatch(/^t\d+$/);
   });
 
@@ -119,20 +119,26 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
   });
 
   test("patch_response when the upstream refuses the connection", async () => {
-    const closed = freePort();
-    await ok(session, "intercept", {
-      tab,
-      action: "add",
-      url: `127.0.0.1:${closed}/`,
-      mode: "patch_response",
-      replacements: [{ find: "a", replace: "b" }],
-    });
-    await ok(session, "evaluate", {
-      tab,
-      expression: `fetch('http://127.0.0.1:${closed}/x').then(() => 'reached', () => 'failed')`,
-    });
-    expect(await ok(session, "intercept", { tab, action: "list" })).toMatch(/1 failed/);
-    await ok(session, "intercept", { tab, action: "clear" });
+    const reserved = heldPort();
+    const closed = `127.0.0.2:${reserved.port}`;
+    try {
+      await ok(session, "intercept", {
+        tab,
+        action: "add",
+        url: `${closed}/`,
+        mode: "patch_response",
+        replacements: [{ find: "a", replace: "b" }],
+      });
+      await ok(session, "evaluate", {
+        tab,
+        expression: `fetch('http://${closed}/x').then(() => 'reached', () => 'failed')`,
+      });
+      const listed = await ok(session, "intercept", { tab, action: "list" });
+      expect(listed).toMatch(/1 failed/);
+      await ok(session, "intercept", { tab, action: "clear" });
+    } finally {
+      reserved.stop(true);
+    }
     await assertAlive();
   });
 
@@ -143,16 +149,15 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
     });
     await sleep(1500);
     await assertAlive();
-    expect(await ok(session, "tabs_list")).toMatch(
-      /Recent background errors[\s\S]*unhandled rejection/,
+    expect(await ok(session, "logs", { source: "server", limit: 20 })).toMatch(
+      /script_call_after_end[^\n]*Nothing matched #missing/,
     );
-    expect(daemon.stderr()).toMatch(/unhandled rejection kept the server running/);
   });
 
   test("a script listener that throws synchronously", async () => {
     const other = await connect();
     const otherTab =
-      /Opened (t\d+)/.exec(await ok(other, "tab_open", { url: fixture.url }))?.[1] ?? "";
+      /Opened (t\d+)/.exec(await ok(other, "navigate", { url: fixture.url }))?.[1] ?? "";
     const result = await ok(session, "run_script", {
       tab,
       code: `page.on("framenavigated", (frame) => { JSON.parse(frame.url()); }); await page.goto(${JSON.stringify(`${fixture.url}/article`)}); await sleep(500); return "alive";`,
@@ -161,14 +166,12 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
     expect(result).toMatch(/Error in a framenavigated callback: .*JSON/);
     await sleep(500);
     await assertAlive();
-    expect(await ok(other, "tabs_list")).toMatch(new RegExp(`${otherTab} \\[yours\\]`));
-    expect(await ok(other, "tabs_list")).toMatch(
-      /Recent background errors[\s\S]*run_script callback/,
-    );
-    await ok(other, "tab_close", { tab: otherTab });
+    expect(await ok(other, "tabs")).toMatch(new RegExp(`${otherTab} \\[yours\\]`));
+    expect(await ok(other, "tabs")).not.toMatch(/run_script callback/);
+    await ok(other, "tabs", { close: [otherTab] });
   });
 
-  test("synchronous code after an await is stopped by timeout_ms and by the slice limit", async () => {
+  test("synchronous code after an await is stopped by timeout_ms and leaves the daemon answering", async () => {
     const startedAt = Date.now();
     const busy = await callTool(session.client, "run_script", {
       timeout_ms: 1000,
@@ -187,25 +190,29 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
     const id = /job (j\d+)/.exec(started)?.[1] ?? "";
     const loopStarted = Date.now();
     await sleep(300);
-    expect(await ok(other, "tabs_list")).toMatch(/Output files/);
+    expect(await ok(other, "tabs")).toMatch(/Output files/);
     const answeredAfter = Date.now() - loopStarted;
-    expect(answeredAfter, `tabs_list answered after ${answeredAfter} ms`).toBeLessThan(15_000);
-    const status = await jobStatusMatching(session, id, / failed /);
-    expect(status).toMatch(/ failed /);
-    expect(status).toMatch(/without awaiting anything/);
+    expect(answeredAfter, `tabs answered after ${answeredAfter} ms`).toBeLessThan(1500);
+    expect(await ok(session, "run_script", { job: id })).toMatch(/ running /);
+    expect(await ok(session, "run_script", { job: id, cancel: true })).toMatch(/ cancelled /);
     await assertAlive();
   });
 
   test("a job whose result file cannot be written", async () => {
     const started = await ok(session, "run_script", {
+      tab,
       background: true,
-      code: "await sleep(1500); return 'value';",
+      code: "await page.locator('body[data-result-dir=locked]').waitFor({ state: 'attached', timeout: 60000 }); return 'value';",
     });
     const id = /job (j\d+)/.exec(started)?.[1] ?? "";
     const logFile = /Log: (\S+)/.exec(started)?.[1] ?? "";
     const dir = path.dirname(logFile);
     await chmod(dir, 0o500);
     try {
+      await ok(session, "evaluate", {
+        tab,
+        expression: "document.body.dataset.resultDir = 'locked'",
+      });
       const status = await jobStatusMatching(session, id, / done /);
       expect(status).toMatch(/ done /);
       expect(status).toMatch(/could not be written/);
@@ -218,15 +225,15 @@ describe("the daemon survives failures that used to be unhandled rejections", ()
 
 test("tabs of an ended session become orphaned and claimable", async () => {
   const first = await connect();
-  const tab = /Opened (t\d+)/.exec(await ok(first, "tab_open", { url: fixture.url }))?.[1] ?? "";
+  const tab = /Opened (t\d+)/.exec(await ok(first, "navigate", { url: fixture.url }))?.[1] ?? "";
   const second = await connect();
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[other client\\]`));
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[other client\\]`));
   await first.transport.terminateSession();
   await sleep(200);
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
   await ok(second, "snapshot", { tab });
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[yours\\]`));
-  await ok(second, "tab_close", { tab });
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[yours\\]`));
+  await ok(second, "tabs", { close: [tab] });
   await assertAlive();
 });
 
@@ -241,7 +248,7 @@ test("a tab a background job opens after its session ended is orphaned when the 
   const second = await connect();
   const status = await jobStatusMatching(second, id, / done /);
   const tab = /opened (t\d+)/.exec(status)?.[1] ?? "";
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
   await assertAlive();
 });
 
@@ -263,17 +270,50 @@ test("a tab a background job opens after its session ended stays the session's u
   const running = await jobStatusMatching(second, longId, /opened t\d+/);
   const tab = /opened (t\d+)/.exec(running)?.[1] ?? "";
   expect(running).toMatch(/ running /);
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[other client\\]`));
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[other client\\]`));
   await jobStatusMatching(second, longId, / done /);
-  expect(await ok(second, "tabs_list")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
+  expect(await ok(second, "tabs")).toMatch(new RegExp(`${tab} \\[orphaned\\]`));
+  await assertAlive();
+});
+
+async function startedJob(session: Session, code: string) {
+  const started = await ok(session, "run_script", { background: true, code });
+  return /background job (j\d+)/.exec(started)?.[1] ?? "";
+}
+
+test("another open session may cancel a background job", async () => {
+  const first = await connect();
+  const id = await startedJob(first, "await sleep(20000);");
+  const second = await connect();
+  expect(await ok(second, "run_script", { job: id, cancel: true })).toMatch(/ cancelled /);
+  await assertAlive();
+});
+
+test("a background job of an ended session is listed as orphaned", async () => {
+  const first = await connect();
+  const id = await startedJob(first, "await sleep(20000);");
+  await first.transport.terminateSession();
+  const second = await connect();
+  expect(await jobStatusMatching(second, id, /\(orphaned\)/)).toMatch(/ running \(orphaned\) /);
+  await ok(second, "run_script", { job: id, cancel: true });
+  await assertAlive();
+});
+
+test("any session may cancel a background job of an ended session", async () => {
+  const first = await connect();
+  const id = await startedJob(first, "await sleep(20000);");
+  await first.transport.terminateSession();
+  await sleep(200);
+  const second = await connect();
+  expect(await ok(second, "run_script", { job: id, cancel: true })).toMatch(/ cancelled /);
   await assertAlive();
 });
 
 test("a failing call carries a request id that leads to its log line", async () => {
   const session = await connect();
-  const tab = /Opened (t\d+)/.exec(await ok(session, "tab_open", { url: fixture.url }))?.[1] ?? "";
+  const tab = /Opened (t\d+)/.exec(await ok(session, "navigate", { url: fixture.url }))?.[1] ?? "";
   const typed = `pw-${randomBytes(8).toString("hex")}`;
-  const failed = await callTool(session.client, "fill", { tab, target: "e9999", text: typed });
+  const failed = await callTool(session.client, "fill", { tab, target: "e9999", value: typed });
   const { text } = failed;
   expect(failed.isError).toBe(true);
   const requestId = /\[req ([0-9a-f]{6})\]$/.exec(text)?.[1] ?? "";
@@ -298,7 +338,7 @@ test("a failing call carries a request id that leads to its log line", async () 
   expect(entry?.session).toBeString();
   expect(entry?.ms).toBeNumber();
   expect(String(entry?.error)).toMatch(/not in the latest snapshot/);
-  expect(entry?.input).toStrictEqual({ tab, target: "e9999", text: `[${typed.length} chars]` });
+  expect(entry?.input).toStrictEqual({ tab, target: "e9999", value: `[${typed.length} chars]` });
   expect(log.raw, "typed text leaked into the log").not.toContain(typed);
   for (const event of ["daemon_start", "session_open", "browser_launch"]) {
     expect(
@@ -307,17 +347,17 @@ test("a failing call carries a request id that leads to its log line", async () 
     ).toContain(event);
   }
 
-  const listed = await ok(session, "server_log", { request_id: requestId });
+  const listed = await ok(session, "logs", { source: "server", request_id: requestId });
   expect(listed).toMatch(new RegExp(`req=${requestId}`));
   expect(listed).toMatch(/tool=fill/);
   expect(listed).toContain(path.join(workDir, "logs"));
   expect(listed).not.toContain(typed);
-  expect(await ok(session, "server_log", { level: "warn", tool: "fill", limit: 5 })).toMatch(
-    new RegExp(`req=${requestId}`),
-  );
+  expect(
+    await ok(session, "logs", { source: "server", level: "warn", tool: "fill", limit: 5 }),
+  ).toMatch(new RegExp(`req=${requestId}`));
 
-  const tabs = await ok(session, "tabs_list");
+  const tabs = await ok(session, "tabs");
   expect(tabs, tabs).toContain(`Log: ${path.join(workDir, "logs")}`);
   expect(tabs).toMatch(/\d+ errors? in the last hour/);
-  await ok(session, "tab_close", { tab });
+  await ok(session, "tabs", { close: [tab] });
 });

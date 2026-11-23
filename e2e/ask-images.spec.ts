@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { SecretStore } from "../src/shared/secrets.ts";
@@ -39,6 +39,12 @@ let fixture: Fixture;
 let base = "";
 const mcp = useMcpHarness({ name: "ask-images", secrets: noSecrets, askAdapter: recorder });
 
+async function answersFile(text: string) {
+  const file = /^Full answers: (\S+)$/m.exec(text)?.[1] ?? "";
+  expect(file, text).toMatch(/\S/);
+  return readFile(file, "utf8");
+}
+
 async function ok(name: string, args: ToolArgs) {
   const result = await mcp.call(name, args);
   expect(result.isError, `${name} failed: ${result.text}`).toBe(false);
@@ -54,7 +60,7 @@ const tileStatsList = z.array(
 );
 
 async function tileStats(images: { data: string }[]) {
-  const opened = await ok("tab_open", {});
+  const opened = await ok("navigate", { url: "about:blank" });
   const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
   const page = mcp.deps.manager.getTab(tab).page;
   const stats = await page.evaluate(
@@ -98,7 +104,7 @@ async function tileStats(images: { data: string }[]) {
       colors: REVEAL_COLORS,
     },
   );
-  await ok("tab_close", { tab });
+  await ok("tabs", { close: [tab] });
   return tileStatsList.parse(stats);
 }
 
@@ -149,7 +155,8 @@ describe("ask_pages images", () => {
       /<screenshots source="02-[^"]+">Image 1 of this message: 02-[^ ]+ viewport<\/screenshots>/,
     );
     expect(call.prompt).not.toContain('<screenshots source="01-');
-    expect(text).toMatch(
+    const answers = await answersFile(text);
+    expect(answers).toMatch(
       /Screenshots \(1 sent, files in .+\):\n02-127-0-0-1-\d+-canvas\.md: viewport/,
     );
     expect(text).not.toMatch(/\/9j\/|iVBORw0KGgo|[A-Za-z0-9+/]{200,}/);
@@ -182,11 +189,11 @@ describe("ask_pages images", () => {
     expect(call.images?.map((image) => image.label?.replace(/^.*\.md /, ""))).toStrictEqual(
       Array.from({ length: count }, (_value, index) => `tile ${index + 1}/${count}`),
     );
-    expect(text).toMatch(new RegExp(`tall\\.md: ${count} tile\\(s\\)`));
+    expect(await answersFile(text)).toMatch(new RegExp(`tall\\.md: ${count} tile\\(s\\)`));
   });
 
   test("tabs send viewport and region screenshots labelled with the tab source; files are saved", async () => {
-    const opened = await ok("tab_open", { url: `${base}/canvas` });
+    const opened = await ok("navigate", { url: `${base}/canvas` });
     const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
     const text = await ok("ask_pages", {
       question: "What does the chart show?",
@@ -200,16 +207,18 @@ describe("ask_pages images", () => {
       `${tab} ${base}/canvas region #chart`,
     ]);
     expect(call.prompt).toMatch(/<screenshots source="t\d+ [^"]+">Images 1-2 of this message: /);
-    expect(text).toMatch(new RegExp(`${tab} ${base}/canvas: viewport, 1 region\\(s\\)`));
-    expect(text).toMatch(/region #missing-element was not captured/);
-    const dir = /files in (.+)\):/.exec(text)?.[1] ?? "";
+    const answers = await answersFile(text);
+    expect(answers).toMatch(new RegExp(`${tab} ${base}/canvas: viewport, 1 region\\(s\\)`));
+    expect(text).toMatch(/^[^\n]*region #missing-element was not captured/m);
+    expect(answers).toMatch(/region #missing-element was not captured/);
+    const dir = /files in (.+)\):/.exec(answers)?.[1] ?? "";
     expect((await stat(path.join(dir, `${tab}.region-1.jpg`))).size).toBeGreaterThan(0);
   });
 
   test("a wide page goes as full-width JPEG tiles, not downscaled, with the sent size in the footer", async () => {
-    const opened = await ok("tab_open", { url: `${base}/tall` });
+    const opened = await ok("navigate", { url: `${base}/tall` });
     const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
-    await ok("tab_resize", { tab, width: 2000, height: 900 });
+    await ok("emulate", { tab, viewport: { width: 2000, height: 900 } });
     const text = await ok("ask_pages", {
       question: "What is at the top?",
       tabs: [tab],
@@ -224,13 +233,13 @@ describe("ask_pages images", () => {
     expect(sizes?.filter(([type, width]) => type !== "image/jpeg" || width !== 2000)).toStrictEqual(
       [],
     );
-    expect(text).toMatch(
+    expect(await answersFile(text)).toMatch(
       new RegExp(
         `^${sizes?.length} image\\(s\\) sent to the model, \\d+\\.\\d\\d MB as base64\\.$`,
         "m",
       ),
     );
-    expect(text).not.toMatch(/downscaled/);
+    expect(await answersFile(text)).not.toMatch(/downscaled/);
   });
 
   test("review mode sends whole-page tiles by default with the review prompt", async () => {
@@ -255,7 +264,7 @@ describe("ask_pages images", () => {
   });
 
   test("full tiles show lazy images, scroll reveals and finished counters, and no tile is blank", async () => {
-    const opened = await ok("tab_open", { url: `${fixture.url}/reveal` });
+    const opened = await ok("navigate", { url: `${fixture.url}/reveal` });
     const tab = /Opened (t\d+)/.exec(opened)?.[1] ?? "";
     const page = mcp.deps.manager.getTab(tab).page;
     await page.evaluate(() => window.scrollTo(0, 400));
@@ -302,6 +311,7 @@ describe("ask_pages images", () => {
       images: "full",
     });
     expect(lastCall().images).toBe(undefined);
-    expect(text).toMatch(/images and regions apply to tabs and urls only/);
+    expect(text).toMatch(/^images and regions apply to tabs and urls only/m);
+    expect(await answersFile(text)).toMatch(/^images and regions apply to tabs and urls only/m);
   });
 });

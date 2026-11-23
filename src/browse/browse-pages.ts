@@ -27,7 +27,6 @@ type BrowseRun = {
   locations: Map<string, PageLocation>;
   sites: string[];
   concurrency: number;
-  maxSteps?: number;
   modelTimeoutMs?: number;
   pageTimeoutMs?: number;
 };
@@ -72,6 +71,7 @@ export async function browsePages(
           source: selection.source,
           url,
           system: browseSystem(run.mode),
+          found: selection.found,
           firstMessage: browseFirstMessage({
             mode: run.mode,
             source: selection.source,
@@ -82,11 +82,9 @@ export async function browsePages(
             hint: selection.hint,
             sites: [host, ...sites],
             question: run.question,
-            maxSteps: run.maxSteps,
           }),
           model: run.model,
           maxTokens: run.maxTokens,
-          maxSteps: run.maxSteps,
           modelTimeoutMs: run.modelTimeoutMs,
           pageTimeoutMs: run.pageTimeoutMs,
           signal: browseSignal,

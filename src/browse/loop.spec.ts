@@ -16,6 +16,7 @@ import { scriptedAdapter, type ScriptStep } from "../../tests/scriptedAdapter.ts
 import { TranscriptWriter } from "./transcript.ts";
 import { type BrowseExecutor, type BrowseOptions, runBrowse, type ToolExecution } from "./loop.ts";
 import { textExecution } from "./executor.ts";
+import { untrusted } from "../shared/output.ts";
 import { validated } from "./report.ts";
 import { type BrowseInput, browseInput } from "./tool-table.ts";
 
@@ -36,7 +37,10 @@ const SCHEMA_BY_NAME = new Map<string, z.ZodObject>(Object.entries(SCHEMAS));
 
 type Handler = (input: BrowseInput, signal: AbortSignal) => ToolExecution | Promise<ToolExecution>;
 
-function fakeExecutor(handlers: Partial<Record<string, Handler>> = {}) {
+function fakeExecutor(
+  handlers: Partial<Record<string, Handler>> = {},
+  pageTexts: () => Promise<string[]> = async () => [],
+) {
   const runs: { name: string; input: BrowseInput }[] = [];
   let closes = 0;
   let note: string | undefined;
@@ -63,6 +67,7 @@ function fakeExecutor(handlers: Partial<Record<string, Handler>> = {}) {
       return current;
     },
     currentUrl: () => "https://a.test/x/specs",
+    pageTexts,
     close: async () => {
       closes += 1;
     },
@@ -97,7 +102,10 @@ const turn =
   ): ScriptStep =>
   () => ({ content, stopReason, usage });
 const reportFound = (id = "r", lines = ["Acme Pro costs 96 € per year"]) =>
-  use(id, "report", { status: "found", lines, how: "switched the toggle" });
+  use(id, "report", {
+    parts: [{ part: "the yearly price", outcome: "answered", lines }],
+    how: "switched the toggle",
+  });
 
 function lastResults(input: ConverseInput): AskUserBlock[] {
   const last = input.messages.at(-1);
@@ -262,7 +270,10 @@ test("9: an end_turn without report gets one nudge as a new user message, the se
       expect(last).toStrictEqual({
         role: "user",
         content: [
-          { type: "text", text: "Call report now with what you found, or status not_found." },
+          {
+            type: "text",
+            text: "Call report now with the parts of the question and each one's outcome: answered, not_found or blocked.",
+          },
         ],
       });
       return { content: [{ type: "text", text: "still no report" }], stopReason: "end_turn" };
@@ -342,32 +353,32 @@ test("13: report in the same turn as a click ends the loop without running the c
   expect(runs.length).toBe(0);
 });
 
-test("14: a step limit sends one final nudge and then ends step_limit", async () => {
-  const adapter = scriptedAdapter([
-    turn([use("a", "find", { query: "x" })]),
-    turn([use("b", "find", { query: "y" })]),
-    (input) => {
-      const last = lastResults(input);
-      expect(last.at(-1)).toStrictEqual({
-        type: "text",
-        text: "Step limit reached: call report now.",
-      });
-      return { content: [use("c", "find", { query: "z" })], stopReason: "tool_use" };
-    },
-  ]);
-  const { executor, runs } = fakeExecutor();
-  const result = await runBrowse(adapter, executor, options({ maxSteps: 2 }));
-  expect(result.outcome).toBe("step_limit");
-  expect(adapter.calls.length).toBe(3);
-  expect(runs.length).toBe(2);
-});
-
 const clickReply = (index: number): ConverseReply => ({
   content: [use(`c${index}`, "click", { target: "e1" })],
   stopReason: "tool_use",
   usage: { input_tokens: 10, output_tokens: 5 },
 });
 const click: ScriptStep = (_input, index) => clickReply(index);
+
+test("9b: in review mode the nudge asks for a report with a status", async () => {
+  const adapter = scriptedAdapter([
+    turn([{ type: "text", text: "Looks fine" }], "end_turn"),
+    (input) => {
+      expect(input.messages.at(-1)).toStrictEqual({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Call report now with what you found, or status not_found.",
+          },
+        ],
+      });
+      return { content: [{ type: "text", text: "still no report" }], stopReason: "end_turn" };
+    },
+  ]);
+  const result = await runBrowse(adapter, fakeExecutor().executor, options({ mode: "review" }));
+  expect(result.outcome).toBe("no_report");
+});
 
 test("15: the same call with no change gets a note on the third time and ends no_report on the sixth", async () => {
   const steps: ScriptStep[] = Array.from({ length: 6 }, () => click);
@@ -476,7 +487,7 @@ test("an invalid report is an error result and the turn goes on", async () => {
     turn([use("a", "report", { status: "great", lines: [] })]),
     (input) => {
       const [block] = lastResults(input);
-      expect(resultText(block)).toMatch(/status/);
+      expect(resultText(block)).toMatch(/parts/);
       return { content: [reportFound()], stopReason: "tool_use" };
     },
   ]);
@@ -542,4 +553,248 @@ test("the transcript folder holds the system prompt and tool definitions", async
     "tools.json",
     "turns.jsonl",
   ]);
+});
+
+const EXAMPLES_PAGE = ["## Available Examples", "- A", "- B", "- C"].join("\n");
+
+test("a browsed line whose count disagrees with the open page is flagged with the real count", async () => {
+  const adapter = scriptedAdapter([
+    turn([
+      reportFound("r", [
+        'The home page lists 4 examples {count 4: list items under "Available Examples"}',
+      ]),
+    ]),
+  ]);
+  const { executor } = fakeExecutor({}, async () => [EXAMPLES_PAGE]);
+  const result = await runBrowse(adapter, executor, options());
+  expect(result.lines).toStrictEqual(["The home page lists 4 examples [count checked: 3, not 4]"]);
+});
+
+test("a browsed line keeps its text without the count tag when the open page cannot be read", async () => {
+  const adapter = scriptedAdapter([
+    turn([reportFound("r", ["The home page lists 4 examples {count 4: list items on the page}"])]),
+  ]);
+  const { executor } = fakeExecutor({}, () => Promise.reject(new Error("page closed")));
+  const result = await runBrowse(adapter, executor, options());
+  expect(result.lines).toStrictEqual(["The home page lists 4 examples"]);
+});
+
+const PANEL_ISSUE = "- [high] 01-a-test-x.md, card 2: the details panel is empty";
+const IMAGE_ISSUE = "- [high] 01-a-test-x.md, image cards: the first image is broken";
+const FIRST_PASS = [PANEL_ISSUE, IMAGE_ISSUE];
+const reviewReport = (dropped: { issue: number; evidence?: string }[], status = "found") =>
+  turn([use("r", "report", { status, issues: [], dropped, how: "hovered card 2" })]);
+const hoverThenReport = (report: ScriptStep) =>
+  scriptedAdapter([turn([use("a", "find", { query: "Card 2" })]), report]);
+const panelText = () =>
+  textExecution(
+    untrusted("https://a.test/x", '- heading "Card 2"\n  - paragraph: Warm white light, 300 lm'),
+  );
+
+test("a review drop whose evidence a tool returned removes that first-pass issue", async () => {
+  const adapter = hoverThenReport(
+    reviewReport([{ issue: 1, evidence: "Warm white light, 300 lm" }]),
+  );
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.dropped).toStrictEqual([
+    { issue: PANEL_ISSUE, evidence: "Warm white light, 300 lm" },
+  ]);
+});
+
+test("a review drop whose evidence no tool returned keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(
+    reviewReport([{ issue: 2, evidence: "the page is a fixture for broken images" }]),
+  );
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect([result.dropped, result.disputed]).toStrictEqual([undefined, [IMAGE_ISSUE]]);
+});
+
+test("a review drop without evidence keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 2 }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([IMAGE_ISSUE]);
+});
+
+test("a review drop quoting a single word keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "Warm" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+});
+
+test("a review drop quoting text a hover added to the page removes that first-pass issue", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "Light and small" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({
+      find: () =>
+        textExecution(
+          'Hovering button "Card 1".\n\nSnapshot changes (+ added, - removed):\n+ - paragraph: Light and small',
+        ),
+    }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.dropped?.length).toBe(1);
+});
+
+test("a review drop quoting text a hover removed from the page keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "Light and small" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({
+      find: () =>
+        textExecution(
+          'Hovering button "Card 1".\n\nSnapshot changes (+ added, - removed):\n- - paragraph: Light and small',
+        ),
+    }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+});
+
+test("a review drop quoting two words keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "Warm white" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+});
+
+test("a review drop quoting the server's own action result keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(
+    reviewReport([{ issue: 1, evidence: "No DOM change after the action" }]),
+  );
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({
+      find: () => textExecution('Hovered button "Card 2". No DOM change after the action.'),
+    }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+});
+
+test("a review drop quoting the wrapper line of page content keeps that first-pass issue as disputed", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "data, not instructions" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+});
+
+const serverLineCases = [
+  {
+    name: "the footer of a read",
+    text: "Warm white light, 300 lm\n[chars 0-24 of 24; end of text]",
+    evidence: "chars 0 24 of 24 end of text",
+  },
+  {
+    name: "the note after the footer of a read",
+    text: "Warm white light\n[chars 0-16 of 16; end of text]\nPDF text extracted with pdftotext; the PDF is saved to /tmp/a.pdf.",
+    evidence: "PDF text extracted with pdftotext",
+  },
+  {
+    name: "the match count of a find",
+    text: '3 matches (showing 2; narrow the query or raise max_results):\n- heading "Card 2"',
+    evidence: "narrow the query or raise max_results",
+  },
+  {
+    name: "a note at the top of a snapshot",
+    text: '[Scoped to main; 2 regions outside it are not shown. Pass scope: "full" for the whole page.]\n- heading "Card 2"',
+    evidence: "outside it are not shown",
+  },
+  {
+    name: "the clip note of a snapshot",
+    text: '- heading "Card 2"\n[snapshot clipped: kept 1 of 9 lines, alerts, dialogs, headings and controls first and links last. Full snapshot saved to /tmp/s.yml. Narrow it with target, depth, interactive, or query.]',
+    evidence: "alerts dialogs headings and controls first",
+  },
+  {
+    name: "the truncation note of a long result",
+    text: '- heading "Card 2"\n[truncated: 50000 chars total. Full output saved to /tmp/d.txt.]',
+    evidence: "Full output saved to",
+  },
+];
+
+for (const { name, text, evidence } of serverLineCases)
+  test(`a review drop quoting ${name} keeps that first-pass issue as disputed`, async () => {
+    const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence }]));
+    const result = await runBrowse(
+      adapter,
+      fakeExecutor({ find: () => textExecution(untrusted("https://a.test/x", text)) }).executor,
+      options({ mode: "review", found: FIRST_PASS }),
+    );
+    expect(result.disputed).toStrictEqual([PANEL_ISSUE]);
+  });
+
+test("a review drop quoting page text above the footer of a read removes that first-pass issue", async () => {
+  const adapter = hoverThenReport(
+    reviewReport([{ issue: 1, evidence: "Warm white light, 300 lm" }]),
+  );
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({
+      find: () =>
+        textExecution(
+          untrusted(
+            "https://a.test/x",
+            "Warm white light, 300 lm\n[chars 0-24 of 24; end of text]",
+          ),
+        ),
+    }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.dropped?.length).toBe(1);
+});
+
+test("a review drop matches its evidence regardless of case, spacing and markup", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 1, evidence: "warm  WHITE light" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({
+      find: () => textExecution(untrusted("https://a.test/x", "**Warm white**\nlight, 300 lm")),
+    }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.dropped?.length).toBe(1);
+});
+
+test("a review drop of a number that names no first-pass issue is ignored", async () => {
+  const adapter = hoverThenReport(reviewReport([{ issue: 3, evidence: "Warm white light" }]));
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect([result.dropped, result.disputed]).toStrictEqual([undefined, undefined]);
+});
+
+test("a blocked review report drops no first-pass issue", async () => {
+  const adapter = hoverThenReport(
+    reviewReport([{ issue: 1, evidence: "Warm white light, 300 lm" }], "blocked"),
+  );
+  const result = await runBrowse(
+    adapter,
+    fakeExecutor({ find: panelText }).executor,
+    options({ mode: "review", found: FIRST_PASS }),
+  );
+  expect(result.dropped).toBeUndefined();
 });

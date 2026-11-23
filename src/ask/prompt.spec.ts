@@ -78,3 +78,28 @@ test("the answer prompt sends a page that only lacks the fact to NOT FOUND or HI
   );
   expect(ASK_BROWSE_NOTE).toMatch(/instead of a line saying the page does not show it/);
 });
+
+const SUBJECT_RULE =
+  "Answer exactly what the question asks about. When a page's fact belongs to a broader, narrower or neighbouring subject (another place, entity, period, version or unit), name that subject in the line; never present it as the answer for the asked subject.";
+
+test("the answer prompt names a fact's own subject when it is not the asked one", () => {
+  expect(ASK_SYSTEM).toContain(SUBJECT_RULE);
+});
+
+test("the answer prompt keeps a line as short as the question allows", () => {
+  expect(ASK_SYSTEM).toContain(
+    "A line is as short as the question allows: a number question gets the number, its unit, its subject and any date or condition the page attaches, with no restating of the question and no background.",
+  );
+});
+
+test("the answer prompt shows a short line and a line naming a neighbouring subject", () => {
+  expect(ASK_SYSTEM).toContain(
+    "- Orbit has 1,240 employees [01-orbit-com-about.md]\n- Lumen Group, which owns Orbit, has 18,500 employees [02-news-example-com.md]",
+  );
+});
+
+test("the answer prompt ends with a check that every line is in the question's language", () => {
+  expect(ASK_SYSTEM).toMatch(
+    /Before you reply, check every line once more: it is in the language of the question/,
+  );
+});

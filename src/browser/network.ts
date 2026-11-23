@@ -4,6 +4,7 @@ import { errorFrom, messageOf, ToolError } from "../shared/errors.ts";
 import { isStreamingMime, isTextualMime } from "../shared/mime.ts";
 import { SERVER_VERSION } from "../config/version.ts";
 import type { InterceptRule, NetworkEntry, Tab } from "./tab.ts";
+import { localClock } from "../shared/output.ts";
 
 const HAR_BODY_LIMIT = 2 * 1024 * 1024;
 const BODY_WAIT_MS = 3000;
@@ -197,17 +198,44 @@ export async function buildHar(entries: NetworkEntry[], includeBodies: boolean, 
   };
 }
 
-function buildMatcher(spec: InterceptSpec) {
-  if (spec.regex) {
-    const expression = new RegExp(spec.url, "i");
-    return (url: URL) => expression.test(url.href);
+const isGlob = (spec: InterceptSpec) => !spec.regex && spec.url.includes("*");
+
+export function urlPattern(text: string) {
+  const pieces = text.toLowerCase().split(/\*+/);
+  return {
+    test(url: string) {
+      const lower = url.toLowerCase();
+      let from = 0;
+      for (const piece of pieces) {
+        const at = lower.indexOf(piece, from);
+        if (at < 0) return false;
+        from = at + piece.length;
+      }
+      return true;
+    },
+  };
+}
+
+function urlExpression(spec: InterceptSpec) {
+  if (!spec.regex) return urlPattern(spec.url);
+  try {
+    return new RegExp(spec.url, "i");
+  } catch (cause) {
+    throw new ToolError(
+      `url ${JSON.stringify(spec.url)} is not a valid regular expression (${messageOf(cause).replace(/^Invalid regular expression: /, "")}).`,
+      "Escape characters such as * . ? ( with a backslash, or leave regex out to match by text where * stands for any characters.",
+    );
   }
-  const needle = spec.url.toLowerCase();
-  return (url: URL) => url.href.toLowerCase().includes(needle);
+}
+
+function buildMatcher(spec: InterceptSpec) {
+  const expression = urlExpression(spec);
+  return (url: URL) => expression.test(url.href);
 }
 
 function summarize(spec: InterceptSpec) {
-  const where = `${spec.regex ? "regex" : "contains"} ${JSON.stringify(spec.url)}`;
+  const how = spec.regex ? "regex" : isGlob(spec) ? "matches" : "contains";
+  const where = `${how} ${JSON.stringify(spec.url)}`;
   if (spec.mode === "block") return `block requests where URL ${where}`;
   if (spec.mode === "mock")
     return `answer with a mock ${spec.mockStatus ?? 200} where URL ${where}`;
@@ -239,7 +267,7 @@ function buildHandler(spec: InterceptSpec, rule: InterceptRule) {
       await apply(route);
     } catch (cause) {
       rule.errors += 1;
-      rule.lastError = `${new Date().toISOString().slice(11, 19)} ${route.request().url().slice(0, 200)}: ${messageOf(cause).split("\n")[0]}`;
+      rule.lastError = `${localClock(Date.now())} ${route.request().url().slice(0, 200)}: ${messageOf(cause).split("\n")[0]}`;
       await fallBack(route);
     }
   };
@@ -301,9 +329,9 @@ export async function addRule(tab: Tab, spec: InterceptSpec) {
   if (spec.mode === "patch_response" && !spec.replacements?.length) {
     throw new ToolError("patch_response needs at least one entry in replacements.");
   }
+  const matcher = buildMatcher(spec);
   tab.ruleCounter += 1;
   const id = tab.ruleCounter;
-  const matcher = buildMatcher(spec);
   const rule: InterceptRule = {
     id,
     summary: summarize(spec),

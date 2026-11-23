@@ -18,7 +18,7 @@ export type Task = {
   expectArgs?: Partial<Record<string, string | number | boolean>>;
 };
 
-export const SETUP_TOOLS = ["ToolSearch", "tabs_list", "tab_open", "navigate", "site_notes"];
+export const SETUP_TOOLS = ["ToolSearch", "tabs", "navigate", "site"];
 
 const OFF_BROWSER = ["WebFetch", "WebSearch", "Bash"];
 
@@ -35,14 +35,15 @@ export const TASKS: Task[] = [
     id: "read-steps",
     family: "reading",
     prompt: (base) => `What are the steps listed on ${base}/doc? Just list them.`,
-    expect: ["read_text"],
+    expect: ["read_page"],
     forbidden: [...OFF_BROWSER, "screenshot"],
   },
   {
     id: "product-price",
     family: "reading",
     prompt: (base) => `What product is sold on ${base}/ and what are its price and availability?`,
-    expect: ["extract"],
+    expect: ["read_page"],
+    expectArgs: { format: "structured" },
     forbidden: OFF_BROWSER,
   },
   {
@@ -50,7 +51,7 @@ export const TASKS: Task[] = [
     family: "reading",
     prompt: (base) =>
       `On ${base}/ there is a "Load data" button. Press it and tell me what the status line says afterwards.`,
-    expect: ["find", "snapshot", "click"],
+    expect: ["snapshot", "click"],
     forbidden: [...OFF_BROWSER, "evaluate", "run_script"],
   },
   {
@@ -58,8 +59,8 @@ export const TASKS: Task[] = [
     family: "forms and sign-in",
     prompt: (base) =>
       `Sign me up on ${base}/ with the email eval@example.com, password Hunter2!x, the Pro plan, terms accepted, and submit it.`,
-    expect: ["fill_form"],
-    prelude: ["snapshot", "find", "dismiss_overlays"],
+    expect: ["fill"],
+    prelude: ["snapshot", "dismiss_overlays"],
     forbidden: [...OFF_BROWSER, "evaluate", "run_script"],
   },
   {
@@ -67,9 +68,9 @@ export const TASKS: Task[] = [
     family: "forms and sign-in",
     prompt: (base) =>
       `Open ${base}/challenge/hcaptcha and get past the human verification on it so we can continue.`,
-    expect: ["handoff"],
-    prelude: ["snapshot", "find", "screenshot", "read_text"],
-    forbidden: [...OFF_BROWSER, "click", "evaluate", "run_script"],
+    expect: ["click", "handoff"],
+    prelude: ["snapshot", "screenshot", "read_page"],
+    forbidden: [...OFF_BROWSER, "evaluate", "run_script"],
   },
   {
     id: "consent-banner",
@@ -77,7 +78,7 @@ export const TASKS: Task[] = [
     prompt: (base) =>
       `${base}/consent has a cookie banner and a pop-up covering it. Clear them out of the way so the shop page is usable.`,
     expect: ["dismiss_overlays"],
-    prelude: ["snapshot", "find", "screenshot"],
+    prelude: ["snapshot", "screenshot"],
     forbidden: [...OFF_BROWSER, "evaluate", "run_script"],
   },
   {
@@ -85,8 +86,8 @@ export const TASKS: Task[] = [
     family: "bulk pages",
     prompt: (base) =>
       `Which of these pages mention "Paragraph 7"? ${["/article", "/doc", "/", "/text", "/feed", "/counter", "/frames", "/media"].map((route) => `${base}${route}`).join(" ")}`,
-    expect: ["collect_pages", "ask_pages"],
-    forbidden: [...OFF_BROWSER, "read_text", "snapshot"],
+    expect: ["save_pages", "ask_pages"],
+    forbidden: [...OFF_BROWSER, "read_page", "snapshot"],
   },
   {
     id: "staging-layout",
@@ -110,8 +111,8 @@ export const TASKS: Task[] = [
     family: "network and data",
     prompt: (base) =>
       `The catalog at ${base}/catalog fills its table from an API. Find that API and get the items from all of its pages.`,
-    expect: ["network_requests"],
-    prelude: ["snapshot", "read_text", "wait_for"],
+    expect: ["network"],
+    prelude: ["snapshot", "read_page", "wait_for"],
     forbidden: OFF_BROWSER,
   },
   {
@@ -120,6 +121,7 @@ export const TASKS: Task[] = [
     prompt: (base) =>
       `What does ${base}/doc keep in the browser's local storage? Is there an auth token in there?`,
     expect: ["storage"],
+    expectArgs: { area: "local" },
     forbidden: [...OFF_BROWSER, "evaluate", "run_script"],
   },
   {
@@ -136,7 +138,7 @@ export const TASKS: Task[] = [
     prompt: (base) =>
       `On ${base}/counter, press the Count button 25 times and tell me the number it shows at the end.`,
     expect: ["run_script"],
-    prelude: ["snapshot", "find"],
+    prelude: ["snapshot"],
     forbidden: OFF_BROWSER,
   },
   {
@@ -151,7 +153,8 @@ export const TASKS: Task[] = [
     family: "debugging",
     prompt: (_base, context) =>
       `A browser tool call failed a minute ago and the error ended with [req ${context.failedRequest}]. What went wrong?`,
-    expect: ["server_log"],
+    expect: ["logs"],
+    expectArgs: { source: "server" },
     forbidden: OFF_BROWSER,
   },
 ];

@@ -84,6 +84,22 @@ const browseDanger = (
 <form method="post" action="/browse/order"><label>Email <input id="email" type="email" name="email"></label><label>Password <input id="password" type="password" name="password"></label><button type="submit">Sign in</button></form>
 </main></body></html>`;
 
+const BROWSE_EXAMPLES = `<!doctype html><html><head><title>Browse Examples</title></head><body><main>
+<h1>Welcome</h1>
+<h2>Available Examples</h2>
+<ul id="examples">${["A/B Testing", "Checkboxes", "Dropdown", "Hovers", "Inputs", "Tables"].map((name) => `<li><a href="/browse/examples#${name}">${name}</a></li>`).join("")}</ul>
+<button id="more">Show more</button>
+<script>
+document.getElementById("more").addEventListener("click", () => {
+  for (const name of ["Uploads", "Windows"]) {
+    const item = document.createElement("li");
+    item.textContent = name;
+    document.getElementById("examples").append(item);
+  }
+});
+</script>
+</main></body></html>`;
+
 const html = (body: string) =>
   new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
 
@@ -97,6 +113,7 @@ export function browseRouteResponse(request: Request, url: URL) {
   if (pathname === "/browse/tabs") return html(BROWSE_TABS);
   if (pathname === "/browse/cards") return html(BROWSE_CARDS);
   if (pathname === "/browse/meter") return html(BROWSE_METER);
+  if (pathname === "/browse/examples") return html(BROWSE_EXAMPLES);
   if (pathname === "/browse/danger") return html(browseDanger(offSite));
   if (pathname === "/browse/order") {
     if (request.method === "POST") browseCounts.orders += 1;

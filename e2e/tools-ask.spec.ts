@@ -8,14 +8,21 @@ import { inSequence, repeatUntil, sleep } from "../src/shared/async.ts";
 import { errorFrom } from "../src/shared/errors.ts";
 import type { ToolDeps } from "../src/tools/common.ts";
 import { stallRequests } from "./fixture-edge.ts";
-import { useToolsHarness } from "./tools-harness.ts";
+import { savedDir, useToolsHarness } from "./tools-harness.ts";
 
 const { mcp, call, ok, fixture } = useToolsHarness("tools-ask");
+
+const countedDir = async (file: string, text: string) => {
+  const dir = await mkdtemp(path.join(mcp.workDir, "ask-counts-"));
+  await writeFile(path.join(dir, file), text);
+  return dir;
+};
 
 describe("ask_pages edge cases through the tool", () => {
   let saved: ToolDeps["ask"];
   const seen: string[][] = [];
   let failAll = false;
+  let padding = "";
   const scripted: AskAdapter = {
     name: "scripted adapter",
     complete: async ({ prompt }) => {
@@ -24,7 +31,7 @@ describe("ask_pages edge cases through the tool", () => {
       );
       seen.push(sources);
       if (failAll) throw new Error(`upstream refused ${sources.length} pages`);
-      return { text: sources.map((source) => `- seen [${source}]`).join("\n") };
+      return { text: sources.map((source) => `- seen [${source}]${padding}`).join("\n") };
     },
   };
   let root = "";
@@ -177,11 +184,68 @@ describe("ask_pages edge cases through the tool", () => {
 
   test("the raw reply of every call is saved next to the answers", async () => {
     const text = await ok("ask_pages", { question: "What is here?", files });
-    const dir = /^Raw model replies: (\S+)$/m.exec(text)?.[1] ?? "";
+    const answersFile = /^Full answers: (\S+)$/m.exec(text)?.[1] ?? "";
+    const dir = /^Raw model replies: (\S+)$/m.exec(await readFile(answersFile, "utf8"))?.[1] ?? "";
     expect(dir, text).toMatch(/\S/);
     const names = (await readdir(dir)).toSorted();
     expect(names).toEqual(["call-1.txt"]);
     expect(await readFile(path.join(dir, "call-1.txt"), "utf8")).toMatch(/^- seen \[/m);
+  });
+
+  test("the structured result counts the pages sent", async () => {
+    const result = await call("ask_pages", { question: "What is here?", files });
+    expect(result.structured?.pages).toBe(2);
+  });
+
+  test("the structured result names the answers file the text names", async () => {
+    const result = await call("ask_pages", { question: "What is here?", files });
+    expect(result.structured?.answersFile).toBe(/^Full answers: (\S+)$/m.exec(result.text)?.[1]);
+  });
+
+  test("the structured result returns the answer lines of the text", async () => {
+    const result = await call("ask_pages", { question: "What is here?", files });
+    const lines = result.text.split("\n").filter((line) => line.startsWith("- seen ["));
+    expect(result.structured?.answers).toEqual(lines);
+  });
+
+  test("the structured text points to the answers field instead of repeating the answer lines", async () => {
+    const result = await call("ask_pages", { question: "What is here?", files });
+    expect(result.structured?.text).toMatch(/^\(answers in the answers field\)$/m);
+  });
+
+  test("the structured text of a clipped answer leaves the notes to the notes field", async () => {
+    padding = ` ${"long answer ".repeat(1200)}`;
+    try {
+      const result = await call("ask_pages", {
+        question: "What is here?",
+        files,
+        images: "viewport",
+      });
+      const note = "images and regions apply to tabs and urls only";
+      expect(String(result.structured?.text).split(note)).toHaveLength(1);
+    } finally {
+      padding = "";
+    }
+  });
+
+  test("the structured result names the folder of raw replies", async () => {
+    const result = await call("ask_pages", { question: "What is here?", files });
+    expect(result.structured?.rawRepliesDir).toBe(
+      /^Raw model replies: (\S+)$/m.exec(
+        await readFile(String(result.structured?.answersFile), "utf8"),
+      )?.[1],
+    );
+  });
+
+  test("the structured result lists a url that failed to load with its reason", async () => {
+    const result = await call("ask_pages", {
+      question: "What is here?",
+      urls: [`${fixture().url}/doc`, "http://127.0.0.1:9/"],
+      images: "none",
+    });
+    expect(result.structured?.notLoaded).toMatchObject([
+      { url: "http://127.0.0.1:9/", reason: expect.stringMatching(/net::ERR_/) },
+    ]);
   });
 
   test("urls that fail to load are reported as not loaded", async () => {
@@ -206,8 +270,68 @@ describe("ask_pages edge cases through the tool", () => {
     expect(none.text).toMatch(/127\.0\.0\.1:9\/second — /);
   });
 
+  test("a page that save_pages lists as blocked is not sent to the model", async () => {
+    await ok("ask_pages", {
+      question: "What is here?",
+      urls: [`${fixture().url}/doc`, `${fixture().url}/challenge/blocked`],
+      images: "none",
+    });
+    expect(seen.at(-1)).toEqual([expect.stringMatching(/-doc\.md$/)]);
+  });
+
+  test("a page that save_pages lists as blocked is listed once as not loaded with its reason", async () => {
+    const result = await call("ask_pages", {
+      question: "What is here?",
+      urls: [`${fixture().url}/doc`, `${fixture().url}/challenge/blocked`],
+      images: "none",
+    });
+    expect(result.structured?.notLoaded).toEqual([
+      {
+        url: `${fixture().url}/challenge/blocked`,
+        reason: expect.stringMatching(/^(blocked|rate limited): /),
+      },
+    ]);
+  });
+
+  test("a blocked page in a save_pages folder is not sent to the model", async () => {
+    const dir = savedDir(
+      await ok("save_pages", {
+        urls: [`${fixture().url}/doc`, `${fixture().url}/challenge/blocked`],
+        settle_ms: 0,
+      }),
+    );
+    await ok("ask_pages", { question: "What is here?", dir });
+    expect(seen.at(-1)).toEqual([expect.stringMatching(/-doc\.txt$/)]);
+  });
+
+  test("a blocked page in a save_pages folder is listed as not loaded with its reason", async () => {
+    const dir = savedDir(
+      await ok("save_pages", {
+        urls: [`${fixture().url}/doc`, `${fixture().url}/challenge/blocked`],
+        settle_ms: 0,
+      }),
+    );
+    const result = await call("ask_pages", { question: "What is here?", dir });
+    expect(result.structured?.notLoaded).toEqual([
+      {
+        url: `${fixture().url}/challenge/blocked`,
+        reason: expect.stringMatching(/^(blocked|rate limited): /),
+      },
+    ]);
+  });
+
+  test("a save_pages folder whose only page is blocked is an error that names it", async () => {
+    const dir = savedDir(
+      await ok("save_pages", { urls: [`${fixture().url}/challenge/blocked`], settle_ms: 0 }),
+    );
+    const result = await call("ask_pages", { question: "What is here?", dir });
+    expect(result.text).toMatch(
+      /^No page loaded, so nothing was asked\.\nNot loaded: \S+\/challenge\/blocked — (blocked|rate limited): /,
+    );
+  });
+
   test("cancelling ask_pages with urls stops the collection", async () => {
-    const before = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+    const before = (await ok("tabs")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
     const controller = new AbortController();
     const urls = Array.from({ length: 12 }, (_value, index) => `${fixture().url}/stall?${index}`);
     const pending = mcp.client.callTool(
@@ -219,8 +343,53 @@ describe("ask_pages edge cases through the tool", () => {
     controller.abort();
     await expect(pending).rejects.toThrow();
     await sleep(1500);
-    const after = (await ok("tabs_list")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
+    const after = (await ok("tabs")).split("\n").filter((line) => /^t\d+ /.test(line)).length;
     expect(after).toBeLessThanOrEqual(before);
     expect(stallRequests()).toBeLessThanOrEqual(6);
+  });
+
+  const askCounting = async (input: { dir: string } | { files: string[] }) => {
+    mcp.deps.ask = new AskAdapterSource({
+      adapter: {
+        name: "counting adapter",
+        complete: async ({ prompt }) => {
+          const sources = [...prompt.matchAll(/<document source="([^"]+)">/g)].map(
+            (match) => match[1] ?? "",
+          );
+          return {
+            text: sources
+              .map(
+                (source) =>
+                  `- The page lists 3 examples {count 3: list items on the page} [${source}]`,
+              )
+              .join("\n"),
+          };
+        },
+      },
+    });
+    const text = await ok("ask_pages", { question: "How many examples?", browse: "off", ...input });
+    mcp.deps.ask = new AskAdapterSource({ adapter: scripted });
+    return text;
+  };
+
+  test("a count in a plain-text page of a save_pages folder is not checked and its tag is removed", async () => {
+    const dir = await countedDir("01-examples.txt", "Examples\nAlpha\nBeta\nGamma");
+    expect(await askCounting({ dir })).toMatch(
+      /^- The page lists 3 examples \[01-examples\.txt\]$/m,
+    );
+  });
+
+  test("a count in a plain-text file is not checked and its tag is removed", async () => {
+    const dir = await countedDir("examples.txt", "Examples\nAlpha\nBeta\nGamma");
+    expect(await askCounting({ files: [path.join(dir, "examples.txt")] })).toMatch(
+      /^- The page lists 3 examples \[examples\.txt\]$/m,
+    );
+  });
+
+  test("a count in a Markdown page of a save_pages folder is checked against its list", async () => {
+    const dir = await countedDir("01-examples.md", "## Examples\n- Alpha\n- Beta\n- Gamma");
+    expect(await askCounting({ dir })).toMatch(
+      /^- The page lists 3 examples \[count checked\] \[01-examples\.md\]$/m,
+    );
   });
 });

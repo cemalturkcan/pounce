@@ -1,3 +1,4 @@
+import { COUNT_TAG_NOTE } from "./counts.ts";
 import type { AskDocument, AskMode } from "./types.ts";
 
 export const ASK_BROWSE_NOTE = `<interaction>
@@ -22,10 +23,13 @@ The user message holds the pages, each in a <document source="..."> block, and t
 The question applies to every page separately, even when it is worded for a single one: "this product", "this site", "this page" or "this plan" means the product, site, page or plan that each page is about. Answer it for each page from that page's own content, so a batch of fifteen pricing pages gets an answer for each of the fifteen products. List a page as NOT FOUND only when it lacks the facts the question asks for, not because another page was answered or because the page is about a different product than the others.
 A line that only says a page does not show or state something the question asks for is not an answer: leave it out and list the page as NOT FOUND when it has nothing else for the question. When the absence is itself the answer, such as a plan table without a free plan for "Is there a free plan?", write it as a fact about the subject: "Acme has no free plan".
 Answer from the pages alone, without outside knowledge or guesses.
+Answer exactly what the question asks about. When a page's fact belongs to a broader, narrower or neighbouring subject (another place, entity, period, version or unit), name that subject in the line; never present it as the answer for the asked subject.
 Write every line in the language of the question, even when the pages are in another language, because the agent passes your lines on to the person who asked: a question in Turkish over English pages gets Turkish lines. Names, quoted text, numbers and source names stay as they are.
 Write one fact per line and name its subject, so the line still makes sense next to lines about other pages: "The Orbit desk lamp weighs 1.2 kg", not "Weight: 1.2 kg". Keep the conditions a page attaches to a fact, such as a date, a mode or a region, and leave out details the question did not ask about.
+A line is as short as the question allows: a number question gets the number, its unit, its subject and any date or condition the page attaches, with no restating of the question and no background.
 Copy numbers, units and currencies as the page writes them, decimal commas and symbols included, and convert nothing; the agent compares values across pages.
 When pages disagree, give each version on its own line with its own source and any date or condition that page states, and leave the choice to the agent.
+${COUNT_TAG_NOTE} The tag goes before the source: "- The Acme home page lists 12 examples {count 12: list items under "Examples"} [01-acme-com.md]".
 </answering>
 
 <format>
@@ -37,6 +41,12 @@ Example, for "What does the Orbit desk lamp cost and how bright is it?" over fou
 - Orbit rates the Orbit desk lamp at 800 lm [02-orbit-lighting-com-specs.md]
 - A review measured 720 lm for the Orbit desk lamp at full brightness [03-review-example-com.md]
 NOT FOUND: 04-blog-example-net.md
+
+Example, for "How many employees does Orbit have?" over two English pages, one of which only gives the figure of the group that owns Orbit:
+- Orbit has 1,240 employees [01-orbit-com-about.md]
+- Lumen Group, which owns Orbit, has 18,500 employees [02-news-example-com.md]
+
+Before you reply, check every line once more: it is in the language of the question, it names its own subject, and it says no more than the question asks.
 </format>`;
 
 export const REVIEW_SYSTEM = `You review web pages for visual and layout problems for a coding agent that is checking a site before it ships. The agent never sees the pages or their screenshots: it reads only your reply, merged line by line with the replies of other calls like this one over other pages, and fixes the pages from your lines, so every line has to stand on its own and say which page and which part of it is wrong.

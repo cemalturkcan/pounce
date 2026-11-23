@@ -18,7 +18,16 @@ function describe(click: OverlayClick) {
   return `${verb} the cookie banner (${click.label})`;
 }
 
-async function consentPass(tab: Tab, mode: Exclude<AutoConsent, "off">) {
+const passes = new WeakMap<Tab, Promise<string | undefined>>();
+const watches = new WeakMap<Tab, symbol>();
+
+function consentPass(tab: Tab, mode: Exclude<AutoConsent, "off">) {
+  const pass = (passes.get(tab) ?? Promise.resolve(undefined)).then(() => clickConsent(tab, mode));
+  passes.set(tab, pass);
+  return pass;
+}
+
+async function clickConsent(tab: Tab, mode: Exclude<AutoConsent, "off">) {
   if (tab.page.isClosed()) return undefined;
   const clicks = await withDeadline(
     dismissOverlays(tab.page, { consent: mode, allowAccept: true, consentOnly: true }),
@@ -39,12 +48,16 @@ export async function acceptConsentOnce(tab: Tab, mode: AutoConsent) {
 export async function watchConsent(tab: Tab, mode: AutoConsent, windowMs = CONSENT_WINDOW_MS) {
   if (mode === "off") return;
   const deadline = Date.now() + windowMs;
+  const watch = Symbol("consent watch");
+  watches.set(tab, watch);
   if (await acceptConsentOnce(tab, mode)) return;
-  const windowClosed = () => Date.now() >= deadline || tab.page.isClosed();
+  const windowClosed = () =>
+    Date.now() >= deadline || tab.page.isClosed() || watches.get(tab) !== watch;
   if (windowClosed()) return;
   void repeatUntil(
     async () => {
       await delay(CONSENT_POLL_MS);
+      if (windowClosed()) return undefined;
       return (await acceptConsentOnce(tab, mode)) || undefined;
     },
     { giveUp: windowClosed },

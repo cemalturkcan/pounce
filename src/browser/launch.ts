@@ -1,12 +1,23 @@
 import type { BrowserType } from "playwright-core";
 import type { Config } from "../config/config.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
+import { REF_ENGINE, refEngineSource } from "./ref-check.ts";
 
-export async function loadChromium(engine: Config["engine"]) {
+const engines = new Map<Config["engine"], Promise<BrowserType>>();
+
+export function loadChromium(engine: Config["engine"]) {
+  const loading = engines.get(engine) ?? loadEngine(engine);
+  engines.set(engine, loading);
+  return loading;
+}
+
+async function loadEngine(engine: Config["engine"]) {
   const module =
     engine === "patchright" ? await import("patchright") : await import("playwright-core");
   // SAFETY: patchright is a drop-in fork of playwright-core with the same runtime API; only its type declarations live in another package.
-  return module.chromium as BrowserType;
+  const playwright = module as typeof import("playwright-core");
+  await playwright.selectors.register(REF_ENGINE, refEngineSource(), { contentScript: true });
+  return playwright.chromium;
 }
 
 const SANDBOX_FAILURE = /no usable sandbox|setuid sandbox|suid sandbox|namespace/i;

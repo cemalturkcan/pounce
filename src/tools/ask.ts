@@ -10,14 +10,25 @@ import {
   DEFAULT_BATCH_CHARS,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "../ask/run.ts";
-import { renderAskResults, renderBrowseDetails } from "../ask/render.ts";
+import { askResultParts, renderAskStats, renderBrowseDetails } from "../ask/render.ts";
 import { browsePages } from "../browse/browse-pages.ts";
+import type { BrowserManager } from "../browser/manager.ts";
+import type { Tab } from "../browser/tab.ts";
+import { describePage } from "../page/page.ts";
 import { inSequence } from "../shared/async.ts";
 import { ToolError } from "../shared/errors.ts";
 import { untrusted } from "../shared/output.ts";
-import { gatherDocuments } from "./ask-documents.ts";
+import { describeNotLoaded, gatherDocuments } from "./ask-documents.ts";
 import { clipToFile, defineTool, tabParam, type ToolDeps } from "./common.ts";
 import { collectToolCallbacks } from "./callbacks.ts";
+
+async function browsedTabNote(manager: BrowserManager, tab: Tab) {
+  if (tab.page.isClosed())
+    return `Browsing used tab ${tab.id} itself, and the tab has closed since.`;
+  const shows = await describePage(tab.page);
+  manager.markSeen(tab);
+  return `Browsing used tab ${tab.id} itself, which stays where browsing left it: it now shows ${shows}, and controls on it may have changed (for example a toggle switched).`;
+}
 
 export function registerAskTools(server: McpServer, deps: ToolDeps) {
   const { store } = deps;
@@ -26,13 +37,35 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
     name: "ask_pages",
     title: "Ask a question over many pages",
     description: [
-      "Answer one question about many pages, or review how they look, without their content entering this conversation. The pages go to a smaller model (Claude Haiku by default) through the model adapter named by tabs_list, in a few large calls, and only short lines come back, merged across calls; the full answers are also saved to a file.",
-      'mode answer (default) returns facts as lines that each end with the page they came from, plus the pages with nothing relevant. Use it for comparisons, price or spec tables, or finding which pages mention something, usually over a collect_pages folder, with a question each page can answer on its own. mode review checks the pages for visual and layout problems (overlapping or clipped elements, overflowing text, broken images, empty areas, misalignment, error messages) and returns one line per issue, "- [high|medium|low] <page>, <where>: <issue>", sorted by severity, plus the pages with no issues; question is then the review brief, and images default to full, so give urls or tabs. Use review for visual QA across many pages or routes; when a reference image exists, compare_design checks a page against it more exactly. For one or two pages, read_text or screenshot is simpler.',
-      "Give exactly one source of pages: files, dir (a collect_pages folder), urls (collected first), or tabs. With tabs, urls, or a collect_pages folder, a page the model could not answer from its text, or where it saw the answer behind a control, is then browsed by the same model in its own tab: it can click toggles, tabs and 'show more' buttons, hover, scroll, search the site and follow same-site links, and its findings join the same answer lines: when it finds the answer, they take the place of that page's lines that only said the fact was missing or unclear, and when it finds nothing, the page stays listed as having nothing relevant. It only looks: it never signs in, submits forms, orders, pays, downloads or uploads, and page text cannot make it. browse off reads only; browse all browses every page, for example to check hover menus in review mode. Each browsed page is listed with its outcome and steps, and its transcript is saved next to the raw replies. Answers are as reliable as a fast model reading quickly: verify the facts a decision depends on.",
-      "Screenshots: with tabs or urls, images auto (the default in answer mode) also sends a viewport screenshot of pages that look visual (little text for their size, mostly images, canvas, video or SVG, or no text), viewport sends one for every page, full scrolls through the whole page and sends one overlapping screen-sized tile per position, none sends text only; regions adds element screenshots by ref or selector. Images go into the same call as their page's text and findings read from them cite that page. The images are saved to files listed in the result, never returned inline; each image costs about as much as 6000 characters of text.",
-      "There are no default limits: pages are not clipped, a call takes as many pages as fit about 3 million characters, the output limit is the model maximum, and a model call has no time limit (timeout_ms sets one; the client can always cancel). A call that exceeds the model's context window or the API request size limit is split in half and retried, down to single pages; a page too large on its own is reported as failed. Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); lower batch_chars, max_chars_per_page or max_output_tokens to trade completeness for speed and cost. Browsing has no step or time limit by default; browse_max_steps and browse_timeout_ms set them. A call cut off at the output limit is listed with its partial answers.",
-      'Empty pages are not sent and are listed as empty; pages cut to max_chars_per_page are listed as clipped; with urls, a page that failed to load is listed as "Not loaded: <url> — <reason>", and the call fails when none loaded. Pages with the same name are told apart by their path from a shared folder, or by a #2 suffix. Stored secrets in the page text are masked before it is sent. The raw reply of every model call is saved in a folder named in the result, next to the full answers.',
+      "Answer one question over many pages (mode answer, default), or review how they look (mode review), without their content entering this conversation: a smaller model (Haiku by default, through the model adapter listed by tabs) reads them and returns short lines; the full answers, screenshots and raw replies are saved to the file named on the last line.",
+      'Give exactly one source: files, dir (a save_pages folder), urls (saved first) or tabs. answer returns facts, each ending with its page, plus the pages with nothing relevant. review returns "- [high|medium|low] <page>, <where>: <issue>" lines sorted by severity; question is then the review brief and images default to full. For one or two pages, read_page or screenshot is simpler; against a reference image, use compare_design.',
+      'A page with a URL or tab that the model could not answer from its text, or where the answer sits behind a control, is browsed by the same model (browse auto; off only reads; all browses every page): a tab in that same tab, which stays where browsing left it, other pages in a tab of their own. It clicks toggles and tabs, hovers, scrolls, searches and follows same-site links, but never signs in, submits, orders, pays, downloads or uploads. Its lines start with [browsed] and replace that page\'s lines; in review it drops an issue only by quoting page text, otherwise the issue stays marked "[browse disagreed, without evidence on the page]". Pages browsing could not finish are listed as not answered or partly answered. A line counting items on a page is checked against its Markdown or tab and marked "[count checked]" or "[count checked: 6, not 7]"; plain-text pages are not checked. Answers come from a fast model: verify facts a decision depends on.',
     ].join("\n"),
+    output: {
+      pages: z.number().int(),
+      answers: z.array(z.string()).optional(),
+      notes: z.array(z.string()).optional(),
+      answersFile: z.string(),
+      rawRepliesDir: z.string().optional(),
+      screenshotsDir: z.string().optional(),
+      nothingRelevant: z.array(z.string()).optional(),
+      noIssues: z.array(z.string()).optional(),
+      notAnswered: z.array(z.string()),
+      partlyAnswered: z.array(z.string()),
+      empty: z.array(z.string()),
+      notLoaded: z.array(z.object({ url: z.string(), reason: z.string() })),
+      browsed: z.array(
+        z.object({
+          source: z.string(),
+          outcome: z.string(),
+          steps: z.number().int(),
+          toolCalls: z.number().int(),
+          summary: z.string().optional(),
+          tab: z.string().optional(),
+        }),
+      ),
+    },
+    payload: ["answers"],
     input: {
       mode: z
         .enum(["answer", "review"])
@@ -56,13 +89,13 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
         .string()
         .optional()
         .describe(
-          "A collect_pages output folder; its .md files are used, or .txt where a page has no .md.",
+          "A save_pages output folder; its .md files are used, or .txt where a page has no .md.",
         ),
       urls: z
         .array(z.string().min(1))
         .max(200)
         .optional()
-        .describe("URLs to collect as Markdown first (like collect_pages) and then ask about."),
+        .describe("URLs to save as Markdown first (like save_pages) and then ask about."),
       tabs: z
         .array(tabParam)
         .max(50)
@@ -100,17 +133,17 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
         .max(DEFAULT_MAX_OUTPUT_TOKENS)
         .optional()
         .describe(
-          "Output token limit per model call, thinking included. Default 128000, the model's maximum; a call that hits it is reported as cut off.",
+          "Output token limit per model call, thinking included. Default 128000; a call that hits it is reported as cut off.",
         ),
       images: z
         .enum(["none", "auto", "viewport", "full"])
         .optional()
         .describe(
-          "Screenshots sent with the text of tabs and urls: auto (default in answer mode) only for pages that look visual, viewport for every page, full (default in review mode) as screen-sized tiles scrolled through the whole page, none for text only.",
+          "Screenshots sent with the text of tabs and urls: auto (default in answer mode) only for pages that look visual, viewport for every page, full (default in review mode) as screen-sized tiles scrolled through the whole page, none for text only. Each image costs about as much as 6000 characters of text.",
         ),
       regions: z
         .array(
-          z.object({
+          z.strictObject({
             target: z
               .string()
               .min(1)
@@ -157,15 +190,6 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
         .describe(
           "Extra hosts browsing may follow links to, such as docs.example.com; each page's own site is always allowed.",
         ),
-      browse_max_steps: z
-        .number()
-        .int()
-        .min(1)
-        .max(500)
-        .optional()
-        .describe(
-          "Most model turns per browsed page; the last one asks for a report. No limit by default.",
-        ),
       browse_timeout_ms: z
         .number()
         .int()
@@ -183,7 +207,7 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
       if (given !== 1) throw new ToolError("Give exactly one of files, dir, urls, tabs.");
       const adapter = await deps.ask.get();
       const mode = input.mode ?? "answer";
-      const { documents, locations, shots, imageLines, notLoaded, imageDir } =
+      const { documents, locations, shots, imageLines, imageNotes, notLoaded, imageDir } =
         await gatherDocuments(deps, owner, signal, { ...input, mode });
 
       const model = modelId(input.model ?? "haiku");
@@ -236,7 +260,6 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
               locations,
               sites: input.browse_sites ?? [],
               concurrency: input.concurrency ?? 4,
-              maxSteps: input.browse_max_steps,
               modelTimeoutMs: input.timeout_ms,
               pageTimeoutMs: input.browse_timeout_ms,
             },
@@ -249,8 +272,25 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
         imageLines.length || prepared.length
           ? `\n\nScreenshots (${prepared.length} sent${imageDir && prepared.length ? `, files in ${imageDir}` : ""}):\n${imageLines.join("\n")}${sentLine}`
           : "";
-      const notLoadedBlock = notLoaded.length ? `\n\n${notLoaded.join("\n")}` : "";
-      const rendered = `${renderAskResults(input.question, report, adapter.name, model)}${notLoadedBlock}${imageFooter}`;
+      const notLoadedBlock = notLoaded.length
+        ? `\n\n${notLoaded.map(describeNotLoaded).join("\n")}`
+        : "";
+      const unbrowsable = documents.filter(
+        (document) => !locations.has(deps.redactor.redact(document.source)),
+      ).length;
+      const browsedTabs = browsed.flatMap((result) => locations.get(result.source)?.tab ?? []);
+      const notes = [
+        ...imageNotes,
+        ...(browsing && input.browse && unbrowsable
+          ? [
+              `browse applies to pages with a URL or a tab, and ${unbrowsable} file page(s) have neither, so they were not browsed.`,
+            ]
+          : []),
+        ...(await Promise.all(browsedTabs.map((tab) => browsedTabNote(deps.manager, tab)))),
+      ];
+      const notesBlock = notes.length ? `\n\n${notes.join("\n")}` : "";
+      const parts = askResultParts(input.question, report);
+      const answers = `${parts.text}${notLoadedBlock}`;
       const replies = report.batches.filter((batch) => batch.reply !== undefined);
       if (replies.length) await store.dir("ask", rawName);
       await inSequence(replies, (batch) =>
@@ -259,7 +299,7 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
       const rawLine = replies.length
         ? `\nRaw model replies: ${path.join(store.root, "ask", rawName)}`
         : "";
-      const withRaw = `${rendered}${rawLine}`;
+      const withRaw = `${answers}${notesBlock}\n\n${renderAskStats(report, adapter.name, model)}${imageFooter}${rawLine}`;
       const reportJson = JSON.stringify(
         { ...report, batches: report.batches.map(({ reply: _reply, ...batch }) => batch) },
         null,
@@ -276,8 +316,40 @@ export function registerAskTools(server: McpServer, deps: ToolDeps) {
           `Every model call failed, so no page was read.\n${withRaw}`,
           `Full report: ${file}`,
         );
-      const body = `${await clipToFile(store, "ask", "ask-answers", rendered, 12_000)}${rawLine}\nFull answers: ${file}`;
-      return untrusted(`${documents.length} page(s), answered by ${adapter.name}`, body);
+      const clipped = await clipToFile(store, "ask", "ask-answers", answers, 12_000);
+      const framed = (shown: string) =>
+        untrusted(
+          `${documents.length} page(s), answered by ${adapter.name}`,
+          `${shown}\n\nFull answers: ${file}`,
+        );
+      return {
+        text: framed(`${clipped.text}${notesBlock}`),
+        structuredText: clipped.file ? framed(clipped.text) : undefined,
+        payloadFrame: (shown: string) => framed(`${parts.answersFrame(shown)}${notLoadedBlock}`),
+        data: {
+          answers: clipped.file ? undefined : parts.answers,
+          notes: notes.length ? notes : undefined,
+          pages: documents.length,
+          answersFile: file,
+          rawRepliesDir: replies.length ? path.join(store.root, "ask", rawName) : undefined,
+          screenshotsDir: imageDir && prepared.length ? imageDir : undefined,
+          ...(mode === "review"
+            ? { noIssues: parts.noIssues }
+            : { nothingRelevant: parts.nothingRelevant }),
+          notAnswered: parts.notAnswered,
+          partlyAnswered: parts.partlyAnswered,
+          empty: report.empty,
+          notLoaded,
+          browsed: browsed.map((result) => ({
+            source: result.source,
+            outcome: result.outcome,
+            steps: result.steps,
+            toolCalls: result.toolCalls.length,
+            summary: result.how ?? result.error,
+            tab: locations.get(result.source)?.tab?.id,
+          })),
+        },
+      };
     },
   });
 }

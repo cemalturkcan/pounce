@@ -1,6 +1,6 @@
 import type { AskImage } from "./adapter.ts";
 
-export type AskDocument = { source: string; text: string; images?: AskImage[] };
+export type AskDocument = { source: string; text: string; images?: AskImage[]; plain?: boolean };
 
 export type AskMode = "answer" | "review";
 

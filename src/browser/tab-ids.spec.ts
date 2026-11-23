@@ -74,6 +74,13 @@ test("a counter whose file cannot be written still hands out unique ids", async 
   });
 });
 
+test("a missing tab that was at a data URL is described by its type and length", () => {
+  const url = `data:text/html,${"x".repeat(500)}`;
+  expect(describeMissingTab("t8", { id: "t8", url, end: "closed" })).toBe(
+    `Tab t8 is not open (it was at data:text/html… (${url.length} chars)); it was closed.`,
+  );
+});
+
 test("a missing tab is described with its last known url and title and how it ended", () => {
   expect(describeMissingTab("t5", undefined)).toBe("Tab t5 is not open.");
   expect(

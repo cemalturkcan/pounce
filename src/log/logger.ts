@@ -7,7 +7,7 @@ import { inSequence, TIMED_OUT, withDeadline } from "../shared/async.ts";
 import { listDir } from "../shared/files.ts";
 import { parseJson } from "../shared/decode.ts";
 import { messageOf } from "../shared/errors.ts";
-import type { Redactor } from "../shared/output.ts";
+import { localDateTime, localDay, type Redactor } from "../shared/output.ts";
 import { writeStderr } from "./stderr.ts";
 
 export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
@@ -58,6 +58,7 @@ const SUMMARY_DEPTH = 2;
 const SANITIZE_DEPTH = 6;
 const STACK_LINES = 12;
 const LINE_LIMIT = 800;
+const CUT_MARK = "…";
 const FILE_PATTERN = /^daemon-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const SENSITIVE_KEY =
   /secret|password|passwd|value|text|code|script|expression|body|token|otp|cookie|header|authorization|post/i;
@@ -86,12 +87,8 @@ export function parseLogLevel(value: string | undefined): LogLevel {
   return LOG_LEVELS.find((level) => level === normalized) ?? "info";
 }
 
-function dayOf(time: number) {
-  return new Date(time).toISOString().slice(0, 10);
-}
-
 export function logFileName(time: number) {
-  return `daemon-${dayOf(time)}.jsonl`;
+  return `daemon-${localDay(time)}.jsonl`;
 }
 
 export function newRequestId() {
@@ -220,10 +217,18 @@ function summarizeValue(key: string, value: LogValue, depth: number): LogValue {
     return value.length > STRING_LIMIT
       ? `${value.slice(0, STRING_LIMIT)}… [${value.length} chars]`
       : value;
-  if (isList(value)) return `[${value.length} items]`;
+  if (isList(value)) return summarizeList(key, value, depth);
   if (value instanceof Error || isRecord(value))
     return depth >= SUMMARY_DEPTH ? "[object]" : summarizeObject(value, depth + 1);
   return value;
+}
+
+function summarizeList(key: string, list: readonly LogValue[], depth: number): LogValue {
+  const counted = `[${list.length} ${list.length === 1 ? "item" : "items"}]`;
+  if (!list.every((item) => isText(item) || isScalar(item))) return counted;
+  const itemKey = key.replace(/s$/i, "");
+  const items = list.map((item) => summarizeValue(itemKey, item, depth));
+  return JSON.stringify(items).length <= STRING_LIMIT ? items : counted;
 }
 
 function summarizeObject(input: LogRecord | Error, depth: number): LogFields {
@@ -312,7 +317,7 @@ export class Logger {
   }
 
   async prune() {
-    const cutoff = dayOf(this.now() - LOG_RETENTION_DAYS * DAY_MS);
+    const cutoff = localDay(this.now() - LOG_RETENTION_DAYS * DAY_MS);
     const expired = (await listDir(this.dir)).filter((name) => {
       const day = FILE_PATTERN.exec(name)?.[1];
       return day !== undefined && day !== "" && day < cutoff;
@@ -429,7 +434,7 @@ function parseLine(line: string) {
 
 export async function readLog(dir: string, query: LogQuery, now = Date.now()) {
   const since = query.sinceMinutes === undefined ? undefined : now - query.sinceMinutes * 60_000;
-  const oldestDay = dayOf(since ?? now - LOG_RETENTION_DAYS * DAY_MS);
+  const oldestDay = localDay(since ?? now - LOG_RETENTION_DAYS * DAY_MS);
   const names = (await listDir(dir))
     .filter((name) => {
       const day = FILE_PATTERN.exec(name)?.[1];
@@ -462,15 +467,97 @@ function formatValue(value: LogValue) {
   return isText(value) && /^[\w.:/@#+-]+$/.test(value) ? value : JSON.stringify(value);
 }
 
-export function formatEntry(entry: LogEntry) {
-  const head = [`${entry.time.slice(0, 10)} ${entry.time.slice(11, 19)}`, entry.level, entry.event];
-  if (entry.requestId) head.push(`req=${entry.requestId}`);
-  if (entry.session) head.push(`session=${String(entry.session).slice(0, 8)}`);
-  if (entry.tab) head.push(`tab=${entry.tab}`);
+type ShownField = { key: string; value: LogEntry[string]; label: string; shown: string };
+
+const textOf = (field: ShownField) => field.label + field.shown;
+
+function shownFields(entry: LogEntry): ShownField[] {
+  const time = localDateTime(entry.time);
+  const fields: ShownField[] = [
+    { key: "time", value: time, label: "", shown: time },
+    { key: "level", value: entry.level, label: "", shown: entry.level },
+    { key: "event", value: entry.event, label: "", shown: entry.event },
+  ];
+  if (entry.requestId)
+    fields.push({
+      key: "requestId",
+      value: entry.requestId,
+      label: "req=",
+      shown: String(entry.requestId),
+    });
+  if (entry.session) {
+    const session = String(entry.session).slice(0, 8);
+    fields.push({ key: "session", value: session, label: "session=", shown: session });
+  }
+  if (entry.tab)
+    fields.push({ key: "tab", value: entry.tab, label: "tab=", shown: String(entry.tab) });
   const skip = new Set<string>([...RESERVED, ...HEAD_FIELDS]);
-  const rest = Object.entries(entry)
-    .filter(([key, value]) => !skip.has(key) && value !== undefined)
-    .map(([key, value]) => `${key}=${formatValue(value)}`);
-  const line = [...head, ...rest].join(" ");
-  return line.length > LINE_LIMIT ? `${line.slice(0, LINE_LIMIT)}…` : line;
+  for (const [key, value] of Object.entries(entry))
+    if (!skip.has(key) && value !== undefined)
+      fields.push({ key, value, label: `${key}=`, shown: formatValue(value) });
+  return fields;
+}
+
+export function formatEntry(entry: LogEntry) {
+  const line = shownFields(entry).map(textOf).join(" ");
+  return line.length > LINE_LIMIT ? `${line.slice(0, LINE_LIMIT)}${CUT_MARK}` : line;
+}
+
+function quotedPrefix(text: string, room: number) {
+  let used = 1;
+  let kept = 0;
+  for (const char of text) {
+    const width = JSON.stringify(char).length - 2;
+    if (used + width > room) break;
+    used += width;
+    kept += char.length;
+  }
+  return text.slice(0, kept);
+}
+
+type ShownValue = LogEntry[string];
+
+function isShownRecord(value: ShownValue): value is { [key: string]: ShownValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function clippedRecord(record: { [key: string]: ShownValue }, room: number) {
+  const shown: Record<string, ShownValue> = {};
+  let used = 1;
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined) continue;
+    const label = JSON.stringify(key).length + 2;
+    const width = JSON.stringify(value).length;
+    if (used >= room) shown[key] = CUT_MARK;
+    else if (used + label + width <= room) shown[key] = value;
+    else
+      shown[key] = isText(value)
+        ? `${quotedPrefix(value, room - used - label)}${CUT_MARK}`
+        : CUT_MARK;
+    used += label + width;
+  }
+  return shown;
+}
+
+function clippedValue(field: ShownField, room: number) {
+  if (isShownRecord(field.value)) return clippedRecord(field.value, room);
+  const shown =
+    isText(field.value) && field.shown !== field.value
+      ? quotedPrefix(field.value, room)
+      : field.shown.slice(0, Math.max(0, room));
+  return `${shown}${CUT_MARK}`;
+}
+
+export function shownEntry(entry: LogEntry) {
+  const shown: Record<string, ShownValue> = {};
+  let start = 0;
+  for (const field of shownFields(entry)) {
+    const end = start + textOf(field).length;
+    if (start >= LINE_LIMIT) shown[field.key] = CUT_MARK;
+    else if (end > LINE_LIMIT)
+      shown[field.key] = clippedValue(field, LINE_LIMIT - start - field.label.length);
+    else shown[field.key] = field.value;
+    start = end + 1;
+  }
+  return shown;
 }

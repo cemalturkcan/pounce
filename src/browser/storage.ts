@@ -1,11 +1,14 @@
 import type { CDPSession, Page } from "playwright-core";
 import { z } from "zod";
-import { inSequence } from "../shared/async.ts";
-import { parseJsonOrThrow } from "../shared/decode.ts";
-import { ToolError } from "../shared/errors.ts";
+import { inSequence, untilAborted } from "../shared/async.ts";
+import { pageSession } from "./page-session.ts";
+import { convertedRemote } from "./evaluate.ts";
+import { cancelled, ToolError } from "../shared/errors.ts";
+import { shownUrl } from "../shared/output.ts";
 
 const IDB_PAGE_SIZE = 200;
 const IDB_RECORD_LIMIT = 5000;
+const INDEXED_DB_OBJECT_GROUP = "indexeddb";
 
 const jsonSchema = z.json();
 
@@ -27,8 +30,6 @@ const dataPageSchema = z.object({
   hasMore: z.boolean(),
 });
 
-const stringifiedSchema = z.object({ result: z.object({ value: z.string().optional() }) });
-
 const webStorageSchema = z.array(z.tuple([z.string(), z.string()]));
 
 export function decodeWebStorage(stored: z.input<typeof webStorageSchema>) {
@@ -43,7 +44,7 @@ export function storageOrigin(page: Page) {
   const origin = new URL(page.url()).origin;
   if (!/^https?:/.test(origin)) {
     throw new ToolError(
-      `The tab is at ${page.url()}, which has no web storage origin.`,
+      `The tab is at ${shownUrl(page.url())}, which has no web storage origin.`,
       "Navigate the tab to the site first.",
     );
   }
@@ -63,36 +64,73 @@ export async function readWebStorage(page: Page, area: "local" | "session") {
   return decodeWebStorage(stored);
 }
 
-async function withSession<T>(page: Page, work: (session: CDPSession) => Promise<T>) {
-  const session = await page.context().newCDPSession(page);
+const indexedDbTurns = new WeakMap<object, Promise<unknown>>();
+
+async function holdingObjectGroup<T>(
+  page: Page,
+  signal: AbortSignal,
+  work: (session: CDPSession) => Promise<T>,
+) {
+  const session = await pageSession(page);
+  let abandoned = false;
   try {
-    return await work(session);
+    return await untilAborted(work(session), signal, () => {
+      abandoned = true;
+      return cancelled();
+    });
   } finally {
-    await session.detach().catch(() => undefined);
+    if (!abandoned)
+      await session
+        .send("Runtime.releaseObjectGroup", { objectGroup: INDEXED_DB_OBJECT_GROUP })
+        .catch(() => undefined);
   }
 }
+
+export function inTurn<Key extends object, T>(
+  key: Key,
+  signal: AbortSignal,
+  work: () => Promise<T>,
+) {
+  const previous = indexedDbTurns.get(key) ?? Promise.resolve();
+  const turn = previous.then(() => {
+    signal.throwIfAborted();
+    return work();
+  });
+  indexedDbTurns.set(
+    key,
+    turn.catch(() => undefined),
+  );
+  return untilAborted(turn, signal, cancelled);
+}
+
+function withSession<T>(
+  page: Page,
+  signal: AbortSignal,
+  work: (session: CDPSession) => Promise<T>,
+) {
+  return inTurn(page, signal, () => holdingObjectGroup(page, signal, work));
+}
+
+const STORED_BINARY_SOURCE =
+  "(value) => value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? `<binary ${value.byteLength} bytes>` : value instanceof Blob ? `<blob ${value.size} bytes>` : undefined";
 
 async function toJson(session: CDPSession, object: RemoteObject): Promise<Json> {
   if (object.objectId === undefined)
     return object.value ?? object.unserializableValue ?? object.description ?? null;
-  const result = stringifiedSchema.parse(
-    await session.send("Runtime.callFunctionOn", {
-      objectId: object.objectId,
-      functionDeclaration:
-        "function() { try { return JSON.stringify(this, (key, value) => value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? `<binary ${value.byteLength} bytes>` : value instanceof Blob ? `<blob ${value.size} bytes>` : value instanceof Map ? Object.fromEntries(value) : value instanceof Set ? [...value] : value); } catch (error) { return JSON.stringify(String(this)); } }",
-      returnByValue: true,
-    }),
+  const { value } = await convertedRemote(
+    session,
+    object.objectId,
+    jsonSchema.optional(),
+    STORED_BINARY_SOURCE,
   );
-  return result.result.value === undefined
-    ? (object.description ?? null)
-    : parseJsonOrThrow(result.result.value, jsonSchema);
+  return value ?? object.description ?? null;
 }
 
 type IdbStore = { database: string; store: string; count: number };
 
-export async function listIndexedDb(page: Page) {
+export async function listIndexedDb(page: Page, signal: AbortSignal) {
   const securityOrigin = storageOrigin(page);
-  return withSession(page, async (session) => {
+  return withSession(page, signal, async (session) => {
     const { databaseNames } = await session.send("IndexedDB.requestDatabaseNames", {
       securityOrigin,
     });
@@ -123,9 +161,10 @@ export async function readIndexedDbStore(
   page: Page,
   databaseName: string,
   objectStoreName: string,
+  signal: AbortSignal,
 ) {
   const securityOrigin = storageOrigin(page);
-  return withSession(page, async (session) => {
+  return withSession(page, signal, async (session) => {
     const readFrom = async (
       skipCount: number,
       records: IdbRecord[],
@@ -155,11 +194,11 @@ export async function readIndexedDbStore(
   });
 }
 
-export async function exportIndexedDb(page: Page) {
-  const stores = await listIndexedDb(page);
+export async function exportIndexedDb(page: Page, signal: AbortSignal) {
+  const stores = await listIndexedDb(page, signal);
   const contents = await inSequence(stores, async (entry) => ({
     entry,
-    content: await readIndexedDbStore(page, entry.database, entry.store),
+    content: await readIndexedDbStore(page, entry.database, entry.store, signal),
   }));
   const result: Record<string, Record<string, { records: IdbRecord[]; truncated: boolean }>> = {};
   for (const { entry, content } of contents) {

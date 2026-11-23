@@ -67,7 +67,10 @@ async function main() {
         deps.jobs.cancelAll();
         await Promise.allSettled([deps.manager.shutdown(), settleClaudeRefreshes()]);
       },
-      (sessionId) => deps.manager.orphanTabsOf(sessionId),
+      (sessionId) => {
+        deps.jobs.orphanJobsOf(sessionId);
+        return deps.manager.orphanTabsOf(sessionId);
+      },
       deps.log,
       (url) => deps.manager.openForUser(url === undefined ? undefined : normalizeUrl(url)),
     );

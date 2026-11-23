@@ -14,6 +14,7 @@ import {
   firstErrorLine,
   addUsage,
 } from "../ask/adapter.ts";
+import { checkCounts, hasCountTag } from "../ask/counts.ts";
 import { AskSetupError } from "../ask/errors.ts";
 import {
   type BrowseOutcome,
@@ -22,10 +23,12 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "../ask/run.ts";
 import { untilAborted, withDeadline } from "../shared/async.ts";
+import { untrustedBody } from "../shared/output.ts";
+import { addedSnapshotLines } from "../page/snapshot.ts";
 import type { TranscriptWriter } from "./transcript.ts";
 import type { AskMode } from "../ask/types.ts";
 import type { BrowseInput } from "./tool-table.ts";
-import { type Checked, checkReport, type Report, REPORT_TOOLS } from "./report.ts";
+import { type Checked, checkReport, quotedIn, type Report, REPORT_TOOLS } from "./report.ts";
 import { describeError } from "../shared/errors.ts";
 import { logEvent } from "../log/logger.ts";
 
@@ -41,6 +44,7 @@ export interface BrowseExecutor {
   run(name: string, input: BrowseInput, signal: AbortSignal): Promise<ToolExecution>;
   newTabsNote(): string | undefined;
   currentUrl(): string | undefined;
+  pageTexts(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -50,9 +54,9 @@ export type BrowseOptions = {
   url: string;
   system: string;
   firstMessage: string;
+  found?: string[];
   model: string;
   maxTokens: number;
-  maxSteps?: number;
   modelTimeoutMs?: number;
   pageTimeoutMs?: number;
   signal: AbortSignal;
@@ -67,8 +71,11 @@ const STALL_NOTE_AT = 3;
 const STALL_STOP_AT = 6;
 const TARGET_CHARS = 200;
 
-const NUDGE = "Call report now with what you found, or status not_found.";
-const STEP_LIMIT_NUDGE = "Step limit reached: call report now.";
+const NUDGES = {
+  answer:
+    "Call report now with the parts of the question and each one's outcome: answered, not_found or blocked.",
+  review: "Call report now with what you found, or status not_found.",
+} satisfies Record<AskMode, string>;
 const STALL_NOTE =
   "This is the third identical call with no change; try something else or call report.";
 
@@ -119,6 +126,10 @@ const changed = (execution: ToolExecution) =>
 
 class Stopped extends Error {}
 
+function pageContentOf(text: string) {
+  return [untrustedBody(text), addedSnapshotLines(text)].filter((part) => part !== undefined);
+}
+
 export async function runBrowse(
   adapter: AskAdapter,
   executor: BrowseExecutor,
@@ -144,8 +155,8 @@ export async function runBrowse(
   const conversationId = `${options.log.requestId}-${options.log.page}`;
   let nudged = false;
   let pauses = 0;
-  let finalTurn = false;
   let stall = { key: "", count: 0 };
+  const observed: string[] = [];
 
   logEvent("browse_page_start", {
     requestId: options.log.requestId,
@@ -168,10 +179,34 @@ export async function runBrowse(
         ? "timed_out"
         : "failed";
 
-  const applyReport = (report: Report) => {
+  const checkedLines = async (lines: string[]) => {
+    const trimmed = lines.map((line) => line.trim()).filter(Boolean);
+    if (!trimmed.some(hasCountTag)) return trimmed;
+    const texts = await executor.pageTexts().catch(() => []);
+    return trimmed.map((line) => checkCounts(line, texts));
+  };
+
+  const settleDropped = (dropped: { issue: number; evidence?: string }[]) => {
+    const proven: NonNullable<BrowseResult["dropped"]> = [];
+    const disputed: string[] = [];
+    for (const { issue: number, evidence } of dropped) {
+      const issue = options.found?.[number - 1];
+      if (!issue) continue;
+      if (evidence !== undefined && quotedIn(evidence, observed)) proven.push({ issue, evidence });
+      else disputed.push(issue);
+    }
+    if (proven.length) result.dropped = proven;
+    if (disputed.length) result.disputed = disputed;
+  };
+
+  const applyReport = async (report: Report) => {
     result.how = report.how;
-    if ("lines" in report) result.lines = report.lines.map((line) => line.trim()).filter(Boolean);
-    if ("issues" in report) result.issues = report.issues;
+    if ("lines" in report) result.lines = await checkedLines(report.lines);
+    if ("issues" in report) {
+      result.issues = report.issues;
+      if (report.dropped && (report.status === "found" || report.status === "partial"))
+        settleDropped(report.dropped);
+    }
     return end(report.status);
   };
 
@@ -225,6 +260,9 @@ export async function runBrowse(
         ),
       };
     }
+    if (!execution.isError)
+      for (const part of execution.content)
+        if (part.type === "text") observed.push(...pageContentOf(part.text));
     if (execution.isError)
       call.error = execution.content
         .map((part) => (part.type === "text" ? part.text : ""))
@@ -310,7 +348,6 @@ export async function runBrowse(
       blocks.push(errorResult(use.id, checked.error));
       return runUses(uses, index + 1, blocks, notes);
     }
-    if (finalTurn) return end("step_limit");
     const { block, execution } = await execute(use);
     blocks.push(block);
     const key = `${use.name} ${canonicalInput(use)}`;
@@ -353,13 +390,8 @@ export async function runBrowse(
       const notes: string[] = [];
       const finished = await runUses(uses, 0, blocks, notes);
       if (finished) return finished;
-      if (finalTurn) return end("step_limit");
       const tabsNote = executor.newTabsNote();
       if (tabsNote) notes.push(tabsNote);
-      if (options.maxSteps !== undefined && result.steps >= options.maxSteps) {
-        finalTurn = true;
-        notes.push(STEP_LIMIT_NUDGE);
-      }
       messages.push({ role: "user", content: [...blocks, ...notes.map(textBlock)] });
       return loop();
     }
@@ -369,10 +401,9 @@ export async function runBrowse(
       if (pauses > MAX_PAUSES) return end("failed", `the model paused ${pauses} times in a row`);
       return loop();
     }
-    if (finalTurn) return end("step_limit");
     if (nudged) return end("no_report", "the model stopped without calling report");
     nudged = true;
-    messages.push({ role: "user", content: [textBlock(NUDGE)] });
+    messages.push({ role: "user", content: [textBlock(NUDGES[options.mode])] });
     return loop();
   };
 

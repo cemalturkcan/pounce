@@ -21,7 +21,14 @@ const contentSchema = z.array(
 );
 
 export type Content = z.infer<typeof contentSchema>[number];
-export type CallResult = { text: string; isError: boolean; content: Content[] };
+const structuredSchema = z.record(z.string(), z.unknown()).optional();
+
+export type CallResult = {
+  text: string;
+  isError: boolean;
+  content: Content[];
+  structured: z.infer<typeof structuredSchema>;
+};
 
 export async function callTool(
   client: Client,
@@ -38,6 +45,7 @@ export async function callTool(
       .join("\n"),
     isError: result.isError === true,
     content,
+    structured: structuredSchema.parse(result.structuredContent),
   };
 }
 

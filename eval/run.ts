@@ -121,13 +121,13 @@ async function failedRequestId(endpoint: string, base: string) {
   const client = new Client({ name: "eval-setup", version: "0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
   try {
-    const opened = await client.callTool({ name: "tab_open", arguments: { url: `${base}/doc` } });
+    const opened = await client.callTool({ name: "navigate", arguments: { url: `${base}/doc` } });
     const tab = /Opened (t\d+)/.exec(JSON.stringify(opened.content))?.[1] ?? "t1";
     const failed = await client.callTool({
       name: "click",
       arguments: { tab, target: "#no-such-button", timeout_ms: 500 },
     });
-    await client.callTool({ name: "tab_close", arguments: { tab } });
+    await client.callTool({ name: "tabs", arguments: { close: [tab] } });
     const id = /\[req ([0-9a-f]+)\]/.exec(JSON.stringify(failed.content))?.[1];
     if (!id)
       throw new Error(`The setup call did not fail as expected: ${JSON.stringify(failed.content)}`);

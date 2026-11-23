@@ -1,15 +1,42 @@
-import type { BrowserContext, Locator, Page } from "playwright-core";
+import type { BrowserContext, CDPSession, Frame, Locator, Page } from "playwright-core";
 import { mkdir } from "node:fs/promises";
-import type { Config, ConsoleHookMode } from "../config/config.ts";
+import type { Config, Engine } from "../config/config.ts";
 import { inSequence, sleep, TIMED_OUT, withDeadline } from "../shared/async.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
+import { shownUrl } from "../shared/output.ts";
+import { recordSelector } from "../shared/call-scope.ts";
 import { logEvent } from "../log/logger.ts";
-import { parseRef } from "./ref.ts";
+import { dropOldLoads, type IssuedRef, parseRef, type RefIdentity, refIdentities } from "./ref.ts";
+import {
+  boundPlace,
+  boundRef,
+  checkInsideFrame,
+  checkRefIdentity,
+  confirmRef,
+  filterRef,
+  type FilterRoot,
+  FRAME_PLACE_MS,
+  nextShowing,
+  probedRef,
+  type RefQuestion,
+  type Shown,
+  refBound,
+  refFromEarlierPage,
+} from "./ref-check.ts";
 import { launchOptions, loadChromium, sandboxLaunchError } from "./launch.ts";
-import { installConsoleHook, installPasskeyHook, PASSKEY_KEY } from "./page-hooks.ts";
+import { belongsElsewhere, nextFrame, RenderKeeper } from "./foreground.ts";
+import {
+  ConsoleHookScript,
+  consoleHookMode,
+  installPasskeyHook,
+  PASSKEY_KEY,
+} from "./page-hooks.ts";
+import { consoleCaptureSites, setConsoleCapture } from "../page/sites.ts";
+import { pageSession } from "./page-session.ts";
 import { clearStaleProfileLock } from "./profile-lock.ts";
 import { ProfileSettings } from "./profile-settings.ts";
 import {
+  movedTo,
   ORPHANED_OWNER,
   pushBounded,
   pushEvent,
@@ -19,34 +46,43 @@ import {
   UNCLAIMED_OWNER,
 } from "./tab.ts";
 import { describeMissingTab, TabCounter, TabHistory } from "./tab-ids.ts";
-import { type TabHost, watchTab } from "./tab-watch.ts";
+import { type TabHost, watchDialogs, watchTab } from "./tab-watch.ts";
 
 const CLOSE_TIMEOUT_MS = 10_000;
-const ACTION_TIMEOUT_MS = 8_000;
+export const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const DOWNLOAD_START_MS = 3000;
 const DOWNLOAD_SAVE_MS = 60_000;
 const ORPHAN_IDLE_MS = 30 * 60 * 1000;
 const ORPHAN_SWEEP_MS = 5 * 60 * 1000;
+const BEHIND_MARKER = "about:blank#web-agent-behind-";
+
+export const DRAW_WAIT_MS = 1000;
 
 export class BrowserManager {
   readonly config: Config;
   readonly profile = new ProfileSettings();
   private contextPromise?: Promise<BrowserContext>;
+  private browserSession?: Promise<CDPSession>;
   private context?: BrowserContext;
   private readonly tabs = new Map<string, Tab>();
   private readonly endedOwners = new Set<string>();
   private readonly workingOwners = new Map<string, number>();
-  private readonly byPage = new WeakMap<Page, Tab>();
+  private readonly byPage = new WeakMap<object, Tab>();
   private readonly history: TabHistory;
-  private readonly recentPages: { at: number; page: Page }[] = [];
+  private readonly openedPopups: { at: number; openerId: string; page: Page }[] = [];
+  private readonly openedTargets: { at: number; openerTargetId: string; targetId: string }[] = [];
+  private readonly openingBehind = new Map<string, (tab: Tab) => void>();
+  private behindOpens = 0;
   private readonly ids: TabCounter;
   private browserVersion?: string;
   private closing: Promise<unknown> = Promise.resolve();
   private launches = 0;
   private shuttingDown = false;
   private readonly host: TabHost;
+  private readonly rendering = new RenderKeeper();
+  private readonly consoleHook: ConsoleHookScript;
 
   constructor(config: Config) {
     this.config = config;
@@ -56,11 +92,20 @@ export class BrowserManager {
       allTabs: () => this.listTabs(),
       pageChanged: () => this.history.changed(),
       closed: (tab) => this.onClose(tab),
-      popupOpenedSince: (at, opener) =>
-        this.recentPages.some(
-          (entry) => entry.at >= at && entry.page !== opener && !entry.page.isClosed(),
-        ),
+      popupSince: (at, opener) => {
+        if (
+          this.openedPopups.some(
+            (entry) => entry.at >= at && entry.openerId === opener.id && !entry.page.isClosed(),
+          )
+        )
+          return "listed";
+        const opening = this.openedTargets.some(
+          (entry) => entry.at >= at && entry.openerTargetId === opener.targetId,
+        );
+        return opening ? "opening" : undefined;
+      },
     };
+    this.consoleHook = new ConsoleHookScript(consoleHookMode(config));
     this.ids = new TabCounter(config.dataDir);
     this.history = new TabHistory(config.dataDir, () =>
       this.listTabs().map((tab) => ({ id: tab.id, url: tab.page.url(), title: tab.title })),
@@ -68,6 +113,16 @@ export class BrowserManager {
     setInterval(() => {
       if (this.running) void this.closeIdleOrphans().catch(() => undefined);
     }, ORPHAN_SWEEP_MS).unref();
+  }
+
+  async consoleSites() {
+    return this.running ? this.consoleHook.sites : consoleCaptureSites(this.config.sitesDir);
+  }
+
+  async setConsoleCapture(host: string, on: boolean) {
+    const site = await setConsoleCapture(this.config.sitesDir, host, on);
+    await this.consoleHook.choose(() => consoleCaptureSites(this.config.sitesDir));
+    return site;
   }
 
   get running() {
@@ -118,10 +173,6 @@ export class BrowserManager {
     }
   }
 
-  private get consoleHookMode(): ConsoleHookMode {
-    return this.config.engine === "playwright" ? "off" : this.config.consoleHook;
-  }
-
   private async launch() {
     const { config } = this;
     await mkdir(config.profileDir, { recursive: true });
@@ -139,7 +190,7 @@ export class BrowserManager {
 
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
-    await context.addInitScript(installConsoleHook, this.consoleHookMode);
+    await this.consoleHook.apply(context, await consoleCaptureSites(config.sitesDir));
     await context.addInitScript(installPasskeyHook, PASSKEY_KEY);
     await this.profile.apply(context);
 
@@ -147,11 +198,36 @@ export class BrowserManager {
     this.browserVersion = context.browser()?.version();
     context.on("close", () => this.reset());
     context.on("page", (page) => this.adopt(page));
+    watchDialogs(context, (page) => this.adopt(page));
     for (const page of context.pages()) this.adopt(page);
+    await this.watchOpenedTargets(context).catch((cause: unknown) =>
+      logEvent("target_watch_failed", { error: messageOf(cause) }, "warn"),
+    );
     return context;
   }
 
+  private async watchOpenedTargets(context: BrowserContext) {
+    const browser = context.browser();
+    if (!browser) return;
+    const session = await this.browserCDPSession(browser);
+    session.on("Target.targetCreated", ({ targetInfo }) => {
+      if (targetInfo.type !== "page" || !targetInfo.openerId) return;
+      pushBounded(
+        this.openedTargets,
+        { at: Date.now(), openerTargetId: targetInfo.openerId, targetId: targetInfo.targetId },
+        20,
+      );
+    });
+    session.on("Target.targetDestroyed", ({ targetId }) => {
+      const index = this.openedTargets.findIndex((entry) => entry.targetId === targetId);
+      if (index !== -1) this.openedTargets.splice(index, 1);
+    });
+    await session.send("Target.setDiscoverTargets", { discover: true });
+  }
+
   private reset() {
+    this.browserSession = undefined;
+    this.consoleHook.forget();
     if (this.shuttingDown) logEvent("browser_closed", { reason: "shutdown" });
     else logEvent("browser_closed", { reason: "unexpected", tabs: this.tabs.size }, "warn");
     this.context = undefined;
@@ -168,28 +244,54 @@ export class BrowserManager {
     const existing = this.byPage.get(page);
     if (existing) return existing;
 
-    pushBounded(this.recentPages, { at: Date.now(), page }, 20);
-    for (const other of this.tabs.values())
-      for (const check of other.popupChecks) check.finish(false);
+    const session = pageSession(page);
+    void session
+      .then((opened) => opened.send("Target.getTargetInfo"))
+      .then(({ targetInfo }) => {
+        tab.targetId = targetInfo.targetId;
+      })
+      .catch(() => undefined);
     const tab: Tab = {
       id: this.ids.next(),
       page,
+      session,
       owner: UNCLAIMED_OWNER,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       console: [],
+      consoleSeq: 0,
+      consoleReads: new Map(),
+      documents: [],
+      currentDocument: 0,
       network: [],
+      pending: new Map(),
       events: [],
       rules: [],
       ruleCounter: 0,
       loads: 0,
+      routes: 0,
+      refs: new Map(),
       popupChecks: new Set(),
       downloads: [],
       actions: [],
+      dialogsOpened: 0,
+      dialogsClosed: 0,
+      dialogsHeld: 0,
+      dialogWatchers: new Set(),
     };
     this.tabs.set(tab.id, tab);
     this.byPage.set(page, tab);
     watchTab(tab, this.host);
+    const url = page.url();
+    if (url.startsWith(BEHIND_MARKER)) {
+      const opened = this.openingBehind.get(url);
+      if (opened) opened(tab);
+      else {
+        tab.closingByTool = true;
+        void page.close().catch(() => undefined);
+      }
+      return tab;
+    }
 
     const openedAt = Date.now();
     const running = new Map(
@@ -199,14 +301,16 @@ export class BrowserManager {
       .opener()
       .then((opener) => {
         const parent = opener ? this.byPage.get(opener) : undefined;
+        if (parent && tab.owner === UNCLAIMED_OWNER) tab.owner = parent.owner;
         if (!parent) return;
-        if (tab.owner === UNCLAIMED_OWNER) tab.owner = parent.owner;
         tab.openerId = parent.id;
+        pushBounded(this.openedPopups, { at: tab.createdAt, openerId: parent.id, page }, 20);
         if (parent.browse) tab.browse = parent.browse;
+        if (parent.unattended) tab.unattended = parent.unattended;
         const during = runningActions(parent.id, running.get(parent) ?? []);
         pushEvent(
           parent,
-          `opened new tab ${tab.id} from ${parent.id} (${parent.page.url()}), ${during}`,
+          `opened new tab ${tab.id} from ${parent.id} (${shownUrl(parent.page.url())}), ${during}`,
           { at: openedAt, stamped: true },
         );
       })
@@ -230,7 +334,7 @@ export class BrowserManager {
       pushEvent(
         opener,
         () =>
-          `tab ${tab.id} (popup) closed, ${during}; this tab ${opener.id} is at ${opener.page.url()}`,
+          `tab ${tab.id} (popup) closed, ${during}; this tab ${opener.id} is at ${shownUrl(opener.page.url())}`,
         { stamped: true },
       );
     }
@@ -262,10 +366,38 @@ export class BrowserManager {
   beginAction(tab: Tab, tool: string, owner: string) {
     const action: TabAction = { tool, owner };
     tab.actions.push(action);
+    const release = this.holdRendering(tab);
     return () => {
+      release();
       const index = tab.actions.indexOf(action);
       if (index !== -1) tab.actions.splice(index, 1);
     };
+  }
+
+  holdRendering(tab: Tab) {
+    return this.rendering.hold(tab);
+  }
+
+  async untilDrawn(tab: Tab) {
+    if (this.rendering.drawing(tab)) return true;
+    const dialogs = tab.dialogsOpened;
+    const drawn = await withDeadline(
+      this.rendering
+        .started(tab)
+        .then(async () => nextFrame(await tab.session))
+        .then(
+          () => true,
+          () => !tab.page.isClosed(),
+        ),
+      DRAW_WAIT_MS,
+    );
+    if (drawn === TIMED_OUT) {
+      if (tab.dialogsOpened === dialogs)
+        logEvent("tab_not_drawn", { tab: tab.id, ms: DRAW_WAIT_MS }, "warn");
+      return false;
+    }
+    if (drawn) this.rendering.drew(tab);
+    return drawn;
   }
 
   peekTab(id: string) {
@@ -274,13 +406,12 @@ export class BrowserManager {
   }
 
   movedSinceSeen(tab: Tab) {
-    const url = tab.page.url();
-    return tab.lastSeenUrl !== undefined && url !== tab.lastSeenUrl ? url : undefined;
+    return movedTo(tab.lastSeenUrl, tab.page.url(), tab.document?.url);
   }
 
-  markSeen(tab: Tab) {
+  markSeen(tab: Tab, seenUrl?: string) {
     tab.lastUsedAt = Date.now();
-    if (!tab.page.isClosed()) tab.lastSeenUrl = tab.page.url();
+    if (!tab.page.isClosed()) tab.lastSeenUrl = seenUrl ?? tab.page.url();
   }
 
   listTabs() {
@@ -291,43 +422,74 @@ export class BrowserManager {
     const tab = this.tabs.get(id.trim());
     if (tab && !tab.page.isClosed()) return tab;
     const open = this.listTabs()
-      .map((candidate) => `${candidate.id} (${candidate.page.url()})`)
+      .map((candidate) => `${candidate.id} (${shownUrl(candidate.page.url())})`)
       .join(", ");
     throw new ToolError(
       describeMissingTab(id.trim(), this.history.find(id.trim())),
-      open ? `Open tabs: ${open}.` : "No tabs are open. Use tab_open to create one.",
+      open ? `Open tabs: ${open}.` : "No tabs are open. Use navigate without tab to open one.",
     );
   }
 
-  tabOf(page: Page) {
-    return this.byPage.get(page);
+  tabOf<Candidate extends object>(candidate: Candidate) {
+    return this.byPage.get(candidate);
   }
 
   async openTab(owner: string) {
     const context = await this.ensureContext();
     const blank = await this.claimBlankTab(this.listTabs(), owner);
-    const tab = blank ?? this.adopt(await context.newPage());
+    const tab = blank ?? (await this.openBehind(context, owner));
     tab.owner = owner;
     tab.lastSeenUrl = undefined;
     return tab;
+  }
+
+  private async openBehind(context: BrowserContext, owner: string) {
+    const browser = context.browser();
+    if (!browser) {
+      const tab = this.adopt(await context.newPage());
+      tab.owner = owner;
+      return tab;
+    }
+    this.behindOpens += 1;
+    const marker = `${BEHIND_MARKER}${this.behindOpens}`;
+    const adopted = new Promise<Tab>((resolve) => this.openingBehind.set(marker, resolve));
+    try {
+      await (
+        await this.browserCDPSession(browser)
+      ).send("Target.createTarget", { url: marker, background: true });
+      const tab = await withDeadline(adopted, ACTION_TIMEOUT_MS);
+      if (tab === TIMED_OUT)
+        throw new ToolError(
+          `The new tab did not open within ${ACTION_TIMEOUT_MS / 1000} s.`,
+          "Try again; tabs shows the tabs that are open.",
+        );
+      tab.owner = owner;
+      await tab.page.evaluate(() => history.replaceState(null, "", "about:blank"));
+      return tab;
+    } finally {
+      this.openingBehind.delete(marker);
+    }
+  }
+
+  private browserCDPSession(browser: NonNullable<ReturnType<BrowserContext["browser"]>>) {
+    const session = this.browserSession ?? browser.newBrowserCDPSession();
+    this.browserSession = session;
+    session.catch(() => {
+      if (this.browserSession === session) this.browserSession = undefined;
+    });
+    return session;
   }
 
   private async claimBlankTab(candidates: Tab[], owner: string): Promise<Tab | undefined> {
     const [candidate, ...rest] = candidates;
     if (!candidate) return undefined;
     if (
-      (candidate.owner !== UNCLAIMED_OWNER && candidate.owner !== ORPHANED_OWNER) ||
-      candidate.openingForUser ||
-      candidate.page.isClosed() ||
-      candidate.page.url() !== "about:blank"
+      !isBlankForAnyone(candidate) ||
+      (await belongsElsewhere(candidate)) ||
+      !isBlankForAnyone(candidate)
     )
       return this.claimBlankTab(rest, owner);
-    const previousOwner = candidate.owner;
     candidate.owner = owner;
-    if (await candidate.page.opener().catch(() => null)) {
-      candidate.owner = previousOwner;
-      return this.claimBlankTab(rest, owner);
-    }
     return candidate;
   }
 
@@ -370,13 +532,13 @@ export class BrowserManager {
     const tab = this.getTab(id);
     const context = await this.ensureContext();
     const open = context.pages().filter((page) => !page.isClosed());
-    if (open.length <= 1 || open.every((page) => page === tab.page)) await context.newPage();
+    if (open.length <= 1 || open.every((page) => page === tab.page)) await this.openKeeper(context);
     tab.closingByTool = true;
-    if (runBeforeUnload && (await this.closeAskingPage(tab)) === "kept") {
+    if (runBeforeUnload && !tab.dialog && (await this.closeAskingPage(tab)) === "kept") {
       tab.closingByTool = false;
       throw new ToolError(
         `Tab ${id} was not closed: the page asked to confirm leaving (unsaved changes).`,
-        "Call tab_close again with force: true to close it anyway and lose the changes, or finish or save the work in the page first.",
+        "Call tabs again with close and force: true to close it anyway and lose the changes, or finish or save the work in the page first.",
       );
     }
     if (tab.page.isClosed()) return;
@@ -384,8 +546,17 @@ export class BrowserManager {
     if (closed === TIMED_OUT)
       throw new ToolError(
         `Tab ${id} did not close within ${CLOSE_TIMEOUT_MS / 1000} s.`,
-        "The page may be busy; try again or check tabs_list.",
+        "The page may be busy; try again or check tabs.",
       );
+  }
+
+  private async openKeeper(context: BrowserContext) {
+    try {
+      await this.openBehind(context, UNCLAIMED_OWNER);
+    } catch (cause) {
+      logEvent("keeper_tab_behind_failed", { error: messageOf(cause) }, "warn");
+      this.adopt(await context.newPage());
+    }
   }
 
   private async closeAskingPage(tab: Tab) {
@@ -470,27 +641,109 @@ export class BrowserManager {
 
   locate(tab: Tab, target: string): Locator {
     const ref = parseRef(target);
-    return ref ? tab.page.getByRef(ref) : tab.page.locator(target);
+    if (ref) return this.locateIssued(tab, ref, this.issued(tab, ref), target);
+    const locator = tab.page.locator(target);
+    recordSelector(String(locator), target);
+    return locator;
   }
 
-  async resolve(tab: Tab, target: string) {
-    const locator = this.locate(tab, target);
+  issued(tab: Tab, ref: string) {
+    return tab.refs.get(ref) ?? this.unissued(tab, ref);
+  }
+
+  locateIssued(tab: Tab, ref: string, issued: IssuedRef, target = ref) {
+    const locator = boundRef(tab, ref, issued);
+    recordSelector(String(locator), target);
+    return locator;
+  }
+
+  async resolve(tab: Tab, target: string, timeout = ACTION_TIMEOUT_MS) {
     const ref = parseRef(target);
-    if (!ref) return locator;
-    const count = await locator.count().catch((cause: unknown) => {
-      if (cause instanceof Error && /Invalid frame in aria-ref selector/.test(cause.message))
-        return 0;
-      throw cause;
-    });
-    if (count > 0) return locator;
-    if (tab.snapshotLoads !== undefined && tab.snapshotLoads !== tab.loads) {
-      throw new ToolError(
-        `Ref ${ref} is from a snapshot taken before tab ${tab.id} loaded a new page (navigation or reload); refs from before a page load no longer work.`,
-        "Take a new snapshot and use a ref from it.",
-      );
+    if (!ref) return this.locate(tab, target);
+    return this.confirmIssued(tab, ref, this.issued(tab, ref), timeout, target);
+  }
+
+  async confirmIssued(
+    tab: Tab,
+    ref: string,
+    issued: IssuedRef,
+    timeout: number,
+    target = ref,
+    deadline = Date.now() + timeout,
+  ) {
+    const locator = await confirmRef(tab, ref, issued, timeout, deadline);
+    recordSelector(String(locator), target);
+    return locator;
+  }
+
+  locateProbed(tab: Tab, ref: string, issued: IssuedRef, shown: boolean, filter?: FilterRoot) {
+    const locator = probedRef(tab, ref, issued, shown, filter);
+    if (locator) recordSelector(String(locator), ref);
+    return locator;
+  }
+
+  locateInFilter(tab: Tab, ref: string, issued: IssuedRef, root?: Frame) {
+    const locator = filterRef(tab, ref, issued, root);
+    recordSelector(String(locator), ref);
+    return locator;
+  }
+
+  checkIssued(tab: Tab, ref: string, issued: IssuedRef, question: RefQuestion) {
+    return checkRefIdentity(tab, ref, issued, question);
+  }
+
+  checkInsideIssued(tab: Tab, ref: string, issued: IssuedRef) {
+    return checkInsideFrame(tab, ref, issued);
+  }
+
+  async checkInside(tab: Tab, target: string) {
+    const ref = parseRef(target);
+    if (ref) await this.checkInsideIssued(tab, ref, this.issued(tab, ref));
+  }
+
+  async absenceReady(tab: Tab, ref: string, issued: IssuedRef) {
+    if (issued.loads !== tab.loads) return false;
+    await refBound(ref, issued);
+    return true;
+  }
+
+  async waitForAbsence(tab: Tab, target: string, state: "hidden" | "detached", timeout: number) {
+    const ref = parseRef(target);
+    if (!ref) return (await this.resolve(tab, target, timeout)).waitFor({ state, timeout });
+    const issued = this.issued(tab, ref);
+    if (await this.absenceReady(tab, ref, issued))
+      await boundRef(tab, ref, issued).waitFor({ state, timeout });
+  }
+
+  async rememberRefs(tab: Tab, snapshot: string, issue: RefIssue) {
+    const identities = refIdentities(snapshot);
+    const token = nextShowing();
+    const places = await placesOf(tab.page, identities, token, this.config.engine);
+    dropOldLoads(tab.refs, issue.loads);
+    for (const [ref, identity] of identities) {
+      if (issue.only && !issue.only.has(ref)) continue;
+      const shown = places.shownFor(identity);
+      tab.refs.set(ref, {
+        ...identity,
+        loads: issue.loads,
+        url: issue.url,
+        document: shown?.place.document,
+        href: shown?.place.href,
+        bound: shown?.bound ?? Promise.resolve(false),
+        token,
+        path: framePath(identities, identity.frameRef),
+        content: places.inside(ref),
+      });
     }
+  }
+
+  private unissued(tab: Tab, ref: string): never {
+    if (tab.snapshotLoads !== undefined && tab.snapshotLoads !== tab.loads)
+      throw refFromEarlierPage(tab, ref);
+    const givers = this.listTabs().filter((other) => other !== tab && other.refs.has(ref));
+    const giver = givers.length === 1 ? givers[0] : undefined;
     throw new ToolError(
-      `Ref ${ref} is not in the latest snapshot of tab ${tab.id}.`,
+      `Ref ${ref} is not in the latest snapshot of tab ${tab.id}${giver ? `; it came from a snapshot of tab ${giver.id}` : ""}.`,
       "Refs are valid until the element changes or the page loads again. Take a new snapshot and use a ref from it.",
     );
   }
@@ -503,4 +756,62 @@ export class BrowserManager {
     await Promise.race([context.close().catch(() => undefined), sleep(SHUTDOWN_TIMEOUT_MS)]);
     this.history.flush();
   }
+}
+
+export type RefIssue = {
+  loads: number;
+  url: string;
+  only?: ReadonlySet<string>;
+};
+
+async function framePlace(page: Page, ref: string, showing: string, engine: Engine) {
+  const handle = await page.getByRef(ref).elementHandle({ timeout: FRAME_PLACE_MS });
+  try {
+    const frame = await handle.contentFrame();
+    return frame ? await boundPlace(frame, showing, engine) : undefined;
+  } finally {
+    await handle.dispose();
+  }
+}
+
+function framePath(identities: ReadonlyMap<string, RefIdentity>, frameRef?: string): string[] {
+  if (!frameRef) return [];
+  return [...framePath(identities, identities.get(frameRef)?.frameRef), frameRef];
+}
+
+async function placesOf(
+  page: Page,
+  identities: ReadonlyMap<string, RefIdentity>,
+  showing: string,
+  engine: Engine,
+) {
+  const refs = [...identities].flatMap(([ref, identity]) =>
+    identity.role === "iframe" ? [ref] : [],
+  );
+  const lookups = refs.map(async (ref) => {
+    const place = await withDeadline(framePlace(page, ref, showing, engine), FRAME_PLACE_MS).catch(
+      () => undefined,
+    );
+    return [ref, place === TIMED_OUT ? undefined : place] as const;
+  });
+  const [main, found] = await Promise.all([
+    boundPlace(page, showing, engine),
+    Promise.all(lookups),
+  ]);
+  const frames = new Map<string, Shown>(
+    found.flatMap(([ref, place]) => (place === undefined ? [] : [[ref, place] as const])),
+  );
+  return {
+    shownFor: (identity: RefIdentity) => (identity.frameRef ? frames.get(identity.frameRef) : main),
+    inside: (ref: string) => frames.get(ref)?.place,
+  };
+}
+
+function isBlankForAnyone(tab: Tab) {
+  return (
+    (tab.owner === UNCLAIMED_OWNER || tab.owner === ORPHANED_OWNER) &&
+    !tab.openingForUser &&
+    !tab.page.isClosed() &&
+    tab.page.url() === "about:blank"
+  );
 }

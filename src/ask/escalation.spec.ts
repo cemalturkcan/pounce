@@ -154,3 +154,24 @@ test("selectEscalations passes an unclear line without a fact to the browser as 
     },
   ]);
 });
+
+test("selectEscalations passes a review page's first-pass issues to the browser as found", () => {
+  const review = reportOf(
+    [
+      {
+        sources: ["s.md", "t.md"],
+        answers: [
+          "- [high] s.md, image cards: the first two images are broken",
+          "- [low] t.md, header: logo sits 2px low",
+        ],
+        notFound: [],
+      },
+    ],
+    "review",
+  );
+  expect(selectEscalations(review, "all")[0]).toStrictEqual({
+    source: "s.md",
+    reason: "all",
+    found: ["- [high] s.md, image cards: the first two images are broken"],
+  });
+});

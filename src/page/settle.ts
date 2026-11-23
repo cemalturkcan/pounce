@@ -77,7 +77,9 @@ async function settleInPage(options: { maxMs: number; quietMs: number }) {
       rect.left < window.innerWidth
     );
   });
-  await within(Promise.allSettled(images.map((image) => image.decode())));
+  await within(
+    Promise.allSettled([document.fonts.ready, ...images.map((image) => image.decode())]),
+  );
   const finite = document
     .getAnimations()
     .filter(
@@ -109,7 +111,7 @@ async function settleInPage(options: { maxMs: number; quietMs: number }) {
   await frames();
 }
 
-const RENDER_MAX_MS = 1500;
+export const RENDER_MAX_MS = 1500;
 const RENDER_QUIET_MS = 200;
 
 export async function settleRendering(page: Page) {

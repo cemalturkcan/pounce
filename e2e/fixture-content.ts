@@ -185,6 +185,124 @@ CONTENT_ROUTES.set("/console", {
     `<!doctype html><html><head><title>Fixture Console</title></head><body><p>Console page</p><script>console.log("page log line"); setTimeout(() => { throw new Error("uncaught page error"); }, 0);</script></body></html>`,
 });
 
+CONTENT_ROUTES.set("/load-errors", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Load Errors</title></head><body onload="undefined.xyz"><p>Load errors</p><script>console.log("plain page log"); Promise.reject(new Error("rejected on load"));</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/load-errors-leave", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Load Errors Leave</title></head><body onload="undefined.leaving"><p>Leaving</p><script>Promise.reject(new Error("rejected before leaving")); setTimeout(() => { location.href = "/"; }, 300);</script></body></html>`,
+});
+
+const LATE_ERRORS = `onload = () => setTimeout(() => { Promise.reject(new Error("late rejection")); Promise.reject(new DOMException("late abort", "AbortError")); undefined.lateUncaught; }, 300);`;
+
+CONTENT_ROUTES.set("/late-errors", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Late Errors</title></head><body><p>Late errors</p><script>${LATE_ERRORS}</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/late-errors-leave", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Late Errors Leave</title></head><body><p>Late errors leave</p><script>${LATE_ERRORS} setTimeout(() => { location.href = "/"; }, 600);</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/errors-then-leave", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Errors Then Leave</title></head><body><p>Errors then leave</p><script>const after = Number(new URLSearchParams(location.search).get("after")); Promise.reject(new Error("leaving rejection " + location.search)); setTimeout(() => { location.replace("/"); }, after);</script><script>undefined.leavingUncaught;</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/leaving-popup-opener", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Leaving Popup Opener</title></head><body><button id="open-leaving" onclick="const params = new URLSearchParams(location.search); window.open('/errors-then-leave?after=' + params.get('after') + '&run=' + params.get('run'))">Open a page that leaves</button></body></html>`,
+});
+
+CONTENT_ROUTES.set("/beforeunload-error", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Beforeunload Error</title></head><body><p>Beforeunload error</p><script>addEventListener("beforeunload", () => { undefined.beforeUnloadUncaught; });</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/onload-error", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Onload Error</title></head><body onload="undefined.onloadError"><p>Onload error</p></body></html>`,
+});
+
+CONTENT_ROUTES.set("/onload-late-error", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Onload Late Error</title></head><body onload="undefined.afterImage"><p>Onload after an image</p><iframe title="slow" src="/files/slow-frame"></iframe></body></html>`,
+});
+
+CONTENT_ROUTES.set("/never-loads", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Never Loads</title></head><body><p>Never loads</p><iframe title="pending" src="/api/pending"></iframe></body></html>`,
+});
+
+CONTENT_ROUTES.set("/load-error-traps", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Load Error Traps</title><script>
+window.trapped = [];
+const note = (name) => { window.trapped[window.trapped.length] = name; };
+const message = Object.getOwnPropertyDescriptor(ErrorEvent.prototype, "message").get;
+Object.defineProperty(ErrorEvent.prototype, "message", { get() { note("ErrorEvent.message"); return message.call(this); } });
+const reason = Object.getOwnPropertyDescriptor(PromiseRejectionEvent.prototype, "reason").get;
+Object.defineProperty(PromiseRejectionEvent.prototype, "reason", { get() { note("PromiseRejectionEvent.reason"); return reason.call(this); } });
+const toIso = Date.prototype.toISOString;
+Date.prototype.toISOString = function () { note("toISOString"); return toIso.call(this); };
+const slice = String.prototype.slice;
+String.prototype.slice = function (...args) { note("slice"); return slice.apply(this, args); };
+const push = Array.prototype.push;
+Array.prototype.push = function (...args) { note("push"); return push.apply(this, args); };
+const exec = RegExp.prototype.exec;
+RegExp.prototype.exec = function (...args) { note("exec"); return exec.apply(this, args); };
+const stringify = JSON.stringify;
+JSON.stringify = (...args) => { note("stringify"); return stringify(...args); };
+const watched = new Error("trapped rejection");
+Object.defineProperty(watched, "stack", { get() { note("stack"); return "watched stack"; } });
+Promise.reject(watched);
+setTimeout(() => { undefined.trap; }, 0);
+</script></head><body><p>Traps</p></body></html>`,
+});
+
+CONTENT_ROUTES.set("/load-error-probe", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Load Error Probe</title><script>
+window.probe = { trapHits: [] };
+const hit = (name) => { window.probe.trapHits[window.probe.trapHits.length] = name; };
+const watched = new Proxy({}, {
+  getOwnPropertyDescriptor(target, key) { hit("getOwnPropertyDescriptor " + String(key)); return undefined; },
+  get(target, key) { hit("get " + String(key)); return undefined; },
+  has(target, key) { hit("has " + String(key)); return false; },
+  ownKeys() { hit("ownKeys"); return []; },
+  getPrototypeOf() { hit("getPrototypeOf"); return Object.prototype; },
+});
+Promise.reject(watched);
+const late = new Error("formatted later");
+Promise.reject(late);
+/(clean)/.exec("clean-input");
+addEventListener("unhandledrejection", () => {
+  window.probe.matched = [RegExp.input, RegExp.lastMatch, RegExp.$1].join(" | ");
+});
+addEventListener("pagehide", () => sessionStorage.setItem("probe", JSON.stringify(window.probe)));
+setTimeout(() => {
+  Error.prepareStackTrace = () => "the page's own format";
+  window.probe.stack = String(late.stack);
+  delete Error.prepareStackTrace;
+}, 200);
+</script></head><body><p>Probe</p></body></html>`,
+});
+
 CONTENT_ROUTES.set("/console-malformed", {
   type: "text/html",
   body: () =>
@@ -195,4 +313,27 @@ CONTENT_ROUTES.set("/site-globals", {
   type: "text/html",
   body: () =>
     `<!doctype html><html><head><title>Fixture Site Globals</title></head><body><p id="status">idle</p><button id="change" onclick="document.getElementById('status').textContent = 'changed'">Change status</button><script>window.webAgentConsole = ["site entry"]; window.webAgentMutations = { count: 0 }; console.log("page log line");</script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/files/console-source.js", {
+  type: "application/javascript",
+  body: () =>
+    [
+      `window.logMore = () => console.log("second entry");`,
+      `console.error("located error");`,
+      `setTimeout(() => { throw new Error("located throw"); }, 0);`,
+      `console.log("first entry");`,
+    ].join("\n"),
+});
+
+CONTENT_ROUTES.set("/console-cursor", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Console Cursor</title></head><body><p>Console cursor</p><script src="/files/console-source.js"></script></body></html>`,
+});
+
+CONTENT_ROUTES.set("/pending-request", {
+  type: "text/html",
+  body: () =>
+    `<!doctype html><html><head><title>Fixture Pending</title></head><body><p>Pending</p><script>fetch("/api/pending");</script></body></html>`,
 });

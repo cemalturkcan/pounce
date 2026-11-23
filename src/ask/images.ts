@@ -203,7 +203,9 @@ export function describePageImages(source: string, images: PageImages) {
   if (images.kind === "viewport") parts.push("viewport");
   if (images.kind === "tiles") parts.push(`${images.tiles} tile(s)`);
   if (images.regions) parts.push(`${images.regions} region(s)`);
-  const lines = parts.length ? [`${source}: ${parts.join(", ")}`] : [];
-  for (const note of images.notes) lines.push(`${source}: ${note}`);
-  return lines;
+  return parts.length ? [`${source}: ${parts.join(", ")}`] : [];
+}
+
+export function pageImageNotes(source: string, images: PageImages) {
+  return images.notes.map((note) => `${source}: ${note}`);
 }

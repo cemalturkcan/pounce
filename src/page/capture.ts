@@ -1,10 +1,12 @@
 import type { CDPSession, Locator, Page } from "playwright-core";
-import { withDeadline, withTimeout } from "../shared/async.ts";
+import { emulationSession } from "../browser/emulate.ts";
+import { pageSession } from "../browser/page-session.ts";
+import { withTimeout } from "../shared/async.ts";
 import { ToolError } from "../shared/errors.ts";
 
 type CssRect = { x: number; y: number; width: number; height: number };
 
-type CaptureOptions = {
+export type CaptureOptions = {
   format: "jpeg" | "png";
   quality?: number;
   timeoutMs: number;
@@ -61,8 +63,8 @@ async function captureWith(page: Page, session: CDPSession, options: CaptureOpti
   const viewport = {
     x: visual.pageX,
     y: visual.pageY,
-    width: innerWidth / pinch,
-    height: innerHeight / pinch,
+    width: pinch === 1 ? innerWidth : visual.clientWidth,
+    height: pinch === 1 ? innerHeight : visual.clientHeight,
   };
   const pixelsPerCss = options.pixelsPerCss ?? 1;
   let rect = target ?? viewport;
@@ -104,15 +106,9 @@ export async function capture(page: Page, options: CaptureOptions) {
       `The screenshot did not finish within ${options.timeoutMs} ms.`,
       "The page may be busy; try again, or reload the tab.",
     );
-  if (options.session)
-    return withTimeout(captureWith(page, options.session, options), options.timeoutMs, timeout);
-  const session = await withTimeout(page.context().newCDPSession(page), options.timeoutMs, timeout);
-  try {
-    return await withTimeout(captureWith(page, session, options), options.timeoutMs, timeout);
-  } finally {
-    await withDeadline(
-      session.detach().catch(() => undefined),
-      5000,
-    );
-  }
+  const session =
+    options.session ??
+    emulationSession(page) ??
+    (await withTimeout(pageSession(page), options.timeoutMs, timeout));
+  return withTimeout(captureWith(page, session, options), options.timeoutMs, timeout);
 }

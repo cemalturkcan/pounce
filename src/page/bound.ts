@@ -10,7 +10,7 @@ export function pageBound<T>(promise: Promise<T>, what: string, ms = PAGE_READ_T
     () =>
       new ToolError(
         `${what} did not finish within ${ms / 1000} s; the page is not answering, so a script in it may be stuck.`,
-        "Reload the tab with navigate, or close it with tab_close (force: true) and open a new one.",
+        "Reload the tab with navigate, or close it with tabs (close, force: true) and open a new one.",
       ),
   );
 }

@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { parseJson } from "../shared/decode.ts";
+import { shownUrl } from "../shared/output.ts";
 
 const TAB_COUNTER_FILE = "tab-counter.json";
 export const RANDOM_BASE_MIN = 100_000;
@@ -98,7 +99,7 @@ const END_TEXT = {
 export function describeMissingTab(id: string, known: KnownTab | undefined) {
   if (!known) return `Tab ${id} is not open.`;
   const title = known.title ? ` ${JSON.stringify(known.title)}` : "";
-  return `Tab ${id} is not open (it was at ${known.url}${title}); ${END_TEXT[known.end]}.`;
+  return `Tab ${id} is not open (it was at ${shownUrl(known.url)}${title}); ${END_TEXT[known.end]}.`;
 }
 
 type HistoryOptions = { limit?: number; delayMs?: number };

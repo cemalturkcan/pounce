@@ -18,10 +18,8 @@ test("buildPrompt wraps each page in a document block and neutralises closing ta
   expect(ASK_SYSTEM).toMatch(/^NOT FOUND: 04-blog-example-net\.md$/m);
   expect(ASK_SYSTEM).toMatch(/"NOT FOUND: "/);
   expect(ASK_SYSTEM).toMatch(/single line "NOT FOUND"/);
-  const example = ASK_SYSTEM.slice(
-    ASK_SYSTEM.indexOf("Example, for"),
-    ASK_SYSTEM.indexOf("</format>"),
-  )
+  const start = ASK_SYSTEM.indexOf("Example, for");
+  const example = ASK_SYSTEM.slice(start, ASK_SYSTEM.indexOf("\n\nExample, for", start))
     .split("\n")
     .slice(1)
     .join("\n");

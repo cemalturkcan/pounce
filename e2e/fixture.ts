@@ -1,3 +1,4 @@
+import { actionRouteResponse } from "./fixture-actions.ts";
 import { browseRouteResponse } from "./fixture-browse.ts";
 import { CONTENT_ROUTES, framedPage, PIXEL } from "./fixture-content.ts";
 import { edgeCaseResponse, openStream } from "./fixture-edge.ts";
@@ -139,10 +140,43 @@ const HANG = `<!doctype html>
 <script>setTimeout(() => { for (;;) {} }, 300);</script>
 </body></html>`;
 
+const ANIMATE = `<!doctype html>
+<html><head><title>Fixture Animate</title><style>#box{position:absolute;top:40px;width:80px;height:80px;background:#e11d48}</style></head><body>
+<div id="box"></div>
+<script>let x = 0; setInterval(() => { x = (x + 6) % 600; document.getElementById("box").style.left = x + "px"; }, 16);</script>
+</body></html>`;
+
+export const CLOCK_CELLS = 12;
+
+const CLOCK = `<!doctype html>
+<html><head><title>Fixture Clock</title><style>body{margin:0;display:flex;height:100vh}div{flex:1;background:black}</style></head><body>
+${"<div></div>".repeat(CLOCK_CELLS)}
+<script>const started = performance.now(); const cells = [...document.querySelectorAll("div")]; const draw = () => { const tens = Math.floor((performance.now() - started) / 10); cells.forEach((cell, index) => { cell.style.background = (tens >> (cells.length - 1 - index)) & 1 ? "white" : "black"; }); requestAnimationFrame(draw); }; draw();</script>
+</body></html>`;
+
+const RESPONSIVE = `<!doctype html>
+<html><head><title>Fixture Responsive</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>html,body{margin:0;height:100%}body{background:rgb(0,0,255)}@media (max-width:600px){body{background:rgb(0,200,0)}}</style></head><body>
+<p>Narrow screens are green, wide screens are blue.</p>
+<script>const paint = () => { document.body.dataset.paintedWidth = innerWidth; requestAnimationFrame(paint); }; requestAnimationFrame(paint);</script>
+</body></html>`;
+
+const DESKTOP_ONLY = `<!doctype html>
+<html><head><title>Fixture Desktop Only</title>
+<style>body{margin:0;width:1200px;height:2000px;background:linear-gradient(90deg,rgb(255,0,0) 50%,rgb(0,0,255) 50%)}</style></head><body>
+</body></html>`;
+
+const DARK_SCHEME = `<!doctype html>
+<html><head><title>Fixture Dark Scheme</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>html,body{margin:0;height:100%}body{background:rgb(255,255,255)}@media (prefers-color-scheme:dark){body{background:rgb(0,0,0)}}</style></head><body>
+<p>Dark schemes are black, light schemes are white.</p>
+</body></html>`;
+
 export type Fixture = {
   url: string;
   hits: () => number;
   requests: (pathname: string) => number;
+  requestedAt: (pathname: string) => number | undefined;
   close: () => Promise<void>;
 };
 
@@ -153,6 +187,7 @@ function htmlResponse(body: string) {
 export async function startFixture(): Promise<Fixture> {
   let hits = 0;
   const requests = new Map<string, number>();
+  const requestTimes = new Map<string, number>();
   const pages = new Map<string, string>(
     Object.entries({
       "/": HOME,
@@ -165,13 +200,22 @@ export async function startFixture(): Promise<Fixture> {
       "/media": MEDIA,
       "/sse": SSE,
       "/hang": HANG,
+      "/animate": ANIMATE,
+      "/clock": CLOCK,
+      "/responsive": RESPONSIVE,
+      "/dark-scheme": DARK_SCHEME,
+      "/desktop-only": DESKTOP_ONLY,
     } satisfies Record<string, string>),
   );
-  const handle = (request: Request) => {
+  const handle = (request: Request): Response | Promise<Response> => {
     const url = new URL(request.url);
     const { pathname } = url;
     requests.set(pathname, (requests.get(pathname) ?? 0) + 1);
-    const routed = edgeCaseResponse(request, url) ?? browseRouteResponse(request, url);
+    requestTimes.set(pathname, performance.now());
+    const routed =
+      edgeCaseResponse(request, url) ??
+      browseRouteResponse(request, url) ??
+      actionRouteResponse(url);
     if (routed) return routed;
     const content = CONTENT_ROUTES.get(pathname);
     const page = pages.get(pathname);
@@ -195,7 +239,13 @@ export async function startFixture(): Promise<Fixture> {
         "content-type": "text/event-stream",
         "cache-control": "no-store",
       });
+    if (pathname === "/api/pending") return new Promise<Response>(() => undefined);
     if (pathname === "/api/data") return Response.json({ message: "loaded from api" });
+    if (pathname === "/api/session")
+      return Response.json(
+        { signedIn: true },
+        { headers: { "set-cookie": "fixture_session=raw-session-value; Path=/" } },
+      );
     if (pathname === "/api/items") {
       const pageNumber = Number(url.searchParams.get("page") ?? "1");
       return Response.json({
@@ -204,6 +254,23 @@ export async function startFixture(): Promise<Fixture> {
         cookie: request.headers.get("cookie") ?? "",
       });
     }
+    if (pathname === "/empty-500") return new Response(null, { status: 500 });
+    if (pathname === "/empty-429") return new Response(null, { status: 429 });
+    if (pathname === "/sign-in-first")
+      return new Response("<title>Sign in</title><h1>Sign in first</h1>", {
+        status: 401,
+        headers: { "content-type": "text/html" },
+      });
+    if (pathname === "/no-content") return new Response(null, { status: 204 });
+    if (pathname === "/to-no-content") return Response.redirect(`${url.origin}/no-content`, 302);
+    if (pathname === "/no-content-on-post")
+      return request.method === "POST"
+        ? new Response(null, { status: 204 })
+        : Response.json({ form: "kept after a post" });
+    if (pathname === "/redirect-on-post")
+      return request.method === "POST"
+        ? Response.redirect(`${url.origin}/no-content`, 302)
+        : Response.json({ form: "kept after a redirected post" });
     if (pathname === "/api/echo") return Response.json(Object.fromEntries(request.headers));
     if (pathname === "/download")
       return new Response("a,b\n1,2\n", {
@@ -224,6 +291,7 @@ export async function startFixture(): Promise<Fixture> {
     url: `http://127.0.0.1:${port}`,
     hits: () => hits,
     requests: (pathname) => requests.get(pathname) ?? 0,
+    requestedAt: (pathname) => requestTimes.get(pathname),
     close: async () => {
       await loopbackV6?.stop(true);
       await server.stop(true);
@@ -231,7 +299,10 @@ export async function startFixture(): Promise<Fixture> {
   };
 }
 
-function listenOnLoopbackV6(handle: (request: Request) => Response, port: number) {
+function listenOnLoopbackV6(
+  handle: (request: Request) => Response | Promise<Response>,
+  port: number,
+) {
   try {
     return Bun.serve({ hostname: "::1", port, idleTimeout: 0, fetch: handle });
   } catch {

@@ -6,8 +6,10 @@ import { registerActionTools } from "./actions.ts";
 import { registerAskTools } from "./ask.ts";
 import type { ToolArguments, ToolDeps, ToolFields } from "./common.ts";
 import { registerDataTools } from "./data.ts";
+import { registerLogsTool } from "./logs.ts";
 import { registerNetworkTools } from "./network.ts";
 import { registerPageReadTools } from "./page-read.ts";
+import { registerRecordingTools } from "./recording.ts";
 import { registerScriptTools } from "./script.ts";
 import { registerSessionTools } from "./session.ts";
 import { registerTabTools } from "./tabs.ts";
@@ -22,7 +24,9 @@ export function registerTools(server: McpServer, deps: ToolDeps) {
   registerDataTools(server, deps);
   registerSessionTools(server, deps);
   registerVisualTools(server, deps);
+  registerRecordingTools(server, deps);
   registerAskTools(server, deps);
+  registerLogsTool(server, deps);
 }
 
 export type RecordedTool = {

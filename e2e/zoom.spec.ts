@@ -88,7 +88,7 @@ const serveMarkers = (hostname: string, listenPort: number) =>
   });
 
 async function openTab(url: string) {
-  const tab = /Opened (t\d+)/.exec(await call("tab_open", { url }))?.[1];
+  const tab = /Opened (t\d+)/.exec(await call("navigate", { url }))?.[1];
   expect(tab).toMatch(/^t\d+$/);
   return tab ?? "";
 }
@@ -258,8 +258,8 @@ for (const zoom of ZOOMS) {
       );
     });
 
-    test("collect_pages screenshots reach the page bottom", async () => {
-      const text = await call("collect_pages", {
+    test("save_pages screenshots reach the page bottom", async () => {
+      const text = await call("save_pages", {
         urls: [url],
         include: ["screenshot"],
         settle_ms: 0,

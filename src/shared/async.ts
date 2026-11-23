@@ -59,20 +59,52 @@ export async function untilAborted<T>(
   }
 }
 
+type Pace<T> = { gapMs: number; keyOf: (item: T) => string };
+
 export async function runPool<T, R>(
   items: T[],
   concurrency: number,
-  work: (item: T, index: number) => Promise<R>,
+  work: (item: T, index: number, started: () => void) => Promise<R>,
   signal?: AbortSignal,
+  pace?: Pace<T>,
 ) {
   const results = Array.from<R | undefined>({ length: items.length });
-  const queue = items.entries();
+  const pending = items.map((item, index) => ({ item, index, key: pace?.keyOf(item) ?? "" }));
+  const nextStart = new Map<string, number>();
+  let changed = Promise.withResolvers<void>();
+  const markChanged = () => {
+    changed.resolve();
+    changed = Promise.withResolvers<void>();
+  };
+  const gapEnds = new Map<string, number>();
+  const readyAt = (key: string) => nextStart.get(key) ?? 0;
+  const finishPaced = (key: string) => {
+    nextStart.set(key, Math.max(gapEnds.get(key) ?? 0, Date.now()));
+    markChanged();
+  };
   const worker = async (): Promise<void> => {
-    if (signal?.aborted) return;
-    const next = queue.next();
-    if (next.done) return;
-    const [index, item] = next.value;
-    results[index] = await work(item, index);
+    if (signal?.aborted || pending.length === 0) return;
+    const now = Date.now();
+    const position = pending.findIndex((entry) => readyAt(entry.key) <= now);
+    if (position === -1) {
+      const earliest = Math.min(...pending.map((entry) => readyAt(entry.key)));
+      const waits = [changed.promise];
+      if (earliest !== Infinity)
+        waits.push(delay(earliest - now, undefined, { signal }).catch(() => undefined));
+      await Promise.race(waits);
+      return worker();
+    }
+    const [next] = pending.splice(position, 1);
+    if (!next) return;
+    if (pace) nextStart.set(next.key, Infinity);
+    const started = () => {
+      if (pace) gapEnds.set(next.key, Date.now() + pace.gapMs);
+    };
+    try {
+      results[next.index] = await work(next.item, next.index, started);
+    } finally {
+      if (pace) finishPaced(next.key);
+    }
     return worker();
   };
   await Promise.all(
