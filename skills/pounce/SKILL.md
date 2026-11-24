@@ -1,11 +1,11 @@
 ---
 name: pounce
-description: Working in the user's real, signed-in Chrome through pounce. Load before browser work that goes beyond one page - shopping, orders and payments, sign-ups and logins, reading or comparing many pages, visual QA and design checks, scraping and site APIs, scripted flows, network inspection, and verifying a local web app.
+description: Working in the user's real Chrome through pounce. Load before browser work that goes beyond one page - shopping, orders and payments, sign-ups and logins, reading or comparing many pages, visual QA and design checks, scraping and site APIs, scripted flows, network inspection, and verifying a local web app.
 ---
 
 # The environment
 
-`pounce` drives one real Google Chrome with a persistent profile seeded from the user's own browser, so it usually has their history, saved passwords and signed-in sessions. The window is on the user's desktop and they watch it; they set it up so you can work in it freely and quickly.
+`pounce` drives one real Google Chrome with a persistent profile. When the user copied it from their own browser it has their history, saved passwords and signed-in sessions; when they started it fresh it has only what they signed in to there, so check a page before assuming a session. The window is on the user's desktop and they watch it; they set it up so you can work in it freely and quickly.
 
 The browser is one shared daemon: every agent session on this machine sees the same tabs and cookies. Open your own tab for a task and close it when you are done; tabs that `tabs` marks as another client's or unclaimed belong to someone else, while orphaned ones are free to use.
 
@@ -124,6 +124,6 @@ A script runs in its own worker thread: browser objects stay handles to the real
 
 The daemon is one local HTTP server shared by every agent session; how it is started (a user service or a terminal) depends on the machine. Restarting it closes every open tab, so do it only when `tabs` or `logs` with `source: "server"` show the daemon itself is unhealthy. `tabs` shows where its state lives (the profile, the output directory, the log directory and the active ask_pages adapter), and `logs` with `source: "server"` reads what it recorded.
 
-`ask_pages` and the model layer of `compare_design` call Anthropic's Messages API through the built-in adapter with the local Claude Code sign-in. An adapter module replaces it: an ES module (`.mjs` or `.ts`) default-exporting `{ name, complete({ system, prompt, model, maxTokens, images, signal }) }` (or a function returning one), loaded from `WEB_AGENT_ASK_ADAPTER` when set, otherwise from `ask-adapter.mjs` in the config directory (`~/.config/pounce`) when it exists. `tabs` names the active adapter, and `examples/ask-adapter.example.ts` shows the shape.
+`ask_pages` and the model layer of `compare_design` use the model the user chose in `pounce install`: their Claude Code sign-in, an Anthropic API key, their own adapter module, or none (then both refuse and say so). An adapter module is an ES module (`.mjs` or `.ts`) default-exporting `{ name, complete({ system, prompt, model, maxTokens, images, signal }) }` (or a function returning one). `WEB_AGENT_ASK_ADAPTER` names one that overrides the choice; with the Claude Code sign-in, `ask-adapter.mjs` in the config directory (`~/.config/pounce`, or `~/.config/web-agent-mcp` on older installs) replaces the built-in adapter when it exists. `tabs` names the active adapter.
 
 `pounce --import-profile` copies cookies, saved passwords, history and site storage from the user's Chrome profile into the agent profile, after moving the previous agent profile aside. The daemon must be stopped first, and it replaces the agent's sessions, so the user runs it or asks for it.
