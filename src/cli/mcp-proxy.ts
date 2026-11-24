@@ -48,6 +48,7 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
   let closing = false;
   let recovery: Promise<StreamableHTTPClientTransport> | undefined;
   const replays = new Map<RequestId, () => void>();
+  let initializeAnswered: ReturnType<typeof Promise.withResolvers<void>> | undefined;
   let pendingReplay:
     | { transport: StreamableHTTPClientTransport; fail: (error: Error) => void }
     | undefined;
@@ -61,6 +62,7 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
       replayAnswered();
       return;
     }
+    if (id !== undefined && id === handshake.sentInitialize?.id) initializeAnswered?.resolve();
     if (isJSONRPCResultResponse(message) && message.id === handshake.sentInitialize?.id) {
       handshake.initialize = handshake.sentInitialize;
       const result = initializeResult.safeParse(message.result);
@@ -121,6 +123,7 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
   }
 
   async function relay(message: JSONRPCMessage) {
+    if (message !== handshake.sentInitialize) await initializeAnswered?.promise;
     const transport = daemon;
     try {
       await transport.send(message);
@@ -142,10 +145,13 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
 
   Object.assign(client, {
     onmessage: (message: JSONRPCMessage) => {
-      if (isJSONRPCRequest(message) && message.method === "initialize")
+      if (isJSONRPCRequest(message) && message.method === "initialize") {
         handshake.sentInitialize = message;
+        initializeAnswered = Promise.withResolvers();
+      }
       if (isInitializedNotification(message)) handshake.initialized = message;
       void relay(message).catch((cause: unknown) => {
+        if (message === handshake.sentInitialize) initializeAnswered?.resolve();
         const reply = failedRequest(message, cause);
         if (reply) void client.send(reply);
         else writeStderr(`pounce mcp: ${messageOf(cause)}`);

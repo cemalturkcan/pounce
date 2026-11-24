@@ -249,3 +249,42 @@ describe("pounce mcp reconnecting to a new daemon session", () => {
     expect(seen.map((message) => ("id" in message ? message.id : undefined))).toStrictEqual([1, 2]);
   }, 60_000);
 });
+
+describe("pounce mcp with requests sent before the initialize reply", () => {
+  test("answers them once the session exists", async () => {
+    const { env } = await isolatedEnv();
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/server.ts", "mcp"],
+      cwd: PACKAGE_DIR,
+      env,
+      stderr: "ignore",
+    });
+    const seen: JSONRPCMessage[] = [];
+    Object.assign(transport, { onmessage: (message: JSONRPCMessage) => seen.push(message) });
+    await transport.start();
+    cleanups.push(() => transport.close());
+    await Promise.all([
+      transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "proxy-spec", version: "0" },
+        },
+      }),
+      transport.send({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      transport.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    ]);
+    const listReply = await repeatUntil(
+      async () => seen.find((message) => "id" in message && message.id === 2),
+      { delayMs: () => 50, giveUp: (made) => made >= 400 },
+    );
+
+    expect(listReply && "result" in listReply ? "result" : JSON.stringify(listReply)).toBe(
+      "result",
+    );
+  }, 60_000);
+});
