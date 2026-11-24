@@ -1,11 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Config } from "../config/config.ts";
-import { SERVICE_NAME } from "../cli/daemon-control.ts";
+import { LEGACY_SERVICE, SERVICE_NAME } from "../cli/daemon-control.ts";
 import type { Runner } from "../cli/process.ts";
 import { inSequence } from "../shared/async.ts";
-
-export const LEGACY_SERVICE = "claude-code-pair-web-agent.service";
 
 function systemdQuote(value: string) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)

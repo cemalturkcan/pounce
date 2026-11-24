@@ -85,3 +85,77 @@ describe("ensureDaemon when the daemon exits at once", () => {
     await expect(ensureDaemon(config, env)).rejects.toThrow(/did not start[\s\S]*in use/);
   }, 40_000);
 });
+
+function recordingControl(commands: string[][], subState: string) {
+  const spawned: string[][] = [];
+  const runner: Runner = async (command) => {
+    commands.push([...command]);
+    if (command[2] === "show") return { code: 0, stdout: `${subState}\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return {
+    spawned,
+    control: {
+      runner,
+      spawnDetached: (command: readonly string[]) => {
+        spawned.push([...command]);
+        return { exited: () => true };
+      },
+    },
+  };
+}
+
+describe("ensureDaemon when pounce.service starts but its daemon exits", () => {
+  test("names the unit's journal", async () => {
+    const { env, config } = await isolatedEnv();
+    await mkdir(path.dirname(config.serviceFile), { recursive: true });
+    await writeFile(config.serviceFile, "[Service]\n");
+    const { control } = recordingControl([], "auto-restart");
+
+    await expect(ensureDaemon(config, env, control)).rejects.toThrow(
+      "journalctl --user -u pounce.service",
+    );
+  });
+
+  test("gives up well before an MCP client's startup timeout", async () => {
+    const { env, config } = await isolatedEnv();
+    await mkdir(path.dirname(config.serviceFile), { recursive: true });
+    await writeFile(config.serviceFile, "[Service]\n");
+    const { control } = recordingControl([], "auto-restart");
+    const startedAt = Date.now();
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(Date.now() - startedAt).toBeLessThan(5000);
+  });
+
+  test("does not start a second daemon beside the unit", async () => {
+    const { env, config } = await isolatedEnv();
+    await mkdir(path.dirname(config.serviceFile), { recursive: true });
+    await writeFile(config.serviceFile, "[Service]\n");
+    const { control, spawned } = recordingControl([], "auto-restart");
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(spawned).toStrictEqual([]);
+  });
+});
+
+describe("ensureDaemon with only the legacy claude-code-pair-web-agent.service", () => {
+  test("starts that unit instead of a detached daemon", async () => {
+    const { env, config } = await isolatedEnv();
+    await mkdir(path.dirname(config.serviceFile), { recursive: true });
+    await writeFile(
+      path.join(path.dirname(config.serviceFile), "claude-code-pair-web-agent.service"),
+      "[Service]\n",
+    );
+    const commands: string[][] = [];
+    const { control } = recordingControl(commands, "failed");
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(commands[0]).toStrictEqual([
+      "systemctl",
+      "--user",
+      "start",
+      "claude-code-pair-web-agent.service",
+    ]);
+  });
+});

@@ -11,11 +11,13 @@ import {
 } from "../server/daemon.ts";
 import { runCommand, type Runner, selfCommand } from "./process.ts";
 
-const START_TIMEOUT_MS = 30_000;
+const START_TIMEOUT_MS = 20_000;
 const POLL_MS = 200;
 const LOG_TAIL_LINES = 20;
+const STOPPED_UNIT_STATES = ["auto-restart", "failed", "dead", "exited"];
 
 export const SERVICE_NAME = `${PRODUCT_NAME}.service`;
+export const LEGACY_SERVICE = "claude-code-pair-web-agent.service";
 
 export type Spawned = { exited: () => boolean };
 
@@ -64,34 +66,61 @@ function logTail(file: string) {
   }
 }
 
-async function waitForDaemon(config: Config, gaveUp: () => boolean) {
-  const deadline = Date.now() + START_TIMEOUT_MS;
+async function waitForDaemon(
+  config: Config,
+  deadline: number,
+  gaveUp: () => boolean | Promise<boolean>,
+) {
   let stopped = false;
   return repeatUntil(
     async () => {
       const registry = await runningDaemon(config);
-      stopped = !registry && gaveUp();
+      stopped = !registry && (await gaveUp());
       return registry;
     },
     { delayMs: () => POLL_MS, giveUp: () => stopped || Date.now() >= deadline },
   );
 }
 
-async function startService(config: Config, control: DaemonControl) {
-  if (!existsSync(config.serviceFile)) return undefined;
-  const started = await control.runner(["systemctl", "--user", "start", SERVICE_NAME]);
-  if (started.code !== 0) return undefined;
-  return waitForDaemon(config, () => false);
+function installedUnit(config: Config) {
+  if (existsSync(config.serviceFile)) return SERVICE_NAME;
+  const legacy = path.join(path.dirname(config.serviceFile), LEGACY_SERVICE);
+  return existsSync(legacy) ? LEGACY_SERVICE : undefined;
 }
 
-export async function startDaemonProcess(
+async function unitStopped(unit: string, control: DaemonControl) {
+  const shown = await control.runner([
+    "systemctl",
+    "--user",
+    "show",
+    "--property=SubState",
+    "--value",
+    unit,
+  ]);
+  return STOPPED_UNIT_STATES.includes(shown.stdout.trim());
+}
+
+async function startService(config: Config, control: DaemonControl, deadline: number) {
+  const unit = installedUnit(config);
+  if (!unit) return undefined;
+  const started = await control.runner(["systemctl", "--user", "start", unit]);
+  if (started.code !== 0) return undefined;
+  const registry = await waitForDaemon(config, deadline, () => unitStopped(unit, control));
+  if (registry) return registry;
+  throw new Error(
+    `${unit} started, but its daemon did not come up; see \`journalctl --user -u ${unit}\`.`,
+  );
+}
+
+async function spawnDaemon(
   config: Config,
-  env: NodeJS.ProcessEnv = process.env,
-  control: DaemonControl = defaultDaemonControl,
+  env: NodeJS.ProcessEnv,
+  control: DaemonControl,
+  deadline: number,
 ): Promise<DaemonRegistry> {
   const logFile = daemonLogFile(config);
   const child = control.spawnDetached([...selfCommand(), "--daemon"], logFile, config.homeDir, env);
-  const registry = await waitForDaemon(config, child.exited);
+  const registry = await waitForDaemon(config, deadline, child.exited);
   if (registry) return registry;
   const tail = logTail(logFile);
   throw new Error(
@@ -107,5 +136,8 @@ export async function ensureDaemon(
   const { state, registry } = await daemonPresence(config);
   if (registry && state === "running") return registry;
   if (registry && state === "not responding") throw new Error(refuseSecondDaemon(state, registry));
-  return (await startService(config, control)) ?? startDaemonProcess(config, env, control);
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  return (
+    (await startService(config, control, deadline)) ?? spawnDaemon(config, env, control, deadline)
+  );
 }
