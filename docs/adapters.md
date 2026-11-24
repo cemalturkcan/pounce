@@ -87,8 +87,11 @@ numbers; pounce adds them up per call and logs them.
 `ask_pages` sets no limits by default: pages are not clipped, one call takes as many pages as fit about 3 million
 characters, the output limit is 128000 tokens, and a call has no time limit unless `timeout_ms` sets one. A call the
 API rejects because the prompt exceeds the context window or the request exceeds its size limit is split in half and
-retried, down to single pages. `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens`
-lower the sizes your adapter receives.
+retried, down to single pages. pounce recognizes those rejections by the message of the error your adapter throws:
+it contains `model_context_window_exceeded`, `request_too_large` or `HTTP 413`, or `invalid_request_error` together
+with "prompt is too long" or "exceeds the context window". Keep the API's error text in the message to get the
+split. `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens` lower the sizes your
+adapter receives.
 
 ### converse (optional)
 
