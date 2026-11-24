@@ -1,8 +1,15 @@
 {
   "name": "pounce",
   "version": "0.3.0",
-  "private": true,
-  "description": "Browser automation MCP server: one persistent Chrome profile, ref-based targeting, bulk page collection, and server-side scripting.",
+  "description": "A fast, end-to-end browser for AI agents: an MCP server that runs one Chrome and shares it with every agent on the machine.",
+  "homepage": "https://github.com/cemalturkcan/web-agent-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/cemalturkcan/web-agent-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cemalturkcan/web-agent-mcp.git"
+  },
   "bin": {
     "pounce": "src/server.ts"
   },
