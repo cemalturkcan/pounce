@@ -11,7 +11,7 @@ done. It can start fresh or as a copy of your own Chrome profile.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/cemalturkcan/web-agent-mcp/main/install | bash
+curl -fsSL https://raw.githubusercontent.com/cemalturkcan/pounce/main/install | bash
 ```
 
 The script downloads the Linux binary (x64 or arm64) from GitHub Releases, checks its SHA-256, puts it in

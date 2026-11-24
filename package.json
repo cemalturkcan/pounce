@@ -2,14 +2,14 @@
   "name": "pounce",
   "version": "0.3.0",
   "description": "A fast, end-to-end browser for AI agents: an MCP server that runs one Chrome and shares it with every agent on the machine.",
-  "homepage": "https://github.com/cemalturkcan/web-agent-mcp#readme",
+  "homepage": "https://github.com/cemalturkcan/pounce#readme",
   "bugs": {
-    "url": "https://github.com/cemalturkcan/web-agent-mcp/issues"
+    "url": "https://github.com/cemalturkcan/pounce/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cemalturkcan/web-agent-mcp.git"
+    "url": "git+https://github.com/cemalturkcan/pounce.git"
   },
   "bin": {
     "pounce": "src/server.ts"
