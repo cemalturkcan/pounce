@@ -446,6 +446,38 @@ describe("the profile step", () => {
   });
 });
 
+const SET_DEFAULT = ["xdg-settings", "set", "default-web-browser", "pounce.desktop"];
+
+async function script(name: string, body: string) {
+  const file = at("bin", name);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `#!/bin/bash\n${body}\n`);
+  await chmod(file, 0o755);
+}
+
+async function systemEntry(id: string, exec: string) {
+  await mkdir(at("usr-share", "applications"), { recursive: true });
+  await writeFile(
+    at("usr-share", "applications", id),
+    `[Desktop Entry]\nVersion=1.0\nType=Application\nName=Browser\n${exec}\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n`,
+  );
+}
+
+async function omarchyBrowser() {
+  await script(
+    "omarchy-launch-browser",
+    'default_browser=$(omarchy-cmd-default-browser)\nbrowser_exec=$(sed -n "s/^Exec=\\([^ ]*\\).*/\\1/p" "$entry")\nexec setsid uwsm-app -- "$browser_exec" "$@"',
+  );
+  await systemEntry("omarchy-browser.desktop", "Exec=omarchy-launch-browser %U");
+}
+
+function defaultBrowser(id: string): Options {
+  return {
+    env: { PATH: `${at("bin")}:/usr/bin:/bin`, XDG_DATA_DIRS: at("usr-share") },
+    replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: `${id}\n` } },
+  };
+}
+
 describe("the desktop step", () => {
   test("makes pounce the default browser when asked", async () => {
     await runInstall([...BASIC, "--desktop"], {
@@ -468,32 +500,48 @@ describe("the desktop step", () => {
     ).toContain(`Exec=${at(".local", "bin", "pounce")} open %U`);
   });
 
-  test("leaves a wrapper default browser alone", async () => {
-    await mkdir(at(".local", "share", "applications"), { recursive: true });
-    await writeFile(
-      at(".local", "share", "applications", "omarchy-browser.desktop"),
-      "[Desktop Entry]\nExec=omarchy-launch-browser %U\n",
-    );
-    await runInstall([...BASIC, "--desktop"], {
-      replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: "omarchy-browser.desktop\n" } },
-    });
+  test("leaves a launcher that dispatches to the default browser alone", async () => {
+    await omarchyBrowser();
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("omarchy-browser.desktop"));
 
     expect(commands.some((command) => command[1] === "set")).toBe(false);
   });
 
-  test("says what to change in a wrapper default browser", async () => {
-    await mkdir(at(".local", "share", "applications"), { recursive: true });
-    await writeFile(
-      at(".local", "share", "applications", "omarchy-browser.desktop"),
-      "[Desktop Entry]\nExec=omarchy-launch-browser %U\n",
-    );
-    await runInstall([...BASIC, "--desktop"], {
-      replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: "omarchy-browser.desktop\n" } },
-    });
+  test("says what to change in a launcher that dispatches to the default browser", async () => {
+    await omarchyBrowser();
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("omarchy-browser.desktop"));
 
     expect(printed()).toContain(
       `make that launcher run \`${at(".local", "bin", "pounce")} open %U\``,
     );
+  });
+
+  test("replaces Ubuntu's snap Firefox", async () => {
+    await systemEntry(
+      "firefox_firefox.desktop",
+      "Exec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/firefox_firefox.desktop /snap/bin/firefox %u",
+    );
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("firefox_firefox.desktop"));
+
+    expect(commands).toContainEqual(SET_DEFAULT);
+  });
+
+  test("replaces a flatpak Chrome", async () => {
+    await systemEntry(
+      "com.google.Chrome.desktop",
+      "Exec=/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=/app/bin/chrome --file-forwarding com.google.Chrome @@u %U @@",
+    );
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("com.google.Chrome.desktop"));
+
+    expect(commands).toContainEqual(SET_DEFAULT);
+  });
+
+  test("replaces a browser started through a script of the user's own", async () => {
+    await script("work-chrome", 'exec google-chrome --profile-directory=Work "$@"');
+    await systemEntry("work-chrome.desktop", "Exec=work-chrome %U");
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("work-chrome.desktop"));
+
+    expect(commands).toContainEqual(SET_DEFAULT);
   });
 
   test("is not touched without --desktop", async () => {

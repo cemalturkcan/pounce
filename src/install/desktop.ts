@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import type { Runner } from "../cli/process.ts";
 
@@ -6,6 +15,54 @@ export const DESKTOP_ID = "pounce.desktop";
 
 const KNOWN_BROWSERS =
   /^(google-chrome|chrome|chromium|brave|microsoft-edge|msedge|firefox|librewolf|vivaldi|opera|zen|epiphany|falkon|qutebrowser|floorp|waterfox|thorium|helium)/;
+
+const SANDBOX_RUNNERS = new Set(["flatpak", "snap"]);
+
+const DISPATCHES_TO_DEFAULT =
+  /xdg-settings|default[-_]?(web[-_]?)?browser|x-www-browser|sensible-browser|\$\{?BROWSER\b/i;
+
+function execWords(exec: string) {
+  return [...exec.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(
+    (match) => match[1]?.replaceAll(/\\(.)/g, "$1") ?? match[2] ?? "",
+  );
+}
+
+function execProgram(exec: string) {
+  const words = execWords(exec);
+  const start = words[0] === "env" || words[0]?.endsWith("/env") ? 1 : 0;
+  return words.slice(start).find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+}
+
+function startsWithShebang(file: string) {
+  const head = Buffer.alloc(2);
+  const fd = openSync(file, "r");
+  try {
+    return readSync(fd, head, 0, 2, 0) === 2 && head.toString() === "#!";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function scriptText(file: string) {
+  try {
+    return statSync(file).isFile() && startsWithShebang(file)
+      ? readFileSync(file, "utf8")
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function dispatchesToDefault(exec: string, env: NodeJS.ProcessEnv) {
+  const program = execProgram(exec);
+  if (!program) return false;
+  const name = path.basename(program);
+  if (SANDBOX_RUNNERS.has(name) || program.startsWith("/snap/") || KNOWN_BROWSERS.test(name))
+    return false;
+  const file = program.includes("/") ? program : Bun.which(program, { PATH: env.PATH ?? "" });
+  const text = file ? scriptText(file) : undefined;
+  return text !== undefined && DISPATCHES_TO_DEFAULT.test(text);
+}
 
 function execQuote(value: string) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
@@ -65,8 +122,7 @@ export async function installDesktop(
   const current = (await runner(["xdg-settings", "get", "default-web-browser"])).stdout.trim();
   if (current === DESKTOP_ID) return { kind: "already" };
   const exec = current ? execOf(current, dataHome, env) : undefined;
-  const program = path.basename(exec?.split(/\s+/)[0]?.replaceAll('"', "") ?? "");
-  if (exec && program && !KNOWN_BROWSERS.test(program)) return { kind: "wrapper", current, exec };
+  if (exec && dispatchesToDefault(exec, env)) return { kind: "wrapper", current, exec };
   const set = await runner(["xdg-settings", "set", "default-web-browser", DESKTOP_ID]);
   if (set.code !== 0) return { kind: "failed", detail: set.stderr.trim() || `exit ${set.code}` };
   return { kind: "default" };
