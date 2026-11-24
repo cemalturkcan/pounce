@@ -2,6 +2,7 @@ import path from "node:path";
 import type { BunPlugin } from "bun";
 
 const ROOT = path.join(import.meta.dir, "..");
+const TARGETS = { x64: "bun-linux-x64-baseline", arm64: "bun-linux-arm64" } as const;
 const ARCHES = ["x64", "arm64"] as const;
 const ENTRYPOINTS = ["src/server.ts", "src/script/worker.ts", "src/visual/diff-worker.ts"];
 const CORES = ["patchright-core", "playwright-core"];
@@ -52,7 +53,7 @@ export async function buildBinary(
     external: ["chromium-bidi", "chromium-bidi/*"],
     plugins: [embedPlaywrightManifests(embedded)],
     compile: {
-      target: `bun-linux-${arch}`,
+      target: TARGETS[arch],
       outfile,
       autoloadDotenv: false,
       autoloadBunfig: false,
