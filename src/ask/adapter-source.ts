@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { AskAdapter } from "./adapter.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
+import { AskSetupError } from "./errors.ts";
 
 const adapterContract = z.object({ name: z.string().min(1), complete: z.instanceof(Function) });
 const askAdapter = z.custom<AskAdapter>((value) => adapterContract.safeParse(value).success);
@@ -45,28 +46,42 @@ function adapterFromFile(file: string): AdapterChoice {
 
 type AdapterChoice = { key: string; path?: string; load: () => Promise<AskAdapter> };
 
+export type AdapterSourceOptions = {
+  modulePath?: string;
+  defaultPath?: string;
+  adapter?: AskAdapter;
+  refusal?: string;
+};
+
 export class AskAdapterSource {
   private readonly modulePath?: string;
   private readonly defaultPath?: string;
-  private readonly adapter: AskAdapter;
+  private readonly adapter?: AskAdapter;
+  private readonly refusal?: string;
   private readonly loaded = new Map<string, Promise<AskAdapter>>();
   private readonly names = new Map<string, string>();
 
-  constructor(options: { modulePath?: string; defaultPath?: string; adapter: AskAdapter }) {
+  constructor(options: AdapterSourceOptions) {
     this.modulePath = options.modulePath;
     this.defaultPath = options.defaultPath;
     this.adapter = options.adapter;
+    this.refusal = options.refusal;
   }
 
   private choice(): AdapterChoice {
     if (this.modulePath) return adapterFromFile(this.modulePath);
     if (this.defaultPath && existsSync(this.defaultPath)) return adapterFromFile(this.defaultPath);
-    return { key: "code", load: () => Promise.resolve(this.adapter) };
+    const { adapter, refusal } = this;
+    if (adapter) return { key: "code", load: () => Promise.resolve(adapter) };
+    return {
+      key: "off",
+      load: () => Promise.reject(new AskSetupError(refusal ?? "No model adapter is set up.")),
+    };
   }
 
   get label() {
     const choice = this.choice();
-    if (!choice.path) return this.adapter.name;
+    if (!choice.path) return this.adapter?.name ?? "off";
     const name = this.names.get(choice.key);
     return name ? `${name} (${choice.path})` : `module ${choice.path}`;
   }

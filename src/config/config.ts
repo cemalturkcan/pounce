@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { type LogLevel, parseLogLevel } from "../log/logger.ts";
+import { type AskSetting, readSettings, resolveAsk } from "./settings.ts";
 import { SERVER_VERSION } from "./version.ts";
 
 const DEFAULT_CHROME_POLICY_DIRS = [
@@ -46,6 +47,7 @@ export type Config = {
   consoleHook: ConsoleHookMode;
   askAdapter?: string;
   askAdapterPath: string;
+  ask: AskSetting;
   configDir: string;
   configFile: string;
   serviceFile: string;
@@ -130,6 +132,7 @@ const environment = z.object({
   WEB_AGENT_AUTO_CONSENT: raw.transform(parseAutoConsent),
   WEB_AGENT_CONSOLE_HOOK: raw.transform(parseConsoleHook),
   WEB_AGENT_ASK_ADAPTER: text,
+  ANTHROPIC_API_KEY: text,
 });
 
 function preferNewDir(current: string, legacy: string): string {
@@ -158,6 +161,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     path.join(configHome, PRODUCT_NAME),
     path.join(home, ".config", "web-agent-mcp"),
   );
+  const configFile = path.join(configDir, "config.json");
+  const settings = readSettings(configFile);
   const port = env.WEB_AGENT_DAEMON_PORT;
   const hasDisplay = Boolean(env.WAYLAND_DISPLAY || env.DISPLAY);
 
@@ -191,8 +196,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     consoleHook: env.WEB_AGENT_CONSOLE_HOOK,
     askAdapter: env.WEB_AGENT_ASK_ADAPTER,
     askAdapterPath: path.join(configDir, "ask-adapter.mjs"),
+    ask: resolveAsk(settings.ask, env.ANTHROPIC_API_KEY),
     configDir,
-    configFile: path.join(configDir, "config.json"),
+    configFile,
     serviceFile: path.join(configHome, "systemd", "user", `${PRODUCT_NAME}.service`),
   };
 }
