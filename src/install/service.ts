@@ -5,10 +5,26 @@ import { LEGACY_SERVICE, SERVICE_NAME } from "../cli/daemon-control.ts";
 import type { Runner } from "../cli/process.ts";
 import { inSequence } from "../shared/async.ts";
 
+const DISPLAY_VARIABLES = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]);
+
 function systemdQuote(value: string) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
     ? value
     : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function execArgument(value: string) {
+  return systemdQuote(value.replaceAll("%", "%%").replaceAll("$", "$$$$"));
+}
+
+function environmentLine(key: string, value: string) {
+  return `Environment=${systemdQuote(`${key}=${value}`.replaceAll("%", "%%"))}`;
+}
+
+function presentEntries(env: NodeJS.ProcessEnv, keep: (key: string) => boolean) {
+  return Object.entries(env)
+    .flatMap(([key, value]) => (keep(key) && value ? [[key, value] as const] : []))
+    .toSorted(([left], [right]) => left.localeCompare(right));
 }
 
 export function serviceUnit(
@@ -17,10 +33,14 @@ export function serviceUnit(
   graphical: boolean,
 ) {
   const target = graphical ? "graphical-session.target" : "default.target";
-  const environment = Object.entries(env)
-    .filter(([key, value]) => key.startsWith("WEB_AGENT_") && value !== undefined && value !== "")
-    .toSorted(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`);
+  const display = graphical
+    ? []
+    : presentEntries(env, (key) => DISPLAY_VARIABLES.has(key)).map(([key, value]) =>
+        environmentLine(key, value),
+      );
+  const settings = presentEntries(env, (key) => key.startsWith("WEB_AGENT_")).map(([key, value]) =>
+    environmentLine(key, value),
+  );
   return [
     "[Unit]",
     "Description=pounce browser daemon for AI agents",
@@ -28,12 +48,13 @@ export function serviceUnit(
     "",
     "[Service]",
     "Type=simple",
-    `ExecStart=${[...command, "--daemon"].map(systemdQuote).join(" ")}`,
+    `ExecStart=${[...command, "--daemon"].map(execArgument).join(" ")}`,
     "Restart=on-failure",
     "RestartSec=5",
     "SuccessExitStatus=143",
     "PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY",
-    ...environment,
+    ...display,
+    ...settings,
     "",
     "[Install]",
     `WantedBy=${target}`,
@@ -61,7 +82,11 @@ export async function installService(
   if (existsSync(path.join(path.dirname(config.serviceFile), LEGACY_SERVICE)))
     return { kind: "legacy" };
   if (!(await systemdAvailable(runner))) return { kind: "unavailable" };
-  const unit = serviceUnit(command, env, Boolean(env.DISPLAY || env.WAYLAND_DISPLAY));
+  const graphical =
+    (
+      await runner(["systemctl", "--user", "is-active", "graphical-session.target"])
+    ).stdout.trim() === "active";
+  const unit = serviceUnit(command, env, graphical);
   const changed =
     !existsSync(config.serviceFile) || readFileSync(config.serviceFile, "utf8") !== unit;
   if (changed) {

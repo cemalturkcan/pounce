@@ -239,6 +239,25 @@ describe("the service step", () => {
     ]);
   });
 
+  test("starts from default.target in a session without graphical-session.target", async () => {
+    await runInstall(BASIC, { env: { DISPLAY: ":0" }, replies: {} });
+
+    expect(await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8")).toContain(
+      "WantedBy=default.target",
+    );
+  });
+
+  test("starts with the session when graphical-session.target is active", async () => {
+    await runInstall(BASIC, {
+      env: { DISPLAY: ":0" },
+      replies: { "systemctl --user is-active": { stdout: "active\n" } },
+    });
+
+    expect(await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8")).toContain(
+      "WantedBy=graphical-session.target",
+    );
+  });
+
   test("is skipped without systemd --user", async () => {
     await runInstall(BASIC);
 
