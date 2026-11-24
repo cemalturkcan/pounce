@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CommandResult, Runner } from "../cli/process.ts";
@@ -743,6 +753,67 @@ describe("a config.json that fails the schema", () => {
 
     expect(await readFile(at(".config", "pounce", "config.json"), "utf8")).toBe(before);
   });
+});
+
+const BROKEN_SETTINGS = `{"ask": {"mode": "api-key", "apiKey": "${FAKE_KEY}"},}`;
+
+async function brokenSettings() {
+  await mkdir(at(".config", "pounce"), { recursive: true });
+  await writeFile(at(".config", "pounce", "config.json"), BROKEN_SETTINGS, { mode: 0o644 });
+}
+
+async function settingsBackups() {
+  const dir = at(".config", "pounce");
+  return (await readdir(dir))
+    .filter((name) => name.startsWith("config.json.bak-"))
+    .map((name) => path.join(dir, name));
+}
+
+describe("a config.json that is not valid JSON", () => {
+  test("is copied before it is rewritten", async () => {
+    await brokenSettings();
+    await runInstall(BASIC);
+
+    const [backup] = await settingsBackups();
+    expect(await readFile(backup ?? "", "utf8")).toBe(BROKEN_SETTINGS);
+  });
+
+  test("is copied to a file only the user can read", async () => {
+    await brokenSettings();
+    await runInstall(BASIC);
+
+    const [backup] = await settingsBackups();
+    expect((await stat(backup ?? "")).mode & 0o777).toBe(0o600);
+  });
+
+  test("names where the copy is", async () => {
+    await brokenSettings();
+    await runInstall(BASIC);
+
+    const [backup] = await settingsBackups();
+    expect(printed()).toContain(`~/${path.relative(home, backup ?? "")}`);
+  });
+
+  test("is copied once per run", async () => {
+    await brokenSettings();
+    await runInstall(BASIC);
+
+    expect(await settingsBackups()).toHaveLength(1);
+  });
+
+  test("is not copied when the rewrite is declined", async () => {
+    await brokenSettings();
+    await runInstall(BASIC, { tty: true, answers: { confirm: [false] } });
+
+    expect(await settingsBackups()).toStrictEqual([]);
+  });
+});
+
+test("a valid config.json is not copied", async () => {
+  await runInstall(BASIC);
+  await runInstall(BASIC);
+
+  expect(await settingsBackups()).toStrictEqual([]);
 });
 
 describe("an API key of only spaces", () => {

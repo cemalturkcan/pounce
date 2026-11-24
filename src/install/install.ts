@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { styleText } from "node:util";
 import {
@@ -154,6 +161,7 @@ type Run = {
   configHome: string;
   dataHome: string;
   failed: boolean;
+  backUpBeforeSave: boolean;
 };
 
 const ok = (text: string) => `${styleText("green", "✓")} ${text}`;
@@ -169,7 +177,18 @@ function fail(run: Run, text: string) {
   run.io.print(bad(text));
 }
 
+function backUpSettings(run: Run) {
+  const { configFile } = run.config;
+  const backup = `${configFile}.bak-${new Date().toISOString().replaceAll(/[:.]/g, "-")}`;
+  writeFileSync(backup, readFileSync(configFile), { mode: 0o600, flag: "wx" });
+  run.io.print(ok(`Saved a copy of the old settings at ${tilde(run, backup)}`));
+}
+
 function saveSettings(run: Run) {
+  if (run.backUpBeforeSave) {
+    backUpSettings(run);
+    run.backUpBeforeSave = false;
+  }
   mkdirSync(run.config.configDir, { recursive: true, mode: 0o700 });
   writeFileSync(run.config.configFile, `${JSON.stringify(run.settings, null, 2)}\n`, {
     mode: 0o600,
@@ -634,10 +653,14 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
     configHome: io.env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"),
     dataHome: io.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share"),
     failed: false,
+    backUpBeforeSave: false,
   };
   io.print(styleText("bold", `pounce ${SERVER_VERSION} setup`));
   try {
-    if (loaded.problem && !(await rewriteInvalidSettings(run, loaded.problem))) return 1;
+    if (loaded.problem) {
+      if (!(await rewriteInvalidSettings(run, loaded.problem))) return 1;
+      run.backUpBeforeSave = true;
+    }
     const command = binaryStep(run);
     const configured = await agentsStep(run, command);
     const previousAsk = run.settings.ask;
