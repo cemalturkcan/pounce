@@ -443,16 +443,16 @@ describe("the ask_pages step", () => {
   });
 });
 
-async function chromeProfile() {
+async function chromeProfile(dir = "Default") {
   const userData = at(".config", "google-chrome");
-  await mkdir(path.join(userData, "Default"), { recursive: true });
+  await mkdir(path.join(userData, dir), { recursive: true });
   await writeFile(
     path.join(userData, "Local State"),
     JSON.stringify({
-      profile: { info_cache: { Default: { name: "Person 1", user_name: "me@example.com" } } },
+      profile: { info_cache: { [dir]: { name: "Person 1", user_name: "me@example.com" } } },
     }),
   );
-  await writeFile(path.join(userData, "Default", "Bookmarks"), '{"roots": {}}');
+  await writeFile(path.join(userData, dir, "Bookmarks"), '{"roots": {}}');
 }
 
 async function runningChrome() {
@@ -515,6 +515,14 @@ describe("the profile step", () => {
     expect(printed()).toContain(
       "Close Google Chrome and run `pounce install --profile chrome:Default` again",
     );
+  });
+
+  test("quotes a profile key with a space in the re-run hint", async () => {
+    await chromeProfile("Profile 1");
+    await runningChrome();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Profile 1"]);
+
+    expect(printed()).toContain("run `pounce install --profile 'chrome:Profile 1'` again");
   });
 
   test("never suggests an option install does not have", async () => {

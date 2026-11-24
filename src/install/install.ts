@@ -25,7 +25,14 @@ import {
   agentSpecs,
   callingAgent,
 } from "./agents.ts";
-import { addToPath, binDir, type Executable, onPathAlready, placeBinary } from "./binary.ts";
+import {
+  addToPath,
+  binDir,
+  type Executable,
+  onPathAlready,
+  placeBinary,
+  shellWord,
+} from "./binary.ts";
 import { installDesktop } from "./desktop.ts";
 import { type ChromeCheck, checkChrome } from "./health.ts";
 import {
@@ -492,7 +499,7 @@ async function importStep(run: Run, browser: BrowserId, dir: string) {
         return importStep(run, browser, dir);
       fail(
         run,
-        `${name} is running. Close ${name} and run \`pounce install --profile ${key}\` again.`,
+        `${name} is running. Close ${name} and run \`pounce install --profile ${shellWord(key)}\` again.`,
       );
     } else if (cause instanceof ImportError) fail(run, renderImportFailure(config, cause));
     else fail(run, messageOf(cause));

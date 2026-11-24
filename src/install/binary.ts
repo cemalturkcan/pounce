@@ -59,6 +59,10 @@ function quoted(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+export function shellWord(value: string) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : quoted(value);
+}
+
 export function shellStartupFile(home: string, env: NodeJS.ProcessEnv, configHome: string) {
   const shell = path.basename(env.SHELL ?? "sh");
   const zdot = env.ZDOTDIR ?? home;
