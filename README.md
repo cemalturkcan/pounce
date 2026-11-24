@@ -1,153 +1,79 @@
 # pounce
 
-An MCP server that lets coding agents work in a real Google Chrome with a persistent, signed-in profile. It runs as one local daemon shared by every agent session on the machine.
+A fast, end-to-end browser for AI agents. pounce is an MCP server that runs one Chrome as a local daemon and shares
+it with every agent session on the machine: Claude Code, Codex, Cursor, OpenCode, Gemini CLI, VS Code, Windsurf and
+Claude Desktop, or any other MCP client.
 
-- Drives the system Chrome through [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (a Playwright fork without the usual automation leaks); `WEB_AGENT_ENGINE=playwright` switches to plain Playwright.
-- Elements are addressed by refs from accessibility snapshots; every action reports whether the page navigated, changed, or did not react.
-- Bulky output (snapshots, collected pages, screenshots, HAR files) is written to files and only paths and short indexes are returned.
-- Downloads go to the user's download folder: Chrome's download directory from the profile preferences (`download.default_directory`), else the XDG download directory (`XDG_DOWNLOAD_DIR` in `user-dirs.dirs`), else `~/Downloads`. A download the user starts in their own tab keeps its suggested name there; one in an agent's tab, or while a tool or script drives a tab, goes to its `agent` subfolder and the result reports the path. A taken name gets a number like Chrome does (`report (1).csv`).
-- `navigate`, `tabs`, `save_pages`, `ask_pages`, `screenshot`, `recording` and `run_script` also return MCP structured content, which repeats the full text in a `text` field because clients such as Claude Code show only the structured content when a result has one, plus the tab id, URLs, titles and HTTP status, tab ownership and the output directory, the collected folder with page counts and files, saved file paths, the file holding a clipped `run_script` output, and a background job's id with its log and result files. When a page dialog ends such a call early, the structured content holds only `text`. A failed `navigate` that opens a new tab and leaves its tab open on the error page also returns structured content, with that tab's id in `tab`.
-- 28 tools cover tabs (`tabs`, `navigate`), snapshots and element search (`snapshot`), text, Markdown and structured reading (`read_page`), screenshots, clicks and form filling with uploads (`fill`, including credentials from gopass without exposing them), server-side Playwright scripts and background jobs (`run_script`), bulk page collection and page saving (`save_pages`), questions over many pages answered by a small model, which also browses a page when the answer sits behind a toggle, tab, hover or same-site link (`ask_pages`), comparison of a page with a design export or baseline screenshot (`compare_design`), network inspection and HAR export (`network`), request interception, direct requests with the browser session, cookies and storage (`storage`), emulation and viewport size (`emulate`), overlay dismissal, recording a tab to an mp4 video (`recording`), per-site notes, permissions, HTTP authentication and secret names (`site`), page and server logs (`logs`), and human handoff.
+Agents open their own tabs, read pages, click, fill forms, run Playwright scripts, watch network traffic, record
+video, and ask a small model questions over many pages at once. The profile persists, so a login done once stays
+done. It can start fresh or as a copy of your own Chrome profile.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cemalturkcan/web-agent-mcp/main/install | bash
+```
+
+The script downloads the Linux binary (x64 or arm64) from GitHub Releases, checks its SHA-256, puts it in
+`~/.local/bin/pounce` and runs `pounce install`. With [Bun](https://bun.sh) 1.4.5 or newer you can run the installer
+from npm instead:
+
+```sh
+bunx pounce install
+```
+
+`pounce install` asks:
+
+1. **Agents**: which agents get the pounce MCP server (the ones found on this machine start checked). It edits each
+   agent's config in place and copies the pounce skill for agents that read skills.
+2. **ask_pages model**: your Claude Code login, an Anthropic API key, your own adapter file, or off.
+3. **Profile**: a fresh profile, or a copy of an existing Chrome, Chromium, Brave or Edge profile (close that browser
+   first).
+4. **Default browser**: whether links from other apps open in pounce (only when a display is available).
+
+It then sets up a `pounce.service` systemd user service (when `systemd --user` runs), saves the answers to
+`~/.config/pounce/config.json`, and checks that the daemon answers and Chrome starts. Every question has a flag, so it
+also runs without a terminal:
+
+```sh
+pounce install -a claude codex --ask off --profile fresh --no-desktop   # no questions
+pounce install -y                                                       # every agent found here
+pounce install --agent none                                             # print the MCP entry to add by hand
+pounce install --help
+```
+
+Then restart your agent and ask it to _"Use pounce to open news.ycombinator.com and tell me the top story."_
+
+Requirements: Linux, Google Chrome (or another Chromium-based browser through `WEB_AGENT_CHROME_EXECUTABLE`).
+Optional: `ffmpeg` for `recording`, `gopass` for stored credentials.
+
+## What agents get
+
+28 tools. The core loop is `navigate` to open a tab, `snapshot` or `read_page` to look, then `click`, `fill`,
+`press`, `hover`, `drag` or `scroll` with refs from that look. Every action reports whether the page navigated,
+changed or did not react, and any dialog, download, new tab or CAPTCHA it caused. Beyond that: `run_script` for
+server-side Playwright scripts and background jobs, `save_pages` and `ask_pages` for many pages at once,
+`compare_design` to check a page against a mockup or an earlier screenshot, `network`, `intercept` and `request` for
+traffic, `storage`, `emulate`, `recording` to mp4, `site` for per-site notes and permissions, `handoff` when a step
+needs you, and `logs`. Bulky output goes to files; results carry paths.
 
 The agent-facing guide is [`skills/pounce/SKILL.md`](skills/pounce/SKILL.md).
 
-## Requirements
+## Commands
 
-Bun 1.4.5 or newer (it runs the TypeScript sources directly, no build step) and Google Chrome. Optional: `gopass` for stored credentials, `ffmpeg` on the PATH for `recording`, a local Claude Code sign-in for the built-in model adapter used by `ask_pages` and the model layer of `compare_design`.
-
-## Run
-
-```bash
-bun install --frozen-lockfile
-bun run daemon            # HTTP daemon on http://127.0.0.1:29741/mcp
-bun run daemon:status
-bun run daemon:stop
-bun src/server.ts         # stdio mode
+```sh
+pounce mcp                    # MCP server on stdio, served by the shared daemon (started when down)
+pounce daemon start|stop|status
+pounce open [url...]          # open pages in the agent browser for yourself
+pounce import-profile [--from <user data dir>] [--profile <name>] [--live]
+pounce                        # MCP server on stdio with a browser of its own
+pounce --version
 ```
 
-Register it with Claude Code:
+Most agents connect over HTTP to `http://127.0.0.1:29741/mcp`; clients that only run stdio servers use `pounce mcp`.
 
-```bash
-claude mcp add --transport http --scope user pounce http://127.0.0.1:29741/mcp
-```
+## More
 
-The daemon only accepts requests whose `Host` and `Origin` point at its loopback endpoint.
-
-## Ask Pages
-
-The built-in adapter sends requests directly to the Anthropic Messages API. It uses the Claude account session saved by `claude auth login` in `~/.claude/.credentials.json` or in the directory set by `CLAUDE_CONFIG_DIR`; it does not read the OS keychain, so a Claude Code install that keeps the session there instead needs another adapter. Run the MCP server as the signed-in OS user. The adapter rereads the file for each call; when the session is about to expire or the API rejects it, the adapter refreshes it under the same lock Claude Code uses and saves the new tokens to that file. It implements `converse` too, so `ask_pages` can browse with it.
-
-Another adapter can replace it: an ES module (`.mjs`, or `.ts` since the server runs on Bun) that default-exports `{ name, complete(input) }` (or a function returning one). The server loads it from `WEB_AGENT_ASK_ADAPTER` when that is set, otherwise from `ask-adapter.mjs` in the config directory when that file exists (picked up without a restart), otherwise it uses the built-in adapter; `tabs` names the active one. Adapter files can `import type { AskAdapter } from "./src/ask/adapter.ts"` for the contract: `complete({ system, prompt, model, maxTokens, images?, signal })` resolves to `{ text, usage?, stopReason? }`, and `images` (`{ mediaType, data, label? }`, base64 without a `data:` prefix) are in order. `examples/ask-adapter.example.ts` shows the shape, including image blocks. It is a non-streaming sketch of the shapes only: images become base64 image blocks before the text, `stop_reason` is passed through, and its optional `converse` sends tools as `{ name, description, input_schema }` and tool results as `tool_result` blocks, keeping every response block's raw JSON so the next turn sends it back byte for byte, thinking included. `maxTokens` defaults to 128000, and requests that large need the streaming Messages API (`"stream": true`) to avoid HTTP timeouts. The repository never ships a file named `ask-adapter.mjs`; that file belongs to whoever runs the server.
-
-An adapter that also implements `converse(input)` enables browsing: after the one-shot read, pages the model could not answer from their text, or where it saw the answer behind a control (in review mode, parts that need an interaction), are opened in a tab (a page given in `tabs` is browsed in that same tab, which stays where browsing left it, and the result says what it shows now) and the same model works in them with browser tools until it calls `report`. `converse({ system, tools, messages, model, maxTokens, signal, conversationId })` resolves to `{ content, stopReason?, usage? }`; the types are in `src/ask/adapter.ts`. `tools` are `{ name, description, inputSchema }`; `messages` alternate user turns (text, image and `tool_result` blocks, every result of a turn in one message, in call order) and assistant turns (the blocks of earlier replies). System and tools are identical on every turn and messages are only appended, so earlier turns must be replayed exactly: an adapter returns each response block with its `raw` JSON and sends it back unchanged, and returns blocks it does not model, such as `thinking` (also with empty text, since the signature carries the reasoning) and `redacted_thinking`, as `{ type: "opaque", raw }`. `stopReason` carries `tool_use`, `end_turn`, `max_tokens`, `refusal`, `pause_turn`, `model_context_window_exceeded`, or `interrupted` for a stream cut short; the tools of a cut-off or refused turn are never run. An adapter without `converse` disables browsing, and `ask_pages` says so in its result.
-
-Browsing safety: the browsing model only looks. Clicks on submit controls, controls in forms with password or payment fields, download and file links, `mailto:`/`tel:`/`javascript:` links and buttons named like buy, order, pay, subscribe, sign in, register, delete, send or download (in English, Turkish, German, French and Spanish) are refused; key presses are limited to navigation keys, Enter only outside forms; `select_option` and `search` take only select boxes, radios, checkboxes and search boxes outside forms that post data; navigation and new tabs stay on the page's site (or `browse_sites`) and off checkout, cart, account and sign-in paths, and an action that lands elsewhere is sent back. Browsed tabs dismiss confirm and prompt dialogs and cancel downloads, and the caller's own tab gets its normal behaviour back when browsing ends. Each refusal is logged as `browse_blocked`, and each browsed page's transcript (system prompt, tools, one line per turn, images by sha256) is saved next to the raw replies.
-
-Adapters pass the API's `stop_reason` through as `stopReason`, so a call cut off at the output limit (`max_tokens`) or the context window (`model_context_window_exceeded`) is reported as cut off with its partial answers, a call that ended early (`interrupted`, for example at `timeout_ms`) is reported as interrupted with its partial answers, and a `refusal` is reported as a failed call. With `max_tokens` up to 128000, an adapter should use the streaming API to avoid HTTP timeouts.
-
-There are no default limits: pages are not clipped, one call takes as many pages as fit about 3 million characters (under the 1M-token context), the output limit is the model maximum (128000 tokens), and a model call has no time limit unless `timeout_ms` sets one (a client cancellation still ends it); the same holds for the model calls of `compare_design`. When a call is rejected because the prompt exceeds the context window (dense or CJK text) or the request exceeds the API size limit (many large screenshots), it is split in half and retried, down to single pages, and a page too large on its own is reported as failed. `mode: "review"` asks for visual and layout issues instead of answers and sends full-page screenshots by default. Very large calls are slower and cost more (Haiku 5.5 prompts above 100K tokens are priced higher); `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens` lower them.
-
-The `model` parameter is passed to the adapter: `haiku` (default), `sonnet` and `opus` become `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`, and any other string is passed unchanged.
-
-Pass exactly one of `files`, `dir`, `urls`, or `tabs` with your question.
-
-## Recording
-
-`recording` with `action: "start"` and a tab streams the tab's frames from Chrome's screencast (JPEG, acknowledged frame by frame) into an `ffmpeg` child process while the tab is used as usual, also when it is behind other tabs. Chrome sends a frame only when the page changes, so each frame is repeated until the next one arrives and the video is written at a constant 60 frames per second: it keeps every frame of an animation drawn at that rate and plays as long and as fast as the recording ran. Frames are fitted to the size of the first frame. There is no time limit; `stop` finishes the H.264 mp4 under `<output dir>/recordings/` (kept, not pruned) and returns its path, `durationMs` and the number of frames Chrome sent, also as structured content. Before it finishes, `stop` keeps frames Chrome took before the stop but delivered after it and ends the video on a capture of what the tab shows at that moment, so a page loaded just before `stop` is in the video; `status` lists a recording as `stopping` while its video is being finished. Closing the tab or the browser finishes the video too, and the next `stop` or `status` returns it.
-
-## Profile import
-
-With the daemon stopped, copy cookies, saved passwords, history, bookmarks and site storage from your Chrome profile into the agent profile (the previous agent profile is kept as a backup):
-
-```bash
-bun run import-profile [--from ~/.config/google-chrome] [--profile Default] [--live]
-```
-
-## Configuration
-
-The config directory is `$XDG_CONFIG_HOME/pounce` (`~/.config/pounce`); when it does not exist and `~/.config/web-agent-mcp` does, that one is used.
-
-| Variable                                                   | Default                                                                                                                             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WEB_AGENT_DAEMON_DATA_DIR` / `WEB_AGENT_DATA_DIR`         | `$XDG_DATA_HOME/pounce` (`~/.local/share/pounce`); an existing `~/.local/share/claude-code-pair/web-agent` when that does not exist | Profile, output, site notes, registry                                                                                                                                                                                                                                                                                                                                                                                           |
-| `WEB_AGENT_DAEMON_PORT`                                    | `29741`                                                                                                                             | Daemon port                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `WEB_AGENT_CHROME_USER_DATA_DIR`                           | `<data dir>/profile`                                                                                                                | The Chrome profile folder the browser runs on (config key `profileDir`)                                                                                                                                                                                                                                                                                                                                                         |
-| `WEB_AGENT_OUTPUT_DIR`                                     | `<data dir>/output`                                                                                                                 | Where bulky results go: snapshots, collected pages, screenshots, network exports, saved pages, recordings (config key `outputDir`)                                                                                                                                                                                                                                                                                              |
-| `WEB_AGENT_SITES_DIR`                                      | `<data dir>/sites`                                                                                                                  | Where `site` keeps its per-site notes (config key `sitesDir`)                                                                                                                                                                                                                                                                                                                                                                   |
-| `WEB_AGENT_DEFAULT_LOCALE`                                 | Chrome's own locale                                                                                                                 | Browser locale for every tab, such as `en-US` (config key `locale`)                                                                                                                                                                                                                                                                                                                                                             |
-| `WEB_AGENT_DEFAULT_TIMEZONE_ID`                            | the system time zone                                                                                                                | Browser time zone for every tab, such as `Europe/Istanbul` (config key `timezoneId`)                                                                                                                                                                                                                                                                                                                                            |
-| `WEB_AGENT_ENGINE`                                         | `patchright`                                                                                                                        | `patchright` or `playwright`                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `WEB_AGENT_CHROME_CHANNEL` / `WEB_AGENT_CHROME_EXECUTABLE` | `chrome`                                                                                                                            | Which browser to launch                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `WEB_AGENT_HEADLESS`                                       | headed when a display exists                                                                                                        | Force headless or headed                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `WEB_AGENT_CHROME_SANDBOX`                                 | `true`                                                                                                                              | Launch Chrome with its sandbox; `false` or `0` turns it off for containers and kernels without unprivileged user namespaces (config key `chromeSandbox`)                                                                                                                                                                                                                                                                        |
-| `WEB_AGENT_CHROME_POLICY_DIRS`                             | `/etc/opt/chrome/policies/{managed,recommended}` and `/etc/chromium/policies/{managed,recommended}`                                 | Colon-separated folders whose `*.json` policy files are searched for the `URLBlocklist`/`URLAllowlist` pattern behind an `ERR_BLOCKED_BY_ADMINISTRATOR` or `ERR_BLOCKED_BY_CLIENT` error (config key `chromePolicyDirs`)                                                                                                                                                                                                        |
-| `WEB_AGENT_PASSWORD_STORE`                                 | `gnome-libsecret`                                                                                                                   | Chrome password store, so imported cookies and passwords decrypt                                                                                                                                                                                                                                                                                                                                                                |
-| `WEB_AGENT_DEFAULT_LAUNCH_ARGS`                            |                                                                                                                                     | Extra Chrome flags, space-separated                                                                                                                                                                                                                                                                                                                                                                                             |
-| `WEB_AGENT_SECRETS`                                        | `gopass`                                                                                                                            | `gopass` or `none`                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `WEB_AGENT_CONSOLE_HOOK`                                   | `local` with `patchright`; no effect with `playwright`                                                                              | Where the `patchright` engine captures the page's own console calls: on `local` dev hosts (plus the sites where `site` turned `console_capture` on), on `all` sites, or `off`. Uncaught errors and unhandled rejections are captured on every site unless this is `off`. The `playwright` engine captures them on every site whatever this is set to. Messages Chrome logs about a page are captured everywhere on both engines |
-| `WEB_AGENT_AUTO_CONSENT`                                   | `accept`                                                                                                                            | Cookie banners on the agent's own tabs after `navigate` and `save_pages`: `accept`, `reject`, or `off`                                                                                                                                                                                                                                                                                                                          |
-| `WEB_AGENT_ASK_ADAPTER`                                    | `ask-adapter.mjs` in the config directory when it exists, else the built-in Anthropic adapter                                       | Absolute path of an ES module that replaces the model adapter of `ask_pages` and `compare_design`; see `examples/ask-adapter.example.ts`                                                                                                                                                                                                                                                                                        |
-| `WEB_AGENT_LOG_DIR`                                        | `<data dir>/logs`                                                                                                                   | Where the daemon writes its JSON Lines log (config key `logDir`)                                                                                                                                                                                                                                                                                                                                                                |
-| `WEB_AGENT_LOG_LEVEL`                                      | `info`                                                                                                                              | Lowest level written: `debug`, `info`, `warn` or `error`. `debug` adds the first 500 characters of every tool result.                                                                                                                                                                                                                                                                                                           |
-
-## Debugging
-
-The daemon writes one JSON object per line to `<data dir>/logs/daemon-YYYY-MM-DD.jsonl` (UTC days; files older than 14 days are deleted at startup and every 24 hours after). Each line has `time`, `level`, `event`, and where it applies `requestId`, `session` and `tab`. Events cover every tool call (`tool_call`: tool, duration, outcome, the first lines of an error, a summarized input), daemon start and shutdown, MCP sessions opening, closing and being swept, browser launches, failures, crashes and relaunches, tabs that crash or are closed outside a tool, background jobs, and internal faults, unhandled rejections and uncaught exceptions with their stacks, and event-loop stalls longer than 5 s. Inputs are summarized: long strings are cut, and fields such as `secret`, `password`, `text`, `value`, `code`, `script`, `expression`, `body` and `post_data` are logged only as their length, `query` keeps its keys with each value replaced by its length, and every `url` keeps its path and query keys with each query value replaced by its length. Every string passes through the same masking as tool results, so stored secrets and one-time codes do not appear.
-
-A failed tool result ends with `[req <id>]`; that id finds the matching line. Agents can read the log with the `logs` tool (`source: "server"`, `request_id`), and `tabs` shows the log directory and the errors of the last hour.
-
-```bash
-cd ~/.local/share/pounce/logs
-jq -c 'select(.requestId == "3fa91c")' daemon-*.jsonl
-jq -c 'select(.level == "error" or .level == "warn")' daemon-$(date -u +%F).jsonl | tail -20
-jq -c 'select(.event == "tool_call") | {time, tool, ms, ok}' daemon-$(date -u +%F).jsonl | tail
-jq -r 'select(.event == "tool_call") | "\(.ms)\t\(.tool)"' daemon-*.jsonl | sort -n | tail
-```
-
-Errors are also printed to stderr, so the service journal keeps them:
-
-```bash
-journalctl --user -u pounce.service -n 100
-```
-
-### Desktop launcher
-
-A launcher can start the agent's Chrome without leaving an extra blank window: `curl -fsS -X POST -H 'content-type: application/json' -d '{"url":"https://example.com"}' http://127.0.0.1:29741/open` launches Chrome if it is not running, loads the URL (or `chrome://newtab/` when `url` is omitted) in its first window, leaves that tab to the user (unclaimed) and answers `{"launched":true,"running":false,"tab":"t…","url":"…"}`. When Chrome is already running it opens nothing and answers `{"launched":false,"running":true}`, so the launcher hands the URL to the running Chrome itself. The route accepts only loopback requests, with the same Host and Origin checks as `/mcp`.
-
-## Project layout
-
-`src/server.ts` is the entry point: it parses the command line and starts stdio mode, the daemon or the profile import. The code under `src/` is grouped by feature, and each spec file sits next to the file it tests:
-
-| Folder               | Contents                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------ |
-| `src/server/`        | HTTP daemon on `Bun.serve`, server and dependency setup, event-loop watchdog                           |
-| `src/config/`        | Environment configuration and version                                                                  |
-| `src/log/`           | JSON Lines logger, fault reporting, stderr output                                                      |
-| `src/tools/`         | MCP tool definitions and their registration order                                                      |
-| `src/browser/`       | Chrome launch, profile lock, settings and import, tab manager and tab ids, network, storage, emulation |
-| `src/page/`          | Snapshots, text and Markdown reading, extraction, form filling, frames, page collection                |
-| `src/overlays/`      | Cookie consent and overlay dismissal                                                                   |
-| `src/script/`        | Worker runtime for server-side scripts, its bridge to the browser, and background jobs                 |
-| `src/ask/`           | `ask_pages` orchestration, prompts, replies, the adapter contract and adapter loading                  |
-| `src/ask/anthropic/` | Built-in Anthropic adapter: credentials and refresh, requests, stream reading                          |
-| `src/browse/`        | Browsing loop of `ask_pages`: tool table, guard, executor, transcript                                  |
-| `src/visual/`        | `compare_design`: capture, pixel diff, model review, report                                            |
-| `src/shared/`        | Helpers with no dependency on the other folders                                                        |
-
-`tests/` holds the shared test harness (msw servers, fixtures), `e2e/` the end-to-end specs and their fixture site, `eval/` the tool-choice evaluation, `examples/` an adapter example, `tools/oxlint/anti-slop/` the lint plugin and `skills/` the agent-facing guide.
-
-## Tests
-
-```bash
-bun run check            # every gate below, in order
-bun run fmt:check        # oxfmt; bun run fmt rewrites
-bun run lint             # oxlint with the anti-slop rules
-bun run typecheck
-bun run test             # unit
-bun run test:e2e         # headless Chrome against a local fixture
-WEB_AGENT_ENGINE=playwright bun run test:e2e
-```
-
-Tests run on Bun's test runner (`bun:test`); HTTP boundaries are mocked with msw. `bun run test` and `bun run test:e2e` run the spec files in one worker process per two CPU threads (8 on a 16-thread machine, each file in a fresh global); every e2e file starts its own fixture servers on ephemeral ports and its own Chrome profile in a temporary folder. `e2e/timings.json` holds per-file durations so the slowest files start first; refresh it after adding or growing a spec with `bun test --timeout 300000 e2e --parallel=8 --timings=e2e/timings.json --update-timings`. `bun run test` and the e2e specs need `pdftotext` from poppler-utils on the PATH for the PDF text cases, and the recording specs need `ffmpeg`. The e2e specs launch the installed Google Chrome. CI (`.github/workflows/ci.yml`) runs on pull requests on `ubuntu-24.04` with Bun 1.4.5: one job lints the workflow with actionlint and runs `bun run check`, another runs the e2e specs on the Playwright engine.
-
-`eval/` measures which tools Claude Code picks for plain-language tasks: `bun eval/run.ts --label after` starts the fixture site and an isolated headless daemon with a fake model adapter, runs each task in `eval/tasks.ts` through `claude -p`, and scores the first decisive tool and any detours (`--server <dir>` runs another checkout, `--only <ids>` a subset); `bun eval/score.ts eval/results before after` compares two runs. It calls the Claude Code CLI with your sign-in and is not part of `bun run test`. `bun eval/ask-this-product.ts --label after` asks the answer-mode prompt one question worded for a single product ("For this product, …") over 15 different pricing pages in one call and counts the pages that got an answer; it calls the real model through the default adapter (`--adapter <module>` and `--model` change that) and is not part of `bun run test` either. `bun eval/browse-record.ts` runs the browsing phase against the fixture's toggle, sub-page, tab and hover pages with the real adapter, prints each page's outcome and steps, and saves recordings that `e2e/browse.spec.ts` replays from `e2e/recordings/`; it also calls the real model and is not part of `bun run test`.
+- [docs/configuration.md](docs/configuration.md): `config.json`, environment variables, folders, the service, logs
+- [docs/adapters.md](docs/adapters.md): how `ask_pages` reaches a model, and writing your own adapter
+- [CONTRIBUTING.md](CONTRIBUTING.md): development setup, checks, tests and releases
