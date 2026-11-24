@@ -988,8 +988,38 @@ let stalled = 0;
 
 export const stallRequests = () => stalled;
 
+export const HELD_DOCUMENT_MS = 1500;
+
+function heldDocument() {
+  return new Response(
+    new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            `<!doctype html><html><head><title>Held</title></head><body><h1>Held</h1>${" ".repeat(4096)}`,
+          ),
+        );
+        await Bun.sleep(HELD_DOCUMENT_MS);
+        controller.enqueue(encoder.encode("<p>Rest</p></body></html>"));
+        controller.close();
+      },
+    }),
+    { headers: { "content-type": "text/html; charset=utf-8" } },
+  );
+}
+
 export function edgeCaseResponse(request: Request, url: URL) {
   const { pathname } = url;
+  if (pathname === "/held-document") return heldDocument();
+  if (pathname === "/cached-script")
+    return new Response(EDGE_HTML("Cached Script", `<script src="/cached.js"></script>`), {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  if (pathname === "/cached.js")
+    return new Response("window.cachedScript = true;", {
+      headers: { "content-type": "text/javascript", "cache-control": "max-age=3600" },
+    });
   if (pathname === "/zstd") {
     const body = Buffer.from(
       JSON.stringify({

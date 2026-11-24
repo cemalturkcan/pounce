@@ -26,7 +26,7 @@ import {
   refFromEarlierPage,
   shownFramePlace,
 } from "./ref-check.ts";
-import { launchOptions, loadChromium, sandboxLaunchError } from "./launch.ts";
+import { launchOptions, loadChromium, sandboxLaunchError, skipInjectRoute } from "./launch.ts";
 import { belongsElsewhere, nextFrame, RenderKeeper } from "./foreground.ts";
 import {
   ConsoleHookScript,
@@ -193,6 +193,7 @@ export class BrowserManager {
 
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+    if (config.engine === "patchright") skipInjectRoute(context);
     await this.consoleHook.apply(context, await consoleCaptureSites(config.sitesDir));
     await context.addInitScript(installPasskeyHook, PASSKEY_KEY);
     await this.profile.apply(context);
