@@ -108,7 +108,10 @@ export function writeEntry(
   if (existing !== undefined && Bun.deepEquals(existing, entry, true)) return "unchanged";
   if (existing !== undefined && (owned === undefined || !Bun.deepEquals(existing, owned, true)))
     return "conflict";
-  const after = edit(target.format, before ?? "", keys, entry);
+  const after =
+    before === undefined && target.format === "json"
+      ? `${JSON.stringify(withValue(current, keys, entry), null, 2)}\n`
+      : edit(target.format, before ?? "", keys, entry);
   if (!Bun.deepEquals(parse(target.format, after), withValue(current, keys, entry), true))
     return "conflict";
   replaceFile(target.file, after, before);

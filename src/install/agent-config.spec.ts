@@ -239,3 +239,12 @@ describe("a symlinked config", () => {
     });
   });
 });
+
+test("a new JSON config is written indented", async () => {
+  const agent = spec("gemini");
+  write(agent);
+
+  expect(await readFile(agent.target.file, "utf8")).toBe(
+    `${JSON.stringify({ mcpServers: { pounce: { httpUrl: ENDPOINT } } }, null, 2)}\n`,
+  );
+});
