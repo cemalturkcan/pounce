@@ -248,3 +248,74 @@ test("a new JSON config is written indented", async () => {
     `${JSON.stringify({ mcpServers: { pounce: { httpUrl: ENDPOINT } } }, null, 2)}\n`,
   );
 });
+
+describe("a Codex entry pounce wrote that the user rewrote in another TOML form", () => {
+  const OLD = { url: "http://127.0.0.1:1/mcp" };
+  const forms = [
+    ["a quoted table name", '[mcp_servers."pounce"]\nurl = "http://127.0.0.1:1/mcp"\n'],
+    ["an inline table", '[mcp_servers]\npounce = { url = "http://127.0.0.1:1/mcp" }\n'],
+  ] as const;
+  for (const [form, text] of forms) {
+    test(`as ${form} is reported for a manual update`, async () => {
+      const agent = spec("codex");
+      await mkdir(path.dirname(agent.target.file), { recursive: true });
+      await writeFile(agent.target.file, text);
+
+      expect(write(agent, OLD)).toBe("manual");
+    });
+
+    test(`as ${form} is left unchanged`, async () => {
+      const agent = spec("codex");
+      await mkdir(path.dirname(agent.target.file), { recursive: true });
+      await writeFile(agent.target.file, text);
+      write(agent, OLD);
+
+      expect(await readFile(agent.target.file, "utf8")).toBe(text);
+    });
+  }
+});
+
+describe("a JSON config that holds only a comment", () => {
+  test("gets the entry", async () => {
+    const agent = spec("claude");
+    await writeFile(agent.target.file, "// nothing yet\n");
+    write(agent);
+
+    expect(await written(agent)).toStrictEqual({
+      mcpServers: { pounce: { type: "http", url: ENDPOINT } },
+    });
+  });
+
+  test("keeps the comment", async () => {
+    const agent = spec("claude");
+    await writeFile(agent.target.file, "// nothing yet\n");
+    write(agent);
+
+    expect(await readFile(agent.target.file, "utf8")).toStartWith("// nothing yet\n");
+  });
+});
+
+async function danglingLink() {
+  const agent = spec("windsurf");
+  const real = path.join(home, "dotfiles", "windsurf", "mcp_config.json");
+  await mkdir(path.dirname(agent.target.file), { recursive: true });
+  await symlink(path.relative(path.dirname(agent.target.file), real), agent.target.file);
+  write(agent);
+  return { agent, real };
+}
+
+describe("a symlinked config whose target does not exist yet", () => {
+  test("stays a symlink", async () => {
+    const { agent } = await danglingLink();
+
+    expect((await lstat(agent.target.file)).isSymbolicLink()).toBe(true);
+  });
+
+  test("gets the entry written at the link's target", async () => {
+    const { real } = await danglingLink();
+
+    expect(parseJsonc(await readFile(real, "utf8"))).toStrictEqual({
+      mcpServers: { pounce: { serverUrl: ENDPOINT } },
+    });
+  });
+});

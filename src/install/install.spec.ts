@@ -358,6 +358,20 @@ describe("re-running install", () => {
     });
   });
 
+  test("notes a Codex entry it wrote that the user rewrote as an inline table", async () => {
+    await runInstall(["-a", "codex", "--ask", "off", "--profile", "fresh"]);
+    await writeFile(
+      at(".codex", "config.toml"),
+      '[mcp_servers]\npounce = { url = "http://127.0.0.1:29999/mcp" }\n',
+    );
+    output = [];
+    await runInstall(["-a", "codex", "--ask", "off", "--profile", "fresh"], {
+      env: { WEB_AGENT_DAEMON_PORT: "29998" },
+    });
+
+    expect(printed()).toContain("form pounce does not rewrite");
+  });
+
   test("leaves a pounce entry someone else wrote and exits 1", async () => {
     await writeFile(
       at(".claude.json"),

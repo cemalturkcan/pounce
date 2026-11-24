@@ -239,6 +239,14 @@ function configureAgent(
       );
       return false;
     }
+    if (outcome === "manual") {
+      run.io.print(
+        warn(
+          `${spec.label}'s pounce entry in ${where} is written in a form pounce does not rewrite, so it was left unchanged; set it to ${JSON.stringify(entry)} by hand.`,
+        ),
+      );
+      return false;
+    }
     entries[spec.name] = entry;
     run.io.print(
       ok(

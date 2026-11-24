@@ -5,7 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
@@ -24,7 +24,7 @@ export type EntryTarget = {
   keys: (current: JsonValue) => string[];
 };
 
-export type WriteOutcome = "added" | "updated" | "unchanged" | "conflict";
+export type WriteOutcome = "added" | "updated" | "unchanged" | "conflict" | "manual";
 
 const jsonObject = z.record(z.string(), z.json());
 
@@ -48,13 +48,23 @@ function withValue(root: JsonValue, keys: readonly string[], value: JsonValue): 
   return { ...base, [key]: withValue(base[key] ?? {}, rest, value) };
 }
 
-function realTarget(file: string) {
+function isSymlink(file: string) {
   try {
-    if (lstatSync(file).isSymbolicLink()) return realpathSync(file);
+    return lstatSync(file).isSymbolicLink();
   } catch {
-    return file;
+    return false;
   }
-  return file;
+}
+
+function realTarget(file: string) {
+  const seen = new Set<string>();
+  let current = file;
+  while (isSymlink(current)) {
+    if (seen.has(current)) throw new ConfigEditError(`${file} is a symlink loop.`);
+    seen.add(current);
+    current = path.resolve(path.dirname(current), readlinkSync(current));
+  }
+  return current;
 }
 
 function replaceFile(file: string, text: string, before: string | undefined) {
@@ -79,6 +89,14 @@ function replaceFile(file: string, text: string, before: string | undefined) {
 
 function parse(format: ConfigFormat, text: string) {
   return format === "toml" ? parseToml(text) : parseJsonc(text);
+}
+
+function reparsed(format: ConfigFormat, text: string) {
+  try {
+    return parse(format, text);
+  } catch {
+    return undefined;
+  }
 }
 
 function edit(format: ConfigFormat, text: string, keys: string[], entry: JsonValue) {
@@ -112,8 +130,8 @@ export function writeEntry(
     before === undefined && target.format === "json"
       ? `${JSON.stringify(withValue(current, keys, entry), null, 2)}\n`
       : edit(target.format, before ?? "", keys, entry);
-  if (!Bun.deepEquals(parse(target.format, after), withValue(current, keys, entry), true))
-    return "conflict";
+  if (!Bun.deepEquals(reparsed(target.format, after), withValue(current, keys, entry), true))
+    return "manual";
   replaceFile(target.file, after, before);
   return existing === undefined ? "added" : "updated";
 }

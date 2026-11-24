@@ -198,8 +198,18 @@ function insertMember(
   return `${text.slice(0, last.value.end)},${comment}\n${memberIndent}${member}${text.slice(at)}`;
 }
 
+function onlyTrivia(text: string) {
+  const scanner = new Scanner(text);
+  scanner.skipTrivia();
+  return scanner.position === text.length;
+}
+
+function withEmptyObject(text: string) {
+  return `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}{}\n`;
+}
+
 export function setJsoncMember(text: string, keys: readonly string[], value: JsonValue): string {
-  const source = text.trim() === "" ? "{}\n" : text;
+  const source = onlyTrivia(text) ? withEmptyObject(text.trim() === "" ? "" : text) : text;
   let object = parseTree(source);
   let depth = 0;
   for (; depth < keys.length - 1; depth += 1) {
@@ -223,7 +233,7 @@ export function setJsoncMember(text: string, keys: readonly string[], value: Jso
 }
 
 export function parseJsonc(text: string): JsonValue {
-  if (text.trim() === "") return {};
+  if (onlyTrivia(text)) return {};
   parseTree(text);
   return jsonValue.parse(Bun.JSONC.parse(text));
 }
