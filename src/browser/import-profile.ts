@@ -158,7 +158,7 @@ export async function importProfile(
   if (!(await exists(sourceDir))) throw new Error(`Source profile not found: ${sourceDir}`);
   if (await daemonRunning()) {
     throw new Error(
-      "The pounce daemon is running and owns the agent profile. Stop it first (bun run daemon:stop or systemctl --user stop).",
+      "The pounce daemon is running and owns the agent profile. Stop it first with `pounce daemon stop` (or `systemctl --user stop` for its service).",
     );
   }
   if (!options.live && (await sourceChromeRunning(options.from))) {

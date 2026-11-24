@@ -67,21 +67,66 @@ function readRegistry(config: Config): DaemonRegistry | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-async function answersAs(registry: DaemonRegistry) {
+type HealthAnswer = "ours" | "other" | "silent";
+
+async function healthAnswer(registry: DaemonRegistry): Promise<HealthAnswer> {
   try {
     const response = await fetch(`http://127.0.0.1:${registry.port}/healthz`, {
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
     });
     const parsed = parseJson(await response.text(), healthReport);
-    return parsed.success && parsed.data.pid === registry.pid;
+    return parsed.success && parsed.data.pid === registry.pid ? "ours" : "other";
+  } catch (cause) {
+    return cause instanceof Error && cause.name === "TimeoutError" ? "silent" : "other";
+  }
+}
+
+function isAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
   } catch {
     return false;
   }
 }
 
-export async function runningDaemon(config: Config) {
+async function portAccepts(port: number) {
+  try {
+    const socket = await Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {} } });
+    socket.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type DaemonState = "running" | "not responding" | "stopped";
+
+export async function daemonPresence(
+  config: Config,
+): Promise<{ state: DaemonState; registry?: DaemonRegistry }> {
   const registry = readRegistry(config);
-  return registry && (await answersAs(registry)) ? registry : undefined;
+  if (!registry) return { state: "stopped" };
+  const answer = await healthAnswer(registry);
+  if (answer === "ours") return { state: "running", registry };
+  if (answer === "silent" && isAlive(registry.pid) && (await portAccepts(registry.port)))
+    return { state: "not responding", registry };
+  return { state: "stopped", registry };
+}
+
+export async function runningDaemon(config: Config) {
+  const presence = await daemonPresence(config);
+  return presence.state === "running" ? presence.registry : undefined;
+}
+
+export async function daemonHoldsProfile(config: Config) {
+  return (await daemonPresence(config)).state !== "stopped";
+}
+
+export function refuseSecondDaemon(state: DaemonState, registry: DaemonRegistry) {
+  return state === "running"
+    ? `A daemon is already running at ${registry.endpoint} (pid ${registry.pid}). Stop it first with \`pounce daemon stop\`.`
+    : `The daemon at ${registry.endpoint} (pid ${registry.pid}) is not responding; stop that process before starting another daemon.`;
 }
 
 function json(status: number, body: JsonValue, headers: Record<string, string> = {}) {
@@ -302,9 +347,10 @@ export async function startDaemon(
 }
 
 export async function daemonStatus(config: Config) {
-  const registry = readRegistry(config);
+  const { state, registry } = await daemonPresence(config);
   return {
-    running: registry !== undefined && (await answersAs(registry)),
+    running: state === "running",
+    state,
     endpoint: registry?.endpoint ?? config.endpoint,
     registry,
   };

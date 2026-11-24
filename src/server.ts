@@ -12,7 +12,14 @@ import {
 import { writeStderr } from "./log/stderr.ts";
 import { normalizeUrl } from "./page/collect.ts";
 import { loadConfig } from "./config/config.ts";
-import { daemonStatus, runningDaemon, startDaemon, stopDaemon } from "./server/daemon.ts";
+import {
+  daemonHoldsProfile,
+  daemonPresence,
+  daemonStatus,
+  refuseSecondDaemon,
+  startDaemon,
+  stopDaemon,
+} from "./server/daemon.ts";
 import { createDeps, createServer, startPruning } from "./server/setup.ts";
 import { startLoopWatchdog } from "./server/watchdog.ts";
 import { installProcessGuards } from "./log/faults.ts";
@@ -42,11 +49,7 @@ async function main() {
         renderImportReport(
           config,
           options,
-          await importProfile(
-            config,
-            options,
-            async () => (await runningDaemon(config)) !== undefined,
-          ),
+          await importProfile(config, options, () => daemonHoldsProfile(config)),
         ),
       );
     } catch (cause) {
@@ -58,11 +61,8 @@ async function main() {
   }
 
   if (args.includes("--daemon")) {
-    const running = await runningDaemon(config);
-    if (running)
-      throw new Error(
-        `A daemon is already running at ${running.endpoint} (pid ${running.pid}). Stop it first with --daemon-stop.`,
-      );
+    const { state, registry } = await daemonPresence(config);
+    if (registry && state !== "stopped") throw new Error(refuseSecondDaemon(state, registry));
   }
 
   const deps = createDeps(config);

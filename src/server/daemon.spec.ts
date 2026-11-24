@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,7 +10,14 @@ import { PACKAGE_DIR } from "../config/version.ts";
 import { loadConfig } from "../config/config.ts";
 import { daemonStatus, isAllowedHost, isAllowedOrigin, stopDaemon } from "./daemon.ts";
 import { sleep } from "../shared/async.ts";
-import { freePort, healthy, type SpawnedDaemon, spawnDaemon } from "../../tests/daemon.ts";
+import {
+  freePort,
+  healthy,
+  runServer,
+  SOURCE_SERVER,
+  type SpawnedDaemon,
+  spawnDaemon,
+} from "../../tests/daemon.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const FORBIDDEN_MESSAGE =
@@ -232,6 +239,73 @@ test("stopDaemon leaves the registered pid alive when the registered port answer
     await sleep(200);
 
     expect(isAlive(pid)).toBe(true);
+  });
+});
+
+async function withStalledListener(check: (pid: number, port: number) => Promise<void>) {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      'const l = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }); console.log(l.port); setInterval(() => {}, 100000);',
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  try {
+    const reader = child.stdout.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    await check(child.pid, Number(new TextDecoder().decode(value).trim()));
+  } finally {
+    child.kill();
+  }
+}
+
+describe("a registered daemon that holds its port but does not answer", () => {
+  test("daemonStatus says it is not responding", async () => {
+    await withStalledListener(async (pid, port) => {
+      expect((await daemonStatus(await configWithRegistry(pid, port))).state).toBe(
+        "not responding",
+      );
+    });
+  });
+
+  test("daemonStatus does not call it running", async () => {
+    await withStalledListener(async (pid, port) => {
+      expect((await daemonStatus(await configWithRegistry(pid, port))).running).toBe(false);
+    });
+  });
+
+  test("a second daemon refuses to start", async () => {
+    await withStalledListener(async (pid, port) => {
+      const config = await configWithRegistry(pid, port);
+      const result = await runServer(SOURCE_SERVER, config.dataDir, port, ["--daemon"]);
+
+      expect(result.stderr).toContain(`(pid ${pid}) is not responding`);
+    });
+  });
+
+  test("import-profile refuses to replace the profile", async () => {
+    await withStalledListener(async (pid, port) => {
+      const config = await configWithRegistry(pid, port);
+      const source = await mkdtemp(path.join(workDir, "source-"));
+      await mkdir(path.join(source, "Default"));
+      const result = await runServer(SOURCE_SERVER, config.dataDir, port, [
+        "--import-profile",
+        "--from",
+        source,
+      ]);
+
+      expect(result.stderr).toContain("daemon is running");
+    });
+  });
+});
+
+test("daemonStatus says stopped when nothing answers on the registered port", async () => {
+  await withSleeper(async (pid) => {
+    const config = await configWithRegistry(pid, freePort());
+
+    expect((await daemonStatus(config)).state).toBe("stopped");
   });
 });
 
