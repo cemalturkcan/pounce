@@ -113,3 +113,15 @@ describe("pounce mcp when its client goes away", () => {
     expect(closed).toBe(true);
   }, 40_000);
 });
+
+describe("two pounce mcp started at once with no daemon", () => {
+  test("both are served by one daemon", async () => {
+    const { env } = await isolatedEnv();
+    const clients = await Promise.all([proxyClient(env), proxyClient(env)]);
+    const listed = await Promise.all(
+      clients.map(async (client) => (await client.listTools()).tools.length > 0),
+    );
+
+    expect(listed).toStrictEqual([true, true]);
+  }, 60_000);
+});
