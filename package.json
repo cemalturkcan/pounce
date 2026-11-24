@@ -1,11 +1,17 @@
 {
   "name": "pounce",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Browser automation MCP server: one persistent Chrome profile, ref-based targeting, bulk page collection, and server-side scripting.",
   "bin": {
     "pounce": "src/server.ts"
   },
+  "files": [
+    "src",
+    "!src/**/*.spec.ts",
+    "skills/pounce/SKILL.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "type": "module",
   "scripts": {
     "daemon": "bun src/server.ts --daemon",

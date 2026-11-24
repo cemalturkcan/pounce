@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+REPO=cemalturkcan/web-agent-mcp
+RELEASE_BASE=https://github.com/$REPO/releases
+
+RED='\033[0;31m'
+MUTED='\033[0;2m'
+NC='\033[0m'
+
+usage() {
+    cat <<EOF
+pounce installer
+
+Usage: install [options] [pounce install options]
+
+Options:
+    -h, --help              Show this help
+    -v, --version <version> Install a specific release (e.g. v0.3.0) instead of the latest
+
+Anything else goes to \`pounce install\`, e.g. -a claude, --ask off, --profile fresh or --no-modify-path.
+
+Examples:
+    curl -fsSL https://raw.githubusercontent.com/$REPO/main/install | bash
+    curl -fsSL https://raw.githubusercontent.com/$REPO/main/install | bash -s -- -a claude --ask off
+EOF
+}
+
+fail() {
+    printf '%b\n' "${RED}pounce: $*${NC}" >&2
+    exit 1
+}
+
+version=""
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+    remaining=$((remaining - 1))
+    case "$1" in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        -v | --version)
+            [ "$remaining" -gt 0 ] && [ -n "${2:-}" ] || fail "--version needs a version, e.g. v0.3.0"
+            version=$2
+            remaining=$((remaining - 1))
+            shift 2
+            ;;
+        *)
+            set -- "$@" "$1"
+            shift
+            ;;
+    esac
+done
+
+[ "$(uname -s)" = "Linux" ] || fail "this installer supports Linux only for now"
+case "$(uname -m)" in
+    x86_64 | amd64) arch=x64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) fail "unsupported CPU architecture $(uname -m)" ;;
+esac
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    else
+        fail "sha256sum or shasum is required to verify the download"
+    fi
+}
+
+if [ -n "$version" ]; then
+    case "$version" in v*) ;; *) version="v$version" ;; esac
+    base="$RELEASE_BASE/download/$version"
+else
+    base="$RELEASE_BASE/latest/download"
+fi
+
+asset="pounce-linux-$arch"
+install_dir=${XDG_BIN_HOME:-$HOME/.local/bin}
+case "$install_dir" in
+    /*) ;;
+    *) install_dir=$HOME/.local/bin ;;
+esac
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pounce-install.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+printf '%b\n' "${MUTED}Downloading ${NC}$asset${MUTED} from ${NC}$base"
+curl -fL --progress-bar -o "$tmp_dir/$asset" "$base/$asset" || fail "could not download $base/$asset"
+curl -fsSL -o "$tmp_dir/SHA256SUMS" "$base/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
+
+expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$tmp_dir/SHA256SUMS")
+actual=$(sha256 "$tmp_dir/$asset")
+[ -n "$expected" ] || fail "SHA256SUMS has no line for $asset; nothing was installed"
+[ "$expected" = "$actual" ] || fail "checksum mismatch for $asset (expected $expected, got $actual); nothing was installed"
+
+mkdir -p "$install_dir"
+mv "$tmp_dir/$asset" "$install_dir/pounce.new"
+chmod 755 "$install_dir/pounce.new"
+mv -f "$install_dir/pounce.new" "$install_dir/pounce"
+rm -rf "$tmp_dir"
+trap - EXIT
+
+printf '%b\n\n' "${MUTED}Installed ${NC}$install_dir/pounce"
+if [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+    exec "$install_dir/pounce" install "$@" </dev/tty
+fi
+exec "$install_dir/pounce" install "$@"
