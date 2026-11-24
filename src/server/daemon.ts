@@ -29,7 +29,7 @@ const daemonRegistry = z.object({
 });
 export type DaemonRegistry = z.infer<typeof daemonRegistry>;
 
-const healthReport = z.object({ pid: z.number() });
+const healthReport = z.object({ pid: z.number().optional(), endpoint: z.string().optional() });
 
 const jsonValue = z.json();
 type JsonValue = z.infer<typeof jsonValue>;
@@ -75,7 +75,13 @@ async function healthAnswer(registry: DaemonRegistry): Promise<HealthAnswer> {
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
     });
     const parsed = parseJson(await response.text(), healthReport);
-    return parsed.success && parsed.data.pid === registry.pid ? "ours" : "other";
+    if (!parsed.success) return "other";
+    const { pid, endpoint } = parsed.data;
+    const ours =
+      pid === undefined
+        ? endpoint === registry.endpoint && isAlive(registry.pid)
+        : pid === registry.pid;
+    return ours ? "ours" : "other";
   } catch (cause) {
     return cause instanceof Error && cause.name === "TimeoutError" ? "silent" : "other";
   }

@@ -8,7 +8,14 @@ import { z } from "zod";
 import { parseJsonOrThrow } from "../shared/decode.ts";
 import { PACKAGE_DIR } from "../config/version.ts";
 import { loadConfig } from "../config/config.ts";
-import { daemonStatus, isAllowedHost, isAllowedOrigin, stopDaemon } from "./daemon.ts";
+import {
+  daemonHoldsProfile,
+  daemonStatus,
+  isAllowedHost,
+  isAllowedOrigin,
+  runningDaemon,
+  stopDaemon,
+} from "./daemon.ts";
 import { sleep } from "../shared/async.ts";
 import {
   freePort,
@@ -371,4 +378,67 @@ test("host and origin validation only accepts the loopback endpoint", () => {
   expect(isAllowedOrigin("http://127.0.0.1:29741", 29741)).toBe(true);
   expect(isAllowedOrigin("https://evil.example", 29741)).toBe(false);
   expect(isAllowedOrigin("null", 29741)).toBe(false);
+});
+
+async function registryFor(reply: (endpoint: string) => Response) {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "pounce-presence-"));
+  let endpoint = "";
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => reply(endpoint) });
+  const config = loadConfig({
+    HOME: dataDir,
+    WEB_AGENT_DAEMON_DATA_DIR: dataDir,
+    WEB_AGENT_DAEMON_PORT: String(server.port),
+  });
+  endpoint = config.endpoint;
+  await writeFile(
+    config.registryPath,
+    JSON.stringify({
+      pid: process.pid,
+      endpoint: config.endpoint,
+      port: server.port,
+      dataDir,
+      profileDir: config.profileDir,
+      startedAt: new Date().toISOString(),
+      version: "0.2.0",
+    }),
+  );
+  return {
+    config,
+    cleanup: async () => {
+      await server.stop(true);
+      await rm(dataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("a daemon from before /healthz reported its pid", () => {
+  test("is seen as running", async () => {
+    const { config, cleanup } = await registryFor((endpoint) =>
+      Response.json({ ok: true, endpoint, version: "0.2.0" }),
+    );
+    const running = await runningDaemon(config);
+    await cleanup();
+
+    expect(running?.pid).toBe(process.pid);
+  });
+
+  test("holds the profile, so import-profile does not copy over it", async () => {
+    const { config, cleanup } = await registryFor((endpoint) =>
+      Response.json({ ok: true, endpoint, version: "0.2.0" }),
+    );
+    const holds = await daemonHoldsProfile(config);
+    await cleanup();
+
+    expect(holds).toBe(true);
+  });
+});
+
+test("another server on the registry's port is not taken for the daemon", async () => {
+  const { config, cleanup } = await registryFor(() =>
+    Response.json({ ok: true, endpoint: "http://127.0.0.1:1/mcp" }),
+  );
+  const running = await runningDaemon(config);
+  await cleanup();
+
+  expect(running).toBe(undefined);
 });
