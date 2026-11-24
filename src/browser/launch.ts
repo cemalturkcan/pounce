@@ -1,4 +1,4 @@
-import type { BrowserType } from "playwright-core";
+import type { BrowserContext, BrowserType } from "playwright-core";
 import { LEGACY_SERVICE, SERVICE_NAME } from "../cli/daemon-control.ts";
 import type { Runner } from "../cli/process.ts";
 import type { Config } from "../config/config.ts";
@@ -20,6 +20,11 @@ async function loadEngine(engine: Config["engine"]) {
   const playwright = module as typeof import("playwright-core");
   await playwright.selectors.register(REF_ENGINE, refEngineSource(), { contentScript: true });
   return playwright.chromium;
+}
+
+export function skipInjectRoute(context: BrowserContext) {
+  // SAFETY: patchright installs a catch-all context route for init scripts that disables the HTTP cache and holds every document of every tab until its whole body has arrived, while the scripts are already registered over CDP when each page attaches; marking the route as installed keeps it off.
+  Object.assign(context, { routeInjecting: true });
 }
 
 const SANDBOX_FAILURE = /no usable sandbox|setuid sandbox|suid sandbox|namespace/i;
