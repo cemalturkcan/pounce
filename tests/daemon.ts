@@ -72,7 +72,7 @@ export async function spawnDaemon(
   serverDir = PACKAGE_DIR,
   server: readonly string[] = SOURCE_SERVER,
 ): Promise<SpawnedDaemon> {
-  const port = freePort();
+  const port = env.WEB_AGENT_DAEMON_PORT ? Number(env.WEB_AGENT_DAEMON_PORT) : freePort();
   let stderr = "";
   const [command = "", ...rest] = server;
   const child = spawn(command, [...rest, "--daemon"], {

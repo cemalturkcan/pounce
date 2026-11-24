@@ -264,6 +264,28 @@ describe("a second daemon on the data dir of a running one", () => {
   });
 });
 
+describe("a second daemon on the port of a running one", () => {
+  let second: SpawnedDaemon;
+
+  beforeAll(async () => {
+    second = await spawnDaemon(await mkdtemp(path.join(workDir, "other-")), {
+      WEB_AGENT_DAEMON_PORT: String(daemon.port),
+    });
+  });
+
+  afterAll(async () => {
+    await second?.stop();
+  });
+
+  test("refuses to start", () => {
+    expect(second.process.exitCode, second.stderr()).toBe(1);
+  });
+
+  test("says the port is in use", () => {
+    expect(second.stderr()).toContain(`Is port ${daemon.port} in use?`);
+  });
+});
+
 test("host and origin validation only accepts the loopback endpoint", () => {
   expect(isAllowedHost("127.0.0.1:29741", 29741)).toBe(true);
   expect(isAllowedHost("localhost:29741", 29741)).toBe(true);

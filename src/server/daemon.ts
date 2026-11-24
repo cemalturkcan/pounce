@@ -220,6 +220,7 @@ export async function startDaemon(
   const httpServer = Bun.serve({
     hostname: config.host,
     port: config.port,
+    reusePort: false,
     idleTimeout: IDLE_TIMEOUT_S,
     development: false,
     fetch: async (request) => {
