@@ -321,6 +321,20 @@ describe("choosing agents without a terminal", () => {
     ]).toStrictEqual([true, true]);
   });
 
+  test("-y run by an agent configures every detected agent", async () => {
+    await mkdir(at(".codex"), { recursive: true });
+    await runInstall(["-y", "--ask", "off"], { env: { CLAUDECODE: "1" } });
+
+    expect(existsSync(at(".codex", "config.toml"))).toBe(true);
+  });
+
+  test("-y run by an agent also configures that agent", async () => {
+    await mkdir(at(".codex"), { recursive: true });
+    await runInstall(["-y", "--ask", "off"], { env: { CLAUDECODE: "1" } });
+
+    expect(existsSync(at(".claude.json"))).toBe(true);
+  });
+
   test("an unknown agent name is a usage error", async () => {
     expect(await runInstall(["-a", "notepad"])).toBe(2);
   });

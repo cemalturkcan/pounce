@@ -204,8 +204,9 @@ function agentPlan(run: Run, specs: AgentSpec[]) {
   if (flags.none) return { picker: false, selected: [] };
   if (flags.agents.length) return { picker: false, selected: flags.agents };
   const caller = callingAgent(io.env);
+  if (flags.yes)
+    return { picker: false, selected: [...new Set([...detected, ...(caller ? [caller] : [])])] };
   if (caller) return { picker: false, selected: [caller], caller };
-  if (flags.yes) return { picker: false, selected: detected };
   if (!io.tty) return { picker: false, selected: [], undetected: true };
   const remembered = run.settings.agents?.flatMap((name) => agentName(name) ?? []);
   return { picker: true, selected: remembered?.length ? remembered : detected };
