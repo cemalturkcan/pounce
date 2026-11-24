@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pounce",
+      "name": "@cemalturkcann/pounce",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.32.2",
         "patchright": "1.64.3",

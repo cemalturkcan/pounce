@@ -257,7 +257,7 @@ describe("install run from bunx's cache", () => {
   test("tells the user to install pounce globally first", async () => {
     await runInstall(BASIC, { source: BUNX_SOURCE });
 
-    expect(printed()).toContain("run `bun add -g pounce`, then `pounce install`");
+    expect(printed()).toContain("run `bun add -g @cemalturkcann/pounce`, then `pounce install`");
   });
 
   test("writes nothing to the home directory", async () => {

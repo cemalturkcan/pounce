@@ -19,7 +19,7 @@ The script downloads the Linux binary (x64 or arm64) from GitHub Releases, check
 npm instead:
 
 ```sh
-bun add -g pounce && pounce install
+bun add -g @cemalturkcann/pounce && pounce install
 ```
 
 `pounce install` asks:

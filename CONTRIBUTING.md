@@ -77,6 +77,6 @@ builds `pounce-linux-x64` and `pounce-linux-arm64` with `bun run build:binary`, 
 the GitHub release, which is what the `install` script downloads. It runs no tests, so run `bun run check` before
 tagging. `bun run build:binary` builds the same binaries locally into `dist/`.
 
-The npm package (`bun add -g pounce`) is published by hand from the same commit with `npm publish`, which needs an npm login.
+The npm package (`bun add -g @cemalturkcann/pounce`) is published by hand from the same commit with `npm publish`, which needs an npm login.
 `npm pack` shows what goes into it: `src/` without the spec files, `skills/pounce/SKILL.md`, the README and the
 notices.

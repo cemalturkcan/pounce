@@ -677,7 +677,7 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
   if (io.sourceCommand.some(inBunxCache)) {
     io.print(
       bad(
-        "pounce install cannot run from bunx's temporary cache; run `bun add -g pounce`, then `pounce install`.",
+        "pounce install cannot run from bunx's temporary cache; run `bun add -g @cemalturkcann/pounce`, then `pounce install`.",
       ),
     );
     return 1;
