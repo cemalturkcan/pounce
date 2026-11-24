@@ -48,7 +48,9 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
   let closing = false;
   let recovery: Promise<StreamableHTTPClientTransport> | undefined;
   const replays = new Map<RequestId, () => void>();
-  let failReplay: ((error: Error) => void) | undefined;
+  let pendingReplay:
+    | { transport: StreamableHTTPClientTransport; fail: (error: Error) => void }
+    | undefined;
 
   function forward(transport: StreamableHTTPClientTransport, message: JSONRPCMessage) {
     const id =
@@ -76,7 +78,7 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
       onmessage: (message: JSONRPCMessage) => forward(transport, message),
       onerror: (error: Error) => {
         writeStderr(`pounce mcp: ${error.message}`);
-        failReplay?.(error);
+        if (pendingReplay?.transport === transport) pendingReplay.fail(error);
       },
     });
     await transport.start();
@@ -90,14 +92,13 @@ export async function proxyStdioToDaemon(connect: () => Promise<string>): Promis
     const id = `pounce-reconnect-${reconnects}`;
     const reply = new Promise<void>((resolve, reject) => {
       replays.set(id, resolve);
-      failReplay = reject;
+      pendingReplay = { transport, fail: reject };
     });
     try {
-      await transport.send({ ...initialize, id });
-      await reply;
+      await Promise.all([transport.send({ ...initialize, id }), reply]);
     } finally {
       replays.delete(id);
-      failReplay = undefined;
+      pendingReplay = undefined;
     }
     if (protocolVersion) transport.setProtocolVersion(protocolVersion);
     if (initialized) await transport.send(initialized);

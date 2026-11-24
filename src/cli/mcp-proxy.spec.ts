@@ -162,6 +162,36 @@ describe("pounce mcp after its daemon stopped", () => {
   }, 60_000);
 });
 
+describe("pounce mcp with several requests in flight when the daemon went away", () => {
+  const SPREAD = 20;
+  const sendTogether = async (client: Awaited<ReturnType<typeof proxyClient>>) => {
+    const requests = Array.from({ length: SPREAD }, async (_, index) => {
+      await Bun.sleep(index * 100);
+      return (await client.listTools()).tools.length > 0;
+    });
+    return (await Promise.all(requests)).filter(Boolean).length;
+  };
+
+  test("answers all of them after a restart", async () => {
+    const { env, config } = await isolatedEnv();
+    const client = await proxyClient(env);
+    await client.listTools();
+    await stopAndWait(config);
+    await ensureDaemon(config, env);
+
+    expect(await sendTogether(client)).toBe(SPREAD);
+  }, 60_000);
+
+  test("answers all of them after a stop", async () => {
+    const { env, config } = await isolatedEnv();
+    const client = await proxyClient(env);
+    await client.listTools();
+    await stopAndWait(config);
+
+    expect(await sendTogether(client)).toBe(SPREAD);
+  }, 60_000);
+});
+
 describe("pounce mcp when another server took the daemon's port", () => {
   test("answers the request with an error that says so", async () => {
     const { env, config } = await isolatedEnv();
