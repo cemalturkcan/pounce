@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -10,6 +11,8 @@ const DEFAULT_CHROME_POLICY_DIRS = [
   "/etc/chromium/policies/managed",
   "/etc/chromium/policies/recommended",
 ];
+
+export const PRODUCT_NAME = "pounce";
 
 export type Engine = "patchright" | "playwright";
 
@@ -126,6 +129,10 @@ const environment = z.object({
   WEB_AGENT_ASK_ADAPTER: text,
 });
 
+function preferNewDir(current: string, legacy: string): string {
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
+}
+
 function decodeEnvironment(source: NodeJS.ProcessEnv) {
   const parsed = environment.safeParse(source);
   if (parsed.success) return parsed.data;
@@ -135,19 +142,24 @@ function decodeEnvironment(source: NodeJS.ProcessEnv) {
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const env = decodeEnvironment(source);
   const home = env.HOME ?? homedir();
+  const dataHome = env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
+  const configHome = env.XDG_CONFIG_HOME ?? path.join(home, ".config");
   const dataDir =
     env.WEB_AGENT_DAEMON_DATA_DIR ??
     env.WEB_AGENT_DATA_DIR ??
-    path.join(
-      env.XDG_DATA_HOME ?? path.join(home, ".local", "share"),
-      "claude-code-pair",
-      "web-agent",
+    preferNewDir(
+      path.join(dataHome, PRODUCT_NAME),
+      path.join(dataHome, "claude-code-pair", "web-agent"),
     );
+  const configDir = preferNewDir(
+    path.join(configHome, PRODUCT_NAME),
+    path.join(home, ".config", "web-agent-mcp"),
+  );
   const port = env.WEB_AGENT_DAEMON_PORT;
   const hasDisplay = Boolean(env.WAYLAND_DISPLAY || env.DISPLAY);
 
   return {
-    serverName: "web-agent-mcp",
+    serverName: PRODUCT_NAME,
     serverVersion: SERVER_VERSION,
     host: "127.0.0.1",
     port,
@@ -156,7 +168,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     profileDir: env.WEB_AGENT_CHROME_USER_DATA_DIR ?? path.join(dataDir, "profile"),
     outputDir: env.WEB_AGENT_OUTPUT_DIR ?? path.join(dataDir, "output"),
     homeDir: home,
-    userDirsFile: path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "user-dirs.dirs"),
+    userDirsFile: path.join(configHome, "user-dirs.dirs"),
     sitesDir: env.WEB_AGENT_SITES_DIR ?? path.join(dataDir, "sites"),
     logDir: env.WEB_AGENT_LOG_DIR ?? path.join(dataDir, "logs"),
     logLevel: env.WEB_AGENT_LOG_LEVEL,
@@ -175,6 +187,6 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     autoConsent: env.WEB_AGENT_AUTO_CONSENT,
     consoleHook: env.WEB_AGENT_CONSOLE_HOOK,
     askAdapter: env.WEB_AGENT_ASK_ADAPTER,
-    askAdapterPath: path.join(home, ".config", "web-agent-mcp", "ask-adapter.mjs"),
+    askAdapterPath: path.join(configDir, "ask-adapter.mjs"),
   };
 }

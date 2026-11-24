@@ -51,12 +51,10 @@ test("config reads Chrome policy files from the system folders unless WEB_AGENT_
   ).toStrictEqual(["/tmp/a/managed", "/tmp/b"]);
 });
 
-test("the default ask adapter file is ~/.config/web-agent-mcp/ask-adapter.mjs and WEB_AGENT_ASK_ADAPTER is read separately", () => {
+test("the default ask adapter file is ~/.config/pounce/ask-adapter.mjs and WEB_AGENT_ASK_ADAPTER is read separately", () => {
   const home = path.join(path.sep, "tmp", "fake-home");
   const fallback = loadConfig({ HOME: home });
-  expect(fallback.askAdapterPath).toBe(
-    path.join(home, ".config", "web-agent-mcp", "ask-adapter.mjs"),
-  );
+  expect(fallback.askAdapterPath).toBe(path.join(home, ".config", "pounce", "ask-adapter.mjs"));
   expect(fallback.askAdapter).toBe(undefined);
   expect(
     loadConfig({ HOME: home, WEB_AGENT_ASK_ADAPTER: " /opt/adapters/mine.mjs " }).askAdapter,

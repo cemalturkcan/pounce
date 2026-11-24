@@ -181,7 +181,7 @@ export async function startDaemon(
     Object.assign(transport, {
       onclose: () => endSession(transport.sessionId, "transport closed"),
       onerror: (error: Error) => {
-        writeStderr(`web-agent-mcp transport error: ${error.message}`);
+        writeStderr(`pounce transport error: ${error.message}`);
         logEvent("transport_error", { session: transport.sessionId, error: error.message }, "warn");
       },
     });
@@ -280,7 +280,7 @@ export async function startDaemon(
     version: config.serverVersion,
   };
   writeFileSync(config.registryPath, `${JSON.stringify(registry, null, 2)}\n`);
-  writeStderr(`web-agent-mcp daemon running at ${config.endpoint}`);
+  writeStderr(`pounce daemon running at ${config.endpoint}`);
   logEvent("daemon_start", {
     version: config.serverVersion,
     engine: config.engine,

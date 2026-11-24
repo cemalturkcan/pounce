@@ -38,7 +38,7 @@ export async function startLoopWatchdog(options: WatchdogOptions) {
     workerData: {
       buffer,
       thresholdMs: options.thresholdMs,
-      label: options.label ?? "web-agent-mcp",
+      label: options.label ?? "pounce",
     },
   });
   worker.unref();

@@ -131,7 +131,7 @@ const RULES: Rule[] = [
     pattern:
       /ProcessSingleton|SingletonLock|profile appears to be in use|user data directory is already in use/i,
     hint: () =>
-      "Another Chrome process already uses the agent profile directory. Close that Chrome or stop the other web-agent instance.",
+      "Another Chrome process already uses the agent profile directory. Close that Chrome or stop the other pounce instance.",
   },
 ];
 

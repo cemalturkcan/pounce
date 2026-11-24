@@ -17,8 +17,8 @@ async function runWriting(text: string) {
 }
 
 test("writeStderr writes the text as one line to stderr and nothing to stdout", async () => {
-  expect(await runWriting("web-agent-mcp running on stdio")).toStrictEqual({
+  expect(await runWriting("pounce running on stdio")).toStrictEqual({
     stdout: "",
-    stderr: "web-agent-mcp running on stdio\n",
+    stderr: "pounce running on stdio\n",
   });
 });

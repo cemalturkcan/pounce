@@ -6,7 +6,7 @@ const START_POLL_MS = 100;
 const START_TIMEOUT_MS = 30_000;
 const STOP_GRACE_MS = 15_000;
 const EXIT_FLUSH_MS = 1000;
-const READY_LINE = "web-agent-mcp daemon running at";
+const READY_LINE = "pounce daemon running at";
 const PORT_TAKEN = /Is port \d+ in use/;
 
 export const heldPort = () => Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });

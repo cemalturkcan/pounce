@@ -184,7 +184,7 @@ export async function buildHar(entries: NetworkEntry[], includeBodies: boolean, 
   return {
     log: {
       version: "1.2",
-      creator: { name: "web-agent-mcp", version: SERVER_VERSION },
+      creator: { name: "pounce", version: SERVER_VERSION },
       pages: [
         {
           startedDateTime: entries[0]?.time ?? new Date().toISOString(),

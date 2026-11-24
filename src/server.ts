@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { format } from "node:util";
 import { settleClaudeRefreshes } from "./ask/anthropic/adapter.ts";
@@ -53,9 +54,9 @@ async function main() {
   }
 
   const deps = createDeps(config);
-  installProcessGuards("web-agent-mcp");
+  installProcessGuards("pounce");
   await startLoopWatchdog({ thresholdMs: LOOP_STALL_MS }).catch((cause: unknown) =>
-    writeStderr(format("web-agent-mcp loop watchdog failed to start:", cause)),
+    writeStderr(format("pounce loop watchdog failed to start:", cause)),
   );
   startPruning(deps);
 
@@ -87,12 +88,12 @@ async function main() {
   process.stdin.once("end", shutdown);
   process.stdin.once("close", shutdown);
   await createServer(config, deps).connect(new StdioServerTransport());
-  writeStderr("web-agent-mcp running on stdio");
+  writeStderr("pounce running on stdio");
 }
 
 if (import.meta.main) {
   main().catch((cause: unknown) => {
-    writeStderr(format("web-agent-mcp failed:", cause instanceof Error ? cause.message : cause));
+    writeStderr(format("pounce failed:", cause instanceof Error ? cause.message : cause));
     process.exit(1);
   });
 }

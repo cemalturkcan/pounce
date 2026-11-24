@@ -131,7 +131,7 @@ function stderrLine(event: string, fields: LogFields) {
     ),
   );
   const detail = message || JSON.stringify(rest);
-  return `web-agent-mcp ${event}${request}: ${detail}${stack ? `\n${stack}` : ""}`;
+  return `pounce ${event}${request}: ${detail}${stack ? `\n${stack}` : ""}`;
 }
 
 function clipStack(stack: string | undefined) {
@@ -376,7 +376,7 @@ export class Logger {
     if (this.reportedFailure) return;
     this.reportedFailure = true;
     this.stderr(
-      `web-agent-mcp log write failed in ${this.dir}: ${messageOf(cause)}; later failures are only counted`,
+      `pounce log write failed in ${this.dir}: ${messageOf(cause)}; later failures are only counted`,
     );
   }
 }

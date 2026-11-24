@@ -1,8 +1,11 @@
 {
-  "name": "web-agent-mcp",
+  "name": "pounce",
   "version": "0.2.0",
   "private": true,
   "description": "Browser automation MCP server: one persistent Chrome profile, ref-based targeting, bulk page collection, and server-side scripting.",
+  "bin": {
+    "pounce": "src/server.ts"
+  },
   "type": "module",
   "scripts": {
     "daemon": "bun src/server.ts --daemon",

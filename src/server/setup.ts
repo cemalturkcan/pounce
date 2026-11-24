@@ -29,11 +29,11 @@ export function startPruning({ store, log }: Prunable, everyMs = PRUNE_INTERVAL_
   const run = () => {
     void store
       .prune()
-      .catch((cause: unknown) => writeStderr(format("web-agent-mcp prune failed:", cause)));
+      .catch((cause: unknown) => writeStderr(format("pounce prune failed:", cause)));
     void log
       .prune()
       .then((removed) => removed && log.log("info", "log_pruned", { removed }))
-      .catch((cause: unknown) => writeStderr(format("web-agent-mcp log prune failed:", cause)));
+      .catch((cause: unknown) => writeStderr(format("pounce log prune failed:", cause)));
   };
   run();
   const timer = setInterval(run, everyMs);
