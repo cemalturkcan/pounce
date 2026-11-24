@@ -1,13 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { repeatUntil, sleep } from "../src/shared/async.ts";
-import { healthy, heldPort, type SpawnedDaemon, spawnDaemon } from "../tests/daemon.ts";
+import { buildBinary } from "../scripts/build-binary.ts";
+import { PACKAGE_DIR } from "../src/config/version.ts";
+import { healthy, heldPort, runServer, type SpawnedDaemon, spawnDaemon } from "../tests/daemon.ts";
 import { callTool, okTool, type ToolArgs } from "../tests/mcpHarness.ts";
 import { parseJsonOrThrow } from "../src/shared/decode.ts";
 import { startFixture, type Fixture } from "./fixture.ts";
@@ -360,4 +362,88 @@ test("a failing call carries a request id that leads to its log line", async () 
   expect(tabs, tabs).toContain(`Log: ${path.join(workDir, "logs")}`);
   expect(tabs).toMatch(/\d+ errors? in the last hour/);
   await ok(session, "tabs", { close: [tab] });
+});
+
+async function exitedWithin(daemonProcess: SpawnedDaemon["process"], ms: number) {
+  if (daemonProcess.exitCode !== null) return true;
+  const exited = new Promise((resolve) => daemonProcess.once("exit", resolve));
+  await Promise.race([exited, sleep(ms)]);
+  return daemonProcess.exitCode !== null;
+}
+
+describe("a compiled server", () => {
+  let binDir: string;
+  let binary: string;
+
+  beforeAll(async () => {
+    binDir = await mkdtemp(path.join(tmpdir(), "web-agent-binary-e2e-"));
+    binary = path.join(binDir, "pounce");
+    await buildBinary(process.arch === "arm64" ? "arm64" : "x64", binary);
+  });
+
+  afterAll(async () => {
+    await rm(binDir, { recursive: true, force: true });
+  });
+
+  describe("running as a daemon whose file was replaced", () => {
+    let dataDir: string;
+    let compiled: SpawnedDaemon;
+
+    beforeAll(async () => {
+      dataDir = path.join(binDir, "data");
+      compiled = await spawnDaemon(dataDir, {}, PACKAGE_DIR, [binary]);
+      expect(await healthy(compiled.port), compiled.stderr()).toBe(true);
+      await copyFile(binary, `${binary}.new`);
+      await rename(`${binary}.new`, binary);
+    });
+
+    afterAll(async () => {
+      await compiled?.stop();
+    });
+
+    test("is reported running by its status", async () => {
+      const status = await runServer([binary], dataDir, compiled.port, ["--daemon-status"]);
+
+      expect(JSON.parse(status.stdout)).toMatchObject({ running: true });
+    });
+
+    test("is stopped by its stop command", async () => {
+      await runServer([binary], dataDir, compiled.port, ["--daemon-stop"]);
+
+      expect(await exitedWithin(compiled.process, 15_000)).toBe(true);
+    });
+  });
+
+  describe("next to a daemon started from source", () => {
+    let second: SpawnedDaemon | undefined;
+
+    afterAll(async () => {
+      await second?.stop();
+    });
+
+    test("reports it running", async () => {
+      const status = await runServer([binary], workDir, daemon.port, ["--daemon-status"]);
+
+      expect(JSON.parse(status.stdout)).toMatchObject({ running: true });
+    });
+
+    test("refuses to import a profile", async () => {
+      const from = path.join(binDir, "chrome");
+      await mkdir(path.join(from, "Default"), { recursive: true });
+
+      const imported = await runServer([binary], workDir, daemon.port, [
+        "--import-profile",
+        "--from",
+        from,
+      ]);
+
+      expect(imported.stderr).toContain("daemon is running");
+    });
+
+    test("refuses to start a second daemon", async () => {
+      second = await spawnDaemon(workDir, {}, PACKAGE_DIR, [binary]);
+
+      expect(second.process.exitCode, second.stderr()).toBe(1);
+    });
+  });
 });

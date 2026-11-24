@@ -11,7 +11,7 @@ import {
 import { writeStderr } from "./log/stderr.ts";
 import { normalizeUrl } from "./page/collect.ts";
 import { loadConfig } from "./config/config.ts";
-import { daemonStatus, startDaemon, stopDaemon } from "./server/daemon.ts";
+import { daemonStatus, runningDaemon, startDaemon, stopDaemon } from "./server/daemon.ts";
 import { createDeps, createServer, startPruning } from "./server/setup.ts";
 import { startLoopWatchdog } from "./server/watchdog.ts";
 import { installProcessGuards } from "./log/faults.ts";
@@ -27,11 +27,11 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.includes("--daemon-status")) {
-    writeStdout(JSON.stringify(daemonStatus(config), null, 2));
+    writeStdout(JSON.stringify(await daemonStatus(config), null, 2));
     return;
   }
   if (args.includes("--daemon-stop")) {
-    writeStdout(JSON.stringify(stopDaemon(config)));
+    writeStdout(JSON.stringify(await stopDaemon(config)));
     return;
   }
   if (args.includes("--import-profile")) {
@@ -41,7 +41,11 @@ async function main() {
         renderImportReport(
           config,
           options,
-          await importProfile(config, options, () => daemonStatus(config).running),
+          await importProfile(
+            config,
+            options,
+            async () => (await runningDaemon(config)) !== undefined,
+          ),
         ),
       );
     } catch (cause) {
@@ -50,6 +54,14 @@ async function main() {
       process.exitCode = 1;
     }
     return;
+  }
+
+  if (args.includes("--daemon")) {
+    const running = await runningDaemon(config);
+    if (running)
+      throw new Error(
+        `A daemon is already running at ${running.endpoint} (pid ${running.pid}). Stop it first with --daemon-stop.`,
+      );
   }
 
   const deps = createDeps(config);

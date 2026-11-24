@@ -31,24 +31,53 @@ export type SpawnedDaemon = {
   stop: () => Promise<void>;
 };
 
+export const SOURCE_SERVER = [process.execPath, "src/server.ts"] as const;
+
+function serverEnv(dataDir: string, port: number, env: NodeJS.ProcessEnv) {
+  return {
+    ...process.env,
+    WEB_AGENT_DAEMON_DATA_DIR: dataDir,
+    WEB_AGENT_DAEMON_PORT: String(port),
+    WEB_AGENT_HEADLESS: "true",
+    WEB_AGENT_PASSWORD_STORE: "basic",
+    WEB_AGENT_SECRETS: "none",
+    ...env,
+  };
+}
+
+export async function runServer(
+  server: readonly string[],
+  dataDir: string,
+  port: number,
+  args: string[],
+) {
+  const [command = "", ...rest] = server;
+  const child = Bun.spawn([command, ...rest, ...args], {
+    cwd: PACKAGE_DIR,
+    env: serverEnv(dataDir, port, {}),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
 export async function spawnDaemon(
   dataDir: string,
   env: NodeJS.ProcessEnv = {},
   serverDir = PACKAGE_DIR,
+  server: readonly string[] = SOURCE_SERVER,
 ): Promise<SpawnedDaemon> {
   const port = freePort();
   let stderr = "";
-  const child = spawn(process.execPath, ["src/server.ts", "--daemon"], {
+  const [command = "", ...rest] = server;
+  const child = spawn(command, [...rest, "--daemon"], {
     cwd: serverDir,
-    env: {
-      ...process.env,
-      WEB_AGENT_DAEMON_DATA_DIR: dataDir,
-      WEB_AGENT_DAEMON_PORT: String(port),
-      WEB_AGENT_HEADLESS: "true",
-      WEB_AGENT_PASSWORD_STORE: "basic",
-      WEB_AGENT_SECRETS: "none",
-      ...env,
-    },
+    env: serverEnv(dataDir, port, env),
     stdio: ["ignore", "ignore", "pipe"],
   });
   child.stderr?.on("data", (chunk: Buffer) => {
@@ -64,7 +93,7 @@ export async function spawnDaemon(
   );
   if (child.exitCode !== null) await Promise.race([closed, sleep(EXIT_FLUSH_MS)]);
   if (child.exitCode !== null && PORT_TAKEN.test(stderr) && !env.WEB_AGENT_DAEMON_PORT)
-    return spawnDaemon(dataDir, env, serverDir);
+    return spawnDaemon(dataDir, env, serverDir, server);
   return {
     process: child,
     port,

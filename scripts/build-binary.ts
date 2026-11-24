@@ -41,8 +41,10 @@ function embedPlaywrightManifests(embedded: Set<string>): BunPlugin {
   };
 }
 
-async function buildBinary(arch: (typeof ARCHES)[number]) {
-  const outfile = path.join(ROOT, "dist", `pounce-linux-${arch}`);
+export async function buildBinary(
+  arch: (typeof ARCHES)[number],
+  outfile = path.join(ROOT, "dist", `pounce-linux-${arch}`),
+) {
   const embedded = new Set<string>();
   await Bun.build({
     entrypoints: ENTRYPOINTS.map((entry) => path.join(ROOT, entry)),
@@ -62,4 +64,4 @@ async function buildBinary(arch: (typeof ARCHES)[number]) {
   process.stdout.write(`${path.relative(ROOT, outfile)}\n`);
 }
 
-if (import.meta.main) await Promise.all(ARCHES.map(buildBinary));
+if (import.meta.main) await Promise.all(ARCHES.map((arch) => buildBinary(arch)));
