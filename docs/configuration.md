@@ -91,7 +91,7 @@ drop a saved one, delete it from `env` and restart the daemon.
 On a machine with `systemd --user`, `pounce install` writes `pounce.service` with
 `ExecStart=<pounce> --daemon`, enables it and starts it (it starts with `graphical-session.target` when one is
 active, else with `default.target`). It is left out when a `claude-code-pair-web-agent.service` from an older install
-already runs the daemon.
+is set up for the same port and data dir.
 
 ```sh
 systemctl --user restart pounce.service      # after changing config.json or upgrading

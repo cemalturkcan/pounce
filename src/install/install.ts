@@ -538,7 +538,7 @@ async function serviceStep(run: Run, command: readonly string[]) {
   if (result.kind === "legacy")
     io.print(
       warn(
-        "claude-code-pair-web-agent.service already runs the daemon here, so pounce.service was not created.",
+        "claude-code-pair-web-agent.service from an older install is set up for this port and data dir, so pounce.service was not created.",
       ),
     );
   else if (result.kind === "unavailable")

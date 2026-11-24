@@ -125,10 +125,13 @@ function unitServes(file: string, config: Config, env: NodeJS.ProcessEnv) {
   }
 }
 
+export function legacyUnitServes(config: Config, env: NodeJS.ProcessEnv) {
+  return unitServes(path.join(path.dirname(config.serviceFile), LEGACY_SERVICE), config, env);
+}
+
 function installedUnit(config: Config, env: NodeJS.ProcessEnv) {
   if (unitServes(config.serviceFile, config, env)) return SERVICE_NAME;
-  const legacy = path.join(path.dirname(config.serviceFile), LEGACY_SERVICE);
-  return unitServes(legacy, config, env) ? LEGACY_SERVICE : undefined;
+  return legacyUnitServes(config, env) ? LEGACY_SERVICE : undefined;
 }
 
 async function unitStopped(unit: string, control: DaemonControl) {

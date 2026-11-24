@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Config } from "../config/config.ts";
-import { LEGACY_SERVICE, SERVICE_NAME } from "../cli/daemon-control.ts";
+import { legacyUnitServes, SERVICE_NAME } from "../cli/daemon-control.ts";
 import type { Runner } from "../cli/process.ts";
 import { inSequence } from "../shared/async.ts";
 
@@ -79,8 +79,7 @@ export async function installService(
   runner: Runner,
   daemonRunning: boolean,
 ): Promise<ServiceResult> {
-  if (existsSync(path.join(path.dirname(config.serviceFile), LEGACY_SERVICE)))
-    return { kind: "legacy" };
+  if (legacyUnitServes(config, env)) return { kind: "legacy" };
   if (!(await systemdAvailable(runner))) return { kind: "unavailable" };
   const graphical =
     (

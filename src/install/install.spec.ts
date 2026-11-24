@@ -333,15 +333,37 @@ describe("the service step", () => {
     expect(printed()).toContain("systemd --user is not available");
   });
 
-  test("leaves an existing claude-code-pair-web-agent.service alone", async () => {
+  test("leaves out pounce.service when claude-code-pair-web-agent.service serves the same daemon", async () => {
     await mkdir(at(".config", "systemd", "user"), { recursive: true });
     await writeFile(
       at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
-      "[Service]\n",
+      "[Service]\nEnvironment=WEB_AGENT_DAEMON_PORT=29999\n",
     );
     await runInstall(BASIC, { replies: {} });
 
     expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(false);
+  });
+
+  test("writes pounce.service when claude-code-pair-web-agent.service serves another port", async () => {
+    await mkdir(at(".config", "systemd", "user"), { recursive: true });
+    await writeFile(
+      at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
+      "[Service]\nEnvironment=WEB_AGENT_DAEMON_PORT=29741\n",
+    );
+    await runInstall(BASIC, { replies: {} });
+
+    expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(true);
+  });
+
+  test("does not claim a claude-code-pair-web-agent.service for another port runs the daemon", async () => {
+    await mkdir(at(".config", "systemd", "user"), { recursive: true });
+    await writeFile(
+      at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
+      "[Service]\nEnvironment=WEB_AGENT_DAEMON_PORT=29741\n",
+    );
+    await runInstall(BASIC, { replies: {} });
+
+    expect(printed()).not.toContain("claude-code-pair-web-agent.service");
   });
 });
 
