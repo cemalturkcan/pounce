@@ -3,12 +3,12 @@ import path from "node:path";
 import type { Config } from "../config/config.ts";
 import { legacyUnitServes, SERVICE_NAME } from "../cli/daemon-control.ts";
 import type { Runner } from "../cli/process.ts";
+import { DISPLAY_VARIABLES } from "../browser/launch.ts";
+import { SAFE_WORD } from "../shared/words.ts";
 import { inSequence } from "../shared/async.ts";
 
-const DISPLAY_VARIABLES = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]);
-
 function systemdQuote(value: string) {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+  return SAFE_WORD.test(value)
     ? value
     : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }

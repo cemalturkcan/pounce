@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PRODUCT_NAME, type Config, loadConfigLeniently } from "../config/config.ts";
 import { repeatUntil } from "../shared/async.ts";
+import { quotedWords } from "../shared/words.ts";
 import {
   daemonPresence,
   type DaemonRegistry,
@@ -82,12 +83,6 @@ async function waitForDaemon(
   );
 }
 
-function unitWords(value: string) {
-  return [...value.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(([, quoted, bare]) =>
-    quoted === undefined ? (bare ?? "") : quoted.replaceAll(/\\(.)/g, "$1"),
-  );
-}
-
 function expandSpecifiers(value: string, home: string) {
   return value.replaceAll(/%[%h]/g, (specifier) => (specifier === "%h" ? home : "%"));
 }
@@ -98,7 +93,7 @@ function unitEnvironment(file: string, home: string) {
       .split("\n")
       .flatMap((line) => {
         const match = /^\s*Environment\s*=(.*)$/.exec(line);
-        return match ? unitWords(match[1] ?? "") : [];
+        return match ? quotedWords(match[1] ?? "") : [];
       })
       .flatMap((word) => {
         const separator = word.indexOf("=");

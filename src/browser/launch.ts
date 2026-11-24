@@ -68,7 +68,7 @@ export function launchOptions(config: Config) {
   };
 }
 
-const DISPLAY_VARIABLES = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]);
+export const DISPLAY_VARIABLES = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]);
 
 async function sessionDisplay(runner: Runner) {
   const result = await runner(["systemctl", "--user", "show-environment"]);

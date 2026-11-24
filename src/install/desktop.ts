@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import type { Runner } from "../cli/process.ts";
+import { quotedWords, SAFE_WORD } from "../shared/words.ts";
 
 export const DESKTOP_ID = "pounce.desktop";
 
@@ -21,14 +22,8 @@ const SANDBOX_RUNNERS = new Set(["flatpak", "snap"]);
 const DISPATCHES_TO_DEFAULT =
   /default[-_]?(web[-_]?)?browser|x-www-browser|sensible-browser|\$\{?BROWSER\b/i;
 
-function execWords(exec: string) {
-  return [...exec.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(
-    (match) => match[1]?.replaceAll(/\\(.)/g, "$1") ?? match[2] ?? "",
-  );
-}
-
 function execProgram(exec: string) {
-  const words = execWords(exec);
+  const words = quotedWords(exec);
   const start = words[0] === "env" || words[0]?.endsWith("/env") ? 1 : 0;
   return words.slice(start).find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
 }
@@ -65,9 +60,9 @@ function dispatchesToDefault(exec: string, env: NodeJS.ProcessEnv) {
 }
 
 function execQuote(value: string) {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
-    ? value
-    : `"${value.replaceAll(/["`$\\]/g, "\\$&")}"`;
+  const word = value.replaceAll("%", "%%");
+  if (SAFE_WORD.test(value)) return word;
+  return `"${word.replaceAll(/["`$\\]/g, "\\$&").replaceAll("\\", "\\\\")}"`;
 }
 
 export function desktopEntry(command: readonly string[]) {

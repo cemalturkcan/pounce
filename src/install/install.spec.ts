@@ -746,6 +746,22 @@ describe("the desktop step", () => {
     ).toContain(`Exec=${at(".local", "bin", "pounce")} open %U`);
   });
 
+  test("doubles a % in the binary path, which desktop entries reserve for field codes", async () => {
+    await runInstall([...BASIC, "--desktop"], { env: { XDG_BIN_HOME: at("100%") } });
+
+    expect(
+      await readFile(at(".local", "share", "applications", "pounce.desktop"), "utf8"),
+    ).toContain(`Exec=${at("100%%", "pounce")} open %U`);
+  });
+
+  test("writes a backslash in the binary path as four, for the string and the quoting rule", async () => {
+    await runInstall([...BASIC, "--desktop"], { env: { XDG_BIN_HOME: at("a\\b") } });
+
+    expect(
+      await readFile(at(".local", "share", "applications", "pounce.desktop"), "utf8"),
+    ).toContain(`Exec="${at("a\\\\\\\\b", "pounce")}" open %U`);
+  });
+
   test("leaves a launcher that dispatches to the default browser alone", async () => {
     await omarchyBrowser();
     await runInstall([...BASIC, "--desktop"], defaultBrowser("omarchy-browser.desktop"));

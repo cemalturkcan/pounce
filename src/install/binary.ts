@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { SAFE_WORD } from "../shared/words.ts";
 
 const PACKAGE_MANAGED = ["/usr/", "/opt/", "/nix/", "/snap/", "/home/linuxbrew/"];
 
@@ -68,7 +69,7 @@ function quoted(value: string) {
 }
 
 export function shellWord(value: string) {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : quoted(value);
+  return SAFE_WORD.test(value) ? value : quoted(value);
 }
 
 export function shellStartupFile(home: string, env: NodeJS.ProcessEnv, configHome: string) {
