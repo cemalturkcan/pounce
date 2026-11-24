@@ -6,6 +6,7 @@
     "eval/results/**",
     "tools/oxlint/anti-slop/**",
     "skills/**",
-    ".claude/**"
+    ".claude/**",
+    "tests/fixtures/agent-configs/**"
   ]
 }

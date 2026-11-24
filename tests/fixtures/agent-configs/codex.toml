@@ -1,0 +1,9 @@
+# Codex settings, keep this comment
+model = "gpt-6"
+
+[mcp_servers.other]
+command = "other-mcp" # inline comment
+args = ["--flag"]
+
+[profiles.fast]
+model = "gpt-6-mini"

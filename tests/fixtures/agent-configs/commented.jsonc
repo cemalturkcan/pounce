@@ -1,0 +1,9 @@
+{
+  // user settings, keep this comment
+  "theme": "dark", /* inline block comment */
+  "mcpServers": {
+    // my own server
+    "other": { "command": "other-mcp", "args": ["--flag"] }, // trailing note
+  },
+  "url": "http://example.com/{not-a-brace}", // braces and // inside a string
+}
