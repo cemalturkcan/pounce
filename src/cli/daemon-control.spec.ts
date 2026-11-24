@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadConfig } from "../config/config.ts";
+import { type Config, loadConfig } from "../config/config.ts";
+import { serviceUnit } from "../install/service.ts";
 import { stopDaemon } from "../server/daemon.ts";
 import { freePort, healthy, type SpawnedDaemon, spawnDaemon } from "../../tests/daemon.ts";
 import { defaultDaemonControl, ensureDaemon } from "./daemon-control.ts";
@@ -34,6 +35,11 @@ async function isolatedEnv() {
   return { home, env, config };
 }
 
+async function installUnit(config: Config, env: NodeJS.ProcessEnv) {
+  await mkdir(path.dirname(config.serviceFile), { recursive: true });
+  await writeFile(config.serviceFile, serviceUnit(["/usr/bin/pounce"], env, false));
+}
+
 const failingRunner: Runner = async () => ({ code: 1, stdout: "", stderr: "no systemd" });
 
 describe("ensureDaemon with no daemon and no service", () => {
@@ -48,8 +54,7 @@ describe("ensureDaemon with no daemon and no service", () => {
 describe("ensureDaemon with pounce.service installed", () => {
   test("starts the service instead of a detached daemon", async () => {
     const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(config.serviceFile, "[Service]\n");
+    await installUnit(config, env);
     const commands: string[][] = [];
     let service: SpawnedDaemon | undefined;
     const runner: Runner = async (command) => {
@@ -68,8 +73,7 @@ describe("ensureDaemon with pounce.service installed", () => {
 
   test("falls back to a detached daemon when systemctl fails", async () => {
     const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(config.serviceFile, "[Service]\n");
+    await installUnit(config, env);
     await ensureDaemon(config, env, { ...defaultDaemonControl, runner: failingRunner });
 
     expect(await healthy(config.port)).toBe(true);
@@ -108,8 +112,7 @@ function recordingControl(commands: string[][], subState: string) {
 describe("ensureDaemon when pounce.service starts but its daemon exits", () => {
   test("names the unit's journal", async () => {
     const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(config.serviceFile, "[Service]\n");
+    await installUnit(config, env);
     const { control } = recordingControl([], "auto-restart");
 
     await expect(ensureDaemon(config, env, control)).rejects.toThrow(
@@ -119,8 +122,7 @@ describe("ensureDaemon when pounce.service starts but its daemon exits", () => {
 
   test("gives up well before an MCP client's startup timeout", async () => {
     const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(config.serviceFile, "[Service]\n");
+    await installUnit(config, env);
     const { control } = recordingControl([], "auto-restart");
     const startedAt = Date.now();
     await ensureDaemon(config, env, control).catch(() => undefined);
@@ -130,8 +132,7 @@ describe("ensureDaemon when pounce.service starts but its daemon exits", () => {
 
   test("does not start a second daemon beside the unit", async () => {
     const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(config.serviceFile, "[Service]\n");
+    await installUnit(config, env);
     const { control, spawned } = recordingControl([], "auto-restart");
     await ensureDaemon(config, env, control).catch(() => undefined);
 
@@ -139,14 +140,34 @@ describe("ensureDaemon when pounce.service starts but its daemon exits", () => {
   });
 });
 
+async function defaultEnv() {
+  const home = await mkdtemp(path.join(tmpdir(), "pounce-control-"));
+  const env = { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
+  await mkdir(path.join(home, ".local", "share", "claude-code-pair", "web-agent"), {
+    recursive: true,
+  });
+  return { env, config: loadConfig(env) };
+}
+
+const OWNER_LEGACY_UNIT = [
+  "[Service]",
+  "ExecStart=/usr/bin/bun src/server.ts --daemon",
+  "Environment=WEB_AGENT_DAEMON_DATA_DIR=%h/.local/share/claude-code-pair/web-agent",
+  "",
+].join("\n");
+
+async function installLegacyUnit(config: Config) {
+  await mkdir(path.dirname(config.serviceFile), { recursive: true });
+  await writeFile(
+    path.join(path.dirname(config.serviceFile), "claude-code-pair-web-agent.service"),
+    OWNER_LEGACY_UNIT,
+  );
+}
+
 describe("ensureDaemon with only the legacy claude-code-pair-web-agent.service", () => {
-  test("starts that unit instead of a detached daemon", async () => {
-    const { env, config } = await isolatedEnv();
-    await mkdir(path.dirname(config.serviceFile), { recursive: true });
-    await writeFile(
-      path.join(path.dirname(config.serviceFile), "claude-code-pair-web-agent.service"),
-      "[Service]\n",
-    );
+  test("starts that unit for the default port and data dir", async () => {
+    const { env, config } = await defaultEnv();
+    await installLegacyUnit(config);
     const commands: string[][] = [];
     const { control } = recordingControl(commands, "failed");
     await ensureDaemon(config, env, control).catch(() => undefined);
@@ -157,5 +178,47 @@ describe("ensureDaemon with only the legacy claude-code-pair-web-agent.service",
       "start",
       "claude-code-pair-web-agent.service",
     ]);
+  });
+
+  test("starts a daemon directly when the port is overridden", async () => {
+    const { env, config } = await defaultEnv();
+    await installLegacyUnit(config);
+    const portEnv = { ...env, WEB_AGENT_DAEMON_PORT: String(freePort()) };
+    const { control, spawned } = recordingControl([], "failed");
+    await ensureDaemon(loadConfig(portEnv), portEnv, control).catch(() => undefined);
+
+    expect(spawned.map((command) => command.at(-1))).toStrictEqual(["--daemon"]);
+  });
+});
+
+describe("ensureDaemon with pounce.service for another setup", () => {
+  test("starts a daemon directly when the unit serves another port", async () => {
+    const { env, config } = await isolatedEnv();
+    await installUnit(config, { ...env, WEB_AGENT_DAEMON_PORT: String(freePort()) });
+    const { control, spawned } = recordingControl([], "failed");
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(spawned.map((command) => command.at(-1))).toStrictEqual(["--daemon"]);
+  });
+
+  test("starts a daemon directly when the unit serves another data dir", async () => {
+    const { env, config } = await isolatedEnv();
+    await installUnit(config, { ...env, WEB_AGENT_DAEMON_DATA_DIR: path.join(env.HOME, "other") });
+    const { control, spawned } = recordingControl([], "failed");
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(spawned.map((command) => command.at(-1))).toStrictEqual(["--daemon"]);
+  });
+
+  test("starts the unit whose data dir has a space and a percent sign", async () => {
+    const { env: base } = await isolatedEnv();
+    const env = { ...base, WEB_AGENT_DAEMON_DATA_DIR: path.join(base.HOME, "my 100% data") };
+    const config = loadConfig(env);
+    await installUnit(config, env);
+    const commands: string[][] = [];
+    const { control } = recordingControl(commands, "failed");
+    await ensureDaemon(config, env, control).catch(() => undefined);
+
+    expect(commands[0]).toStrictEqual(["systemctl", "--user", "start", "pounce.service"]);
   });
 });

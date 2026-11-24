@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { PRODUCT_NAME, type Config } from "../config/config.ts";
+import { PRODUCT_NAME, type Config, loadConfigLeniently } from "../config/config.ts";
 import { repeatUntil } from "../shared/async.ts";
 import {
   daemonPresence,
@@ -82,10 +82,53 @@ async function waitForDaemon(
   );
 }
 
-function installedUnit(config: Config) {
-  if (existsSync(config.serviceFile)) return SERVICE_NAME;
+function unitWords(value: string) {
+  return [...value.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(([, quoted, bare]) =>
+    quoted === undefined ? (bare ?? "") : quoted.replaceAll(/\\(.)/g, "$1"),
+  );
+}
+
+function expandSpecifiers(value: string, home: string) {
+  return value.replaceAll(/%[%h]/g, (specifier) => (specifier === "%h" ? home : "%"));
+}
+
+function unitEnvironment(file: string, home: string) {
+  return Object.fromEntries(
+    readFileSync(file, "utf8")
+      .split("\n")
+      .flatMap((line) => {
+        const match = /^\s*Environment\s*=(.*)$/.exec(line);
+        return match ? unitWords(match[1] ?? "") : [];
+      })
+      .flatMap((word) => {
+        const separator = word.indexOf("=");
+        if (separator <= 0) return [];
+        return [[word.slice(0, separator), expandSpecifiers(word.slice(separator + 1), home)]];
+      }),
+  );
+}
+
+function unitServes(file: string, config: Config, env: NodeJS.ProcessEnv) {
+  if (!existsSync(file)) return false;
+  try {
+    const shared = Object.entries(env).filter(([key]) => !key.startsWith("WEB_AGENT_"));
+    const served = loadConfigLeniently({
+      ...Object.fromEntries(shared),
+      HOME: config.homeDir,
+      ...unitEnvironment(file, config.homeDir),
+    }).config;
+    return (
+      served.port === config.port && path.resolve(served.dataDir) === path.resolve(config.dataDir)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function installedUnit(config: Config, env: NodeJS.ProcessEnv) {
+  if (unitServes(config.serviceFile, config, env)) return SERVICE_NAME;
   const legacy = path.join(path.dirname(config.serviceFile), LEGACY_SERVICE);
-  return existsSync(legacy) ? LEGACY_SERVICE : undefined;
+  return unitServes(legacy, config, env) ? LEGACY_SERVICE : undefined;
 }
 
 async function unitStopped(unit: string, control: DaemonControl) {
@@ -100,8 +143,13 @@ async function unitStopped(unit: string, control: DaemonControl) {
   return STOPPED_UNIT_STATES.has(shown.stdout.trim());
 }
 
-async function startService(config: Config, control: DaemonControl, deadline: number) {
-  const unit = installedUnit(config);
+async function startService(
+  config: Config,
+  env: NodeJS.ProcessEnv,
+  control: DaemonControl,
+  deadline: number,
+) {
+  const unit = installedUnit(config, env);
   if (!unit) return undefined;
   const started = await control.runner(["systemctl", "--user", "start", unit]);
   if (started.code !== 0) return undefined;
@@ -138,6 +186,7 @@ export async function ensureDaemon(
   if (registry && state === "not responding") throw new Error(refuseSecondDaemon(state, registry));
   const deadline = Date.now() + START_TIMEOUT_MS;
   return (
-    (await startService(config, control, deadline)) ?? spawnDaemon(config, env, control, deadline)
+    (await startService(config, env, control, deadline)) ??
+    spawnDaemon(config, env, control, deadline)
   );
 }

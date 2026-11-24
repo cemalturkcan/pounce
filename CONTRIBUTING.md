@@ -11,13 +11,11 @@ bun src/server.ts --version
 ```
 
 Bun runs the TypeScript sources directly; there is no build step for development. `bun src/server.ts` takes the same
-commands as the `pounce` binary. To run a daemon from source next to an installed pounce, give it its own home and
-port. A changed port or data dir alone is not enough: `daemon start` starts an installed systemd service when it
-finds one under `~/.config/systemd/user`.
+commands as the `pounce` binary. To run a daemon from source next to an installed pounce, give it its own port and
+data dir; `daemon start` starts the installed systemd service only when that service serves the same port and data dir.
 
 ```sh
-export HOME=/tmp/pounce-dev WEB_AGENT_DAEMON_PORT=39001
-unset XDG_CONFIG_HOME XDG_DATA_HOME
+export WEB_AGENT_DAEMON_PORT=39001 WEB_AGENT_DAEMON_DATA_DIR=/tmp/pounce-dev
 bun src/server.ts daemon start
 bun src/server.ts daemon stop
 ```
