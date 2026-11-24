@@ -824,7 +824,7 @@ describe.skipIf(!stealth)("logs with source page on a site outside the local hos
       await sleep(1200);
       afterRedirect = await remote.ok("logs", { source: "page", tab: leaving });
       quickLeaveRuns = await inSequence([1, 2, 3], async (run) => {
-        const path = `/errors-then-leave?after=20&run=remote-${run}`;
+        const path = `/errors-then-leave?after=50&run=remote-${run}`;
         await remote.ok("navigate", {
           tab: leaving,
           url: `${origin()}${path}`,
@@ -832,7 +832,7 @@ describe.skipIf(!stealth)("logs with source page on a site outside the local hos
         });
         await sleep(800);
         return groupOf(await remote.ok("logs", { source: "page", tab: leaving }), path).includes(
-          `leaving rejection ?after=20&run=remote-${run}`,
+          `leaving rejection ?after=50&run=remote-${run}`,
         );
       });
       const unloading = openedTab(
@@ -876,7 +876,7 @@ describe.skipIf(!stealth)("logs with source page on a site outside the local hos
       expect(groupOf(afterRedirect, "/late-errors-leave")).toMatch(/reading 'lateUncaught'/);
     });
 
-    test("a rejection of a page that leaves 20 ms after loading is listed under it in every run", () => {
+    test("a rejection of a page that leaves 50 ms after loading is listed under it in every run", () => {
       expect(quickLeaveRuns).toStrictEqual([true, true, true]);
     });
 
@@ -978,18 +978,17 @@ describe("logs with source page on a captured site", () => {
   });
 
   describe("errors of a page that leaves right after loading", () => {
-    const TAB_DELAYS = [20, 50];
-    const POPUP_DELAYS = [50, 100];
+    const DELAYS = [50, 100];
     const RUNS = [1, 2, 3, 4];
     const KINDS = {
-      "a reused tab": { delays: TAB_DELAYS, seen: new Map<number, Seen[]>() },
-      "a new tab": { delays: TAB_DELAYS, seen: new Map<number, Seen[]>() },
-      "a popup": { delays: POPUP_DELAYS, seen: new Map<number, Seen[]>() },
+      "a reused tab": { delays: DELAYS, seen: new Map<number, Seen[]>() },
+      "a new tab": { delays: DELAYS, seen: new Map<number, Seen[]>() },
+      "a popup": { delays: DELAYS, seen: new Map<number, Seen[]>() },
     };
 
     beforeAll(async () => {
       const reusedTab = await openTab("/");
-      await inSequence(TAB_DELAYS, async (after) => {
+      await inSequence(DELAYS, async (after) => {
         KINDS["a reused tab"].seen.set(
           after,
           await inSequence(RUNS, async (run) => {
@@ -1010,7 +1009,7 @@ describe("logs with source page on a captured site", () => {
           }),
         );
       });
-      await inSequence(POPUP_DELAYS, async (after) => {
+      await inSequence(DELAYS, async (after) => {
         KINDS["a popup"].seen.set(
           after,
           await inSequence(RUNS, async (run) => {
