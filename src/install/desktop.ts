@@ -19,7 +19,7 @@ const KNOWN_BROWSERS =
 const SANDBOX_RUNNERS = new Set(["flatpak", "snap"]);
 
 const DISPATCHES_TO_DEFAULT =
-  /xdg-settings|default[-_]?(web[-_]?)?browser|x-www-browser|sensible-browser|\$\{?BROWSER\b/i;
+  /default[-_]?(web[-_]?)?browser|x-www-browser|sensible-browser|\$\{?BROWSER\b/i;
 
 function execWords(exec: string) {
   return [...exec.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(

@@ -602,6 +602,28 @@ describe("the desktop step", () => {
     );
   });
 
+  test("leaves alone a launcher under another name that asks xdg-settings for the default", async () => {
+    await script(
+      "open-my-browser",
+      'browser=$(xdg-settings get default-web-browser)\nexec gtk-launch "$browser" "$@"',
+    );
+    await systemEntry("open-my-browser.desktop", "Exec=open-my-browser %U");
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("open-my-browser.desktop"));
+
+    expect(commands.some((command) => command[1] === "set")).toBe(false);
+  });
+
+  test("replaces a browser script that only mentions xdg-settings", async () => {
+    await script(
+      "cromite",
+      'xdg-settings check default-url-scheme-handler https >/dev/null 2>&1 || true\nexec /opt/cromite/chrome "$@"',
+    );
+    await systemEntry("cromite.desktop", "Exec=cromite %U");
+    await runInstall([...BASIC, "--desktop"], defaultBrowser("cromite.desktop"));
+
+    expect(commands).toContainEqual(SET_DEFAULT);
+  });
+
   test("replaces Ubuntu's snap Firefox", async () => {
     await systemEntry(
       "firefox_firefox.desktop",
