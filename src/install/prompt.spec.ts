@@ -5,6 +5,8 @@ import {
   pickerKey,
   pickerOrder,
   pickerStart,
+  secretKey,
+  secretStart,
   visibleChoices,
 } from "./prompt.ts";
 
@@ -62,4 +64,14 @@ test("arrow keys split from typed text", () => {
     { name: "up" },
     { name: "char", char: "b" },
   ]);
+});
+
+describe("the hidden key prompt", () => {
+  test("Enter on a key of only spaces does not finish", () => {
+    expect(parseKeys("   \r").reduce(secretKey, secretStart()).done).toBe(false);
+  });
+
+  test("Enter on a typed key finishes", () => {
+    expect(parseKeys("sk-x\r").reduce(secretKey, secretStart()).done).toBe(true);
+  });
 });

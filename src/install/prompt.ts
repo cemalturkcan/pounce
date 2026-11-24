@@ -116,6 +116,21 @@ export function pickerOrder<T extends string>(state: PickerState<T>) {
     .filter((value) => state.selected.includes(value));
 }
 
+export type SecretState = { value: string; done: boolean; cancelled: boolean };
+
+export function secretStart(): SecretState {
+  return { value: "", done: false, cancelled: false };
+}
+
+export function secretKey(state: SecretState, key: Key): SecretState {
+  if (key.name === "cancel") return { ...state, cancelled: true };
+  if (key.name === "enter") return { ...state, done: state.value.trim().length > 0 };
+  if (key.name === "backspace") return { ...state, value: state.value.slice(0, -1) };
+  if (key.name === "char") return { ...state, value: state.value + key.char };
+  if (key.name === "space") return { ...state, value: `${state.value} ` };
+  return state;
+}
+
 function renderPicker<T extends string>(question: string, state: PickerState<T>) {
   const visible = visibleChoices(state);
   const rows = visible.map((choice, index) => {
@@ -268,18 +283,10 @@ export function terminalPrompts(
       return final.value;
     },
     async secret(question) {
-      type State = { value: string; done: boolean; cancelled: boolean };
-      const final = await keyLoop<State>(
+      const final = await keyLoop<SecretState>(
         terminal,
-        { value: "", done: false, cancelled: false },
-        (state, key) => {
-          if (key.name === "cancel") return { ...state, cancelled: true };
-          if (key.name === "enter") return { ...state, done: state.value.length > 0 };
-          if (key.name === "backspace") return { ...state, value: state.value.slice(0, -1) };
-          if (key.name === "char") return { ...state, value: state.value + key.char };
-          if (key.name === "space") return { ...state, value: `${state.value} ` };
-          return state;
-        },
+        secretStart(),
+        secretKey,
         (state) =>
           state.done
             ? answered(question, "(hidden)")

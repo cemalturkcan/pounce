@@ -11,7 +11,7 @@ import {
 } from "./browser/import-profile.ts";
 import { writeStderr } from "./log/stderr.ts";
 import { normalizeUrl } from "./page/collect.ts";
-import { type Config, loadConfig } from "./config/config.ts";
+import { type Config, loadConfig, loadConfigLeniently } from "./config/config.ts";
 import { SERVER_VERSION } from "./config/version.ts";
 import { ensureDaemon } from "./cli/daemon-control.ts";
 import { proxyStdioToDaemon } from "./cli/mcp-proxy.ts";
@@ -93,13 +93,21 @@ async function runCommand(config: Config, command: string, rest: string[]) {
     });
     return;
   }
-  if (command === "install") {
-    process.exitCode = await runInstall(rest);
-    return;
-  }
   if (command === "help" || command === "--help" || command === "-h") return writeStdout(USAGE);
   writeStderr(`Unknown command: ${command}\n\n${USAGE}`);
   process.exitCode = 2;
+}
+
+function readsStatusOnly(command: string | undefined, action: string | undefined, args: string[]) {
+  if (command === "daemon") return action === "status" || action === "stop";
+  return args.includes("--daemon-status") || args.includes("--daemon-stop");
+}
+
+function lenientConfig() {
+  const { config, problem } = loadConfigLeniently();
+  if (problem)
+    writeStderr(`Invalid ${config.configFile}: ${problem}. Run \`pounce install\` to rewrite it.`);
+  return config;
 }
 
 async function main() {
@@ -109,7 +117,11 @@ async function main() {
     writeStdout(SERVER_VERSION);
     return;
   }
-  const config = loadConfig();
+  if (command === "install") {
+    process.exitCode = await runInstall(rest);
+    return;
+  }
+  const config = readsStatusOnly(command, rest[0], args) ? lenientConfig() : loadConfig();
   if (command !== undefined && (!command.startsWith("-") || ["--help", "-h"].includes(command)))
     return runCommand(config, command, rest);
 

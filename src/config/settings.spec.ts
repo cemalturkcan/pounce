@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { loadConfig } from "./config.ts";
+import { loadConfig, loadConfigLeniently } from "./config.ts";
 
 const FAKE_KEY = "sk-ant-test-stored-0000000000";
 const ENV_KEY = "sk-ant-test-env-1111111111";
@@ -84,4 +84,37 @@ test("an unreadable config.json is named in the error", async () => {
   await writeSettings(newConfigDir(), "{ not json");
 
   expect(() => loadConfig({ HOME: home })).toThrow(path.join(newConfigDir(), "config.json"));
+});
+
+const EMPTY_KEY = JSON.stringify({
+  ask: { mode: "api-key", apiKey: "" },
+  entries: { claude: { type: "http", url: "http://127.0.0.1:29741/mcp" } },
+});
+
+test("a config.json that fails the schema is still loaded leniently", async () => {
+  await writeSettings(newConfigDir(), EMPTY_KEY);
+
+  expect(loadConfigLeniently({ HOME: home }).config.configFile).toBe(
+    path.join(newConfigDir(), "config.json"),
+  );
+});
+
+test("the lenient load names the field that fails the schema", async () => {
+  await writeSettings(newConfigDir(), EMPTY_KEY);
+
+  expect(loadConfigLeniently({ HOME: home }).problem).toContain("ask.apiKey");
+});
+
+test("the lenient load keeps the settings that pass the schema", async () => {
+  await writeSettings(newConfigDir(), EMPTY_KEY);
+
+  expect(loadConfigLeniently({ HOME: home }).settings.entries).toStrictEqual({
+    claude: { type: "http", url: "http://127.0.0.1:29741/mcp" },
+  });
+});
+
+test("the strict load names the field that fails the schema", async () => {
+  await writeSettings(newConfigDir(), EMPTY_KEY);
+
+  expect(() => loadConfig({ HOME: home })).toThrow("ask.apiKey");
 });

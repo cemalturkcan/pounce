@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SERVER_VERSION } from "./config/version.ts";
@@ -70,4 +70,26 @@ test("the legacy --daemon-status flag still reports the daemon", async () => {
   const status = await cli(["--daemon-status"]);
 
   expect(JSON.parse(status.stdout).running).toBe(false);
+});
+
+async function cliWithBadConfig(args: string[]) {
+  dataDir = await mkdtemp(path.join(tmpdir(), "pounce-cli-"));
+  const configDir = path.join(dataDir, ".config", "pounce");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(
+    path.join(configDir, "config.json"),
+    JSON.stringify({ ask: { mode: "api-key", apiKey: "" } }),
+  );
+  return runServer(SOURCE_SERVER, path.join(dataDir, "data"), freePort(), args, {
+    HOME: dataDir,
+    XDG_CONFIG_HOME: path.join(dataDir, ".config"),
+  });
+}
+
+test("daemon status answers when config.json fails the schema", async () => {
+  expect((await cliWithBadConfig(["daemon", "status"])).exitCode).toBe(0);
+});
+
+test("the daemon refuses to start when config.json fails the schema", async () => {
+  expect((await cliWithBadConfig(["--daemon"])).stderr).toContain("ask.apiKey");
 });

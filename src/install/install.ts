@@ -10,8 +10,8 @@ import {
 } from "../browser/import-profile.ts";
 import { ensureDaemon, SERVICE_NAME } from "../cli/daemon-control.ts";
 import { runCommand, type Runner, selfCommand } from "../cli/process.ts";
-import { type Config, loadConfig } from "../config/config.ts";
-import { type AskMode, type AskSetting, readSettings, type Settings } from "../config/settings.ts";
+import { type Config, loadConfigLeniently } from "../config/config.ts";
+import { type AskMode, type AskSetting, type Settings } from "../config/settings.ts";
 import { SERVER_VERSION } from "../config/version.ts";
 import { daemonHoldsProfile, type DaemonRegistry, runningDaemon } from "../server/daemon.ts";
 import { messageOf } from "../shared/errors.ts";
@@ -315,7 +315,9 @@ async function apiKey(run: Run, previous: AskSetting | undefined) {
     return fromEnv;
   if (stored && (await io.prompts.confirm("Keep the stored Anthropic API key?", true)))
     return stored;
-  return io.prompts.secret("Anthropic API key (input hidden):");
+  const typed = (await io.prompts.secret("Anthropic API key (input hidden):")).trim();
+  if (!typed) throw new StepFailure("No Anthropic API key was entered, so none was stored.");
+  return typed;
 }
 
 async function adapterPath(run: Run, previous: AskSetting | undefined) {
@@ -566,27 +568,41 @@ async function healthStep(run: Run, before: DaemonRegistry | undefined, askChang
     );
 }
 
+async function rewriteInvalidSettings(run: Run, problem: string) {
+  const { io } = run;
+  const file = tilde(run, run.config.configFile);
+  io.print(warn(`${file} does not match what pounce expects: ${problem}`));
+  if (!io.tty) {
+    io.print("  It is rewritten from this run's choices; the settings that were valid are kept.");
+    return true;
+  }
+  if (await io.prompts.confirm(`Rewrite ${file} from your answers?`, true)) return true;
+  io.print(bad(`Left ${file} as it is; fix it by hand or run \`pounce install\` again.`));
+  return false;
+}
+
 export async function install(args: readonly string[], io: InstallIo): Promise<number> {
   let flags: InstallFlags;
-  let config: Config;
+  let loaded: ReturnType<typeof loadConfigLeniently>;
   if (args.includes("--help") || args.includes("-h")) {
     io.print(INSTALL_USAGE);
     return 0;
   }
   try {
     flags = parseInstallFlags(args);
-    config = loadConfig(io.env);
+    loaded = loadConfigLeniently(io.env);
   } catch (cause) {
     io.print(bad(messageOf(cause)));
     if (cause instanceof InstallUsageError) io.print(`\n${INSTALL_USAGE}`);
     return 2;
   }
+  const { config } = loaded;
   const home = config.homeDir;
   const run: Run = {
     io,
     flags,
     config,
-    settings: readSettings(config.configFile),
+    settings: loaded.settings,
     home,
     configHome: io.env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"),
     dataHome: io.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share"),
@@ -594,6 +610,7 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
   };
   io.print(styleText("bold", `pounce ${SERVER_VERSION} setup`));
   try {
+    if (loaded.problem && !(await rewriteInvalidSettings(run, loaded.problem))) return 1;
     const command = binaryStep(run);
     const configured = await agentsStep(run, command);
     const previousAsk = run.settings.ask;

@@ -3,7 +3,13 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { type LogLevel, parseLogLevel } from "../log/logger.ts";
-import { type AskSetting, readSettings, resolveAsk } from "./settings.ts";
+import {
+  type AskSetting,
+  readSettings,
+  readSettingsLeniently,
+  resolveAsk,
+  type SettingsRead,
+} from "./settings.ts";
 import { SERVER_VERSION } from "./version.ts";
 
 const DEFAULT_CHROME_POLICY_DIRS = [
@@ -145,7 +151,12 @@ function decodeEnvironment(source: NodeJS.ProcessEnv) {
   throw new Error(parsed.error.issues.map((issue) => issue.message).join("; "));
 }
 
-export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
+type LoadedConfig = { config: Config; read: SettingsRead };
+
+function buildConfig(
+  source: NodeJS.ProcessEnv,
+  readSettingsFile: (file: string) => SettingsRead,
+): LoadedConfig {
   const env = decodeEnvironment(source);
   const home = env.HOME ?? homedir();
   const dataHome = env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
@@ -162,11 +173,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     path.join(home, ".config", "web-agent-mcp"),
   );
   const configFile = path.join(configDir, "config.json");
-  const settings = readSettings(configFile);
+  const read = readSettingsFile(configFile);
   const port = env.WEB_AGENT_DAEMON_PORT;
   const hasDisplay = Boolean(env.WAYLAND_DISPLAY || env.DISPLAY);
 
-  return {
+  const config: Config = {
     serverName: PRODUCT_NAME,
     serverVersion: SERVER_VERSION,
     host: "127.0.0.1",
@@ -196,9 +207,19 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     consoleHook: env.WEB_AGENT_CONSOLE_HOOK,
     askAdapter: env.WEB_AGENT_ASK_ADAPTER,
     askAdapterPath: path.join(configDir, "ask-adapter.mjs"),
-    ask: resolveAsk(settings.ask, env.ANTHROPIC_API_KEY),
+    ask: resolveAsk(read.settings.ask, env.ANTHROPIC_API_KEY),
     configDir,
     configFile,
     serviceFile: path.join(configHome, "systemd", "user", `${PRODUCT_NAME}.service`),
   };
+  return { config, read };
+}
+
+export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
+  return buildConfig(source, (file) => ({ settings: readSettings(file) })).config;
+}
+
+export function loadConfigLeniently(source: NodeJS.ProcessEnv = process.env) {
+  const { config, read } = buildConfig(source, readSettingsLeniently);
+  return { config, ...read };
 }

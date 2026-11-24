@@ -14,7 +14,7 @@ import { runCommand, type Runner, selfCommand } from "./process.ts";
 const START_TIMEOUT_MS = 20_000;
 const POLL_MS = 200;
 const LOG_TAIL_LINES = 20;
-const STOPPED_UNIT_STATES = ["auto-restart", "failed", "dead", "exited"];
+const STOPPED_UNIT_STATES = new Set(["auto-restart", "failed", "dead", "exited"]);
 
 export const SERVICE_NAME = `${PRODUCT_NAME}.service`;
 export const LEGACY_SERVICE = "claude-code-pair-web-agent.service";
@@ -97,7 +97,7 @@ async function unitStopped(unit: string, control: DaemonControl) {
     "--value",
     unit,
   ]);
-  return STOPPED_UNIT_STATES.includes(shown.stdout.trim());
+  return STOPPED_UNIT_STATES.has(shown.stdout.trim());
 }
 
 async function startService(config: Config, control: DaemonControl, deadline: number) {

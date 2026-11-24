@@ -502,3 +502,84 @@ test("a usage error lists the install options", async () => {
 
   expect(printed()).toContain("--profile <choice>");
 });
+
+async function invalidSettings() {
+  await mkdir(at(".config", "pounce"), { recursive: true });
+  await writeFile(
+    at(".config", "pounce", "config.json"),
+    JSON.stringify({
+      ask: { mode: "api-key", apiKey: "" },
+      entries: { claude: { type: "http", url: "http://127.0.0.1:29999/mcp" } },
+    }),
+  );
+}
+
+describe("a config.json that fails the schema", () => {
+  test("does not stop install", async () => {
+    await invalidSettings();
+
+    expect(await runInstall(BASIC)).toBe(0);
+  });
+
+  test("is named with the field that is wrong", async () => {
+    await invalidSettings();
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("ask.apiKey");
+  });
+
+  test("is rewritten from the new answers", async () => {
+    await invalidSettings();
+    await runInstall(BASIC);
+
+    expect(settings().ask).toStrictEqual({ mode: "off" });
+  });
+
+  test("keeps the entries pounce wrote, so a port change updates them", async () => {
+    await invalidSettings();
+    await writeFile(
+      at(".claude.json"),
+      '{"mcpServers": {"pounce": {"type": "http", "url": "http://127.0.0.1:29999/mcp"}}}',
+    );
+    await runInstall(BASIC, { env: { WEB_AGENT_DAEMON_PORT: "29998" } });
+
+    expect(printed()).toContain("Updated pounce in Claude Code");
+  });
+
+  test("is offered for a rewrite in a terminal", async () => {
+    await invalidSettings();
+    await runInstall(BASIC, { tty: true });
+
+    expect(asked.some((question) => question.question.startsWith("Rewrite"))).toBe(true);
+  });
+
+  test("is left alone when the rewrite is declined", async () => {
+    await invalidSettings();
+    const before = await readFile(at(".config", "pounce", "config.json"), "utf8");
+    await runInstall(BASIC, { tty: true, answers: { confirm: [false] } });
+
+    expect(await readFile(at(".config", "pounce", "config.json"), "utf8")).toBe(before);
+  });
+});
+
+describe("an API key of only spaces", () => {
+  test("fails the install", async () => {
+    expect(
+      await runInstall(["-a", "claude", "--ask", "api-key"], {
+        tty: true,
+        answers: { secret: ["   "] },
+      }),
+    ).toBe(1);
+  });
+
+  test("is never stored", async () => {
+    await runInstall(["-a", "claude", "--ask", "api-key"], {
+      tty: true,
+      answers: { secret: ["   "] },
+    });
+
+    expect(await readFile(at(".config", "pounce", "config.json"), "utf8")).not.toContain(
+      '"apiKey"',
+    );
+  });
+});
