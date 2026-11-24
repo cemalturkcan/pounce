@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ensureDaemon } from "../cli/daemon-control.ts";
 import type { CommandResult, Runner } from "../cli/process.ts";
 import { loadConfig, loadConfigLeniently } from "../config/config.ts";
 import type { DaemonRegistry } from "../server/daemon.ts";
@@ -286,12 +287,25 @@ describe("the service step", () => {
     );
   });
 
-  test("leaves the install's WEB_AGENT settings to config.json, so editing it is enough", async () => {
+  test("is still the daemon's unit after the port saved in config.json is edited", async () => {
     await runInstall(BASIC, { replies: {} });
+    const file = at(".config", "pounce", "config.json");
+    const saved = JSON.parse(await readFile(file, "utf8"));
+    await writeFile(file, JSON.stringify({ ...saved, env: { WEB_AGENT_DAEMON_PORT: "31111" } }));
+    const env = { HOME: home };
+    const started: string[][] = [];
+    await ensureDaemon(loadConfig(env), env, {
+      runner: async (command) => {
+        started.push([...command]);
+        return { code: 0, stdout: command[2] === "show" ? "failed\n" : "", stderr: "" };
+      },
+      spawnDetached: (command) => {
+        started.push([...command]);
+        return { exited: () => true };
+      },
+    }).catch(() => undefined);
 
-    expect(
-      await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8"),
-    ).not.toContain("WEB_AGENT_");
+    expect(started[0]).toStrictEqual(["systemctl", "--user", "start", "pounce.service"]);
   });
 
   test("enables and starts it", async () => {
@@ -358,7 +372,7 @@ describe("the service step", () => {
     expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(true);
   });
 
-  test("does not claim a claude-code-pair-web-agent.service for another port runs the daemon", async () => {
+  test("says pounce.service runs the daemon when claude-code-pair-web-agent.service serves another port", async () => {
     await mkdir(at(".config", "systemd", "user"), { recursive: true });
     await writeFile(
       at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
@@ -366,7 +380,7 @@ describe("the service step", () => {
     );
     await runInstall(BASIC, { replies: {} });
 
-    expect(printed()).not.toContain("claude-code-pair-web-agent.service");
+    expect(printed()).toContain("pounce.service is enabled and started");
   });
 });
 
