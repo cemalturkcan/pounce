@@ -1,0 +1,489 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { CommandResult, Runner } from "../cli/process.ts";
+import { loadConfig } from "../config/config.ts";
+import { readSettings } from "../config/settings.ts";
+import type { DaemonRegistry } from "../server/daemon.ts";
+import { parseJsonc } from "./jsonc.ts";
+import { install, type InstallIo } from "./install.ts";
+import type { Choice, Prompts } from "./prompt.ts";
+import { SKILL } from "./skill.ts";
+
+const FAKE_KEY = "sk-ant-test-install-0000000000";
+
+let home: string;
+let output: string[];
+let commands: string[][];
+let asked: { kind: string; question: string; initial?: string; labels?: string[] }[];
+
+beforeEach(async () => {
+  home = await mkdtemp(path.join(tmpdir(), "pounce-install-"));
+  output = [];
+  commands = [];
+  asked = [];
+});
+
+afterEach(async () => {
+  await rm(home, { recursive: true, force: true });
+});
+
+type Answers = { select?: string[]; pickMany?: string[][]; confirm?: boolean[]; secret?: string[] };
+
+function scriptedPrompts(answers: Answers): Prompts {
+  return {
+    async select<T extends string>(question: string, choices: Choice<T>[], initial: T) {
+      asked.push({
+        kind: "select",
+        question,
+        initial,
+        labels: choices.map((choice) => choice.label),
+      });
+      const answer = answers.select?.shift() ?? initial;
+      return choices.find((choice) => choice.value === answer)?.value ?? initial;
+    },
+    async pickMany<T extends string>(question: string, choices: Choice<T>[], initial: T[]) {
+      asked.push({ kind: "pickMany", question, initial: initial.join(",") });
+      const answer = answers.pickMany?.shift();
+      return answer
+        ? choices.filter((choice) => answer.includes(choice.value)).map((choice) => choice.value)
+        : initial;
+    },
+    async confirm(question: string, initial: boolean) {
+      asked.push({ kind: "confirm", question, initial: String(initial) });
+      return answers.confirm?.shift() ?? initial;
+    },
+    async secret(question: string) {
+      asked.push({ kind: "secret", question });
+      return answers.secret?.shift() ?? "";
+    },
+    async text(question: string, initial: string) {
+      asked.push({ kind: "text", question, initial });
+      return initial;
+    },
+  };
+}
+
+function runner(replies: Record<string, Partial<CommandResult>> = {}): Runner {
+  return async (command) => {
+    commands.push([...command]);
+    const key = command.slice(0, 4).join(" ");
+    const match = Object.entries(replies).find(([prefix]) => key.startsWith(prefix));
+    return { code: 0, stdout: "", stderr: "", ...match?.[1] };
+  };
+}
+
+const NO_SYSTEMD = {
+  "systemctl --user show-environment": { code: 1, stderr: "Failed to connect to bus" },
+};
+
+async function fakeBinary() {
+  const file = path.join(home, "Downloads", "pounce-linux-x64");
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, "#!/bin/sh\n");
+  await chmod(file, 0o755);
+  return file;
+}
+
+type Options = {
+  env?: NodeJS.ProcessEnv;
+  tty?: boolean;
+  answers?: Answers;
+  replies?: Record<string, Partial<CommandResult>>;
+  chromeOk?: boolean;
+};
+
+async function runInstall(args: string[], options: Options = {}) {
+  const env: NodeJS.ProcessEnv = {
+    HOME: home,
+    PATH: "/usr/bin:/bin",
+    SHELL: "/bin/bash",
+    WEB_AGENT_DAEMON_PORT: "29999",
+    ...options.env,
+  };
+  const binary = await fakeBinary();
+  const io: InstallIo = {
+    env,
+    tty: options.tty ?? false,
+    print: (line) => output.push(line),
+    prompts: scriptedPrompts(options.answers ?? {}),
+    runner: runner(options.replies ?? NO_SYSTEMD),
+    executable: { path: binary, compiled: true },
+    sourceCommand: ["/usr/bin/bun", "/src/server.ts"],
+    onPath: () => false,
+    ensureDaemon: async (config): Promise<DaemonRegistry> => ({
+      pid: 4242,
+      endpoint: config.endpoint,
+      port: config.port,
+      dataDir: config.dataDir,
+      profileDir: config.profileDir,
+      startedAt: new Date().toISOString(),
+      version: config.serverVersion,
+    }),
+    checkChrome: async () =>
+      options.chromeOk === false
+        ? { ok: false, executable: "/opt/google/chrome/chrome", detail: "not found" }
+        : { ok: true, executable: "/opt/google/chrome/chrome" },
+  };
+  return install(args, io);
+}
+
+const BASIC = ["-a", "claude", "--ask", "off", "--profile", "fresh"];
+const printed = () => output.join("\n");
+const at = (...parts: string[]) => path.join(home, ...parts);
+const settings = () => readSettings(loadConfig({ HOME: home }).configFile);
+
+async function claudeJson() {
+  return parseJsonc(await readFile(at(".claude.json"), "utf8"));
+}
+
+describe("a non-interactive install for Claude Code", () => {
+  test("exits 0", async () => {
+    expect(await runInstall(BASIC)).toBe(0);
+  });
+
+  test("places the binary in ~/.local/bin", async () => {
+    await runInstall(BASIC);
+
+    expect(existsSync(at(".local", "bin", "pounce"))).toBe(true);
+  });
+
+  test("adds ~/.local/bin to PATH in the shell startup file", async () => {
+    await runInstall(BASIC);
+
+    expect(await readFile(at(".bashrc"), "utf8")).toContain(
+      `export PATH='${at(".local", "bin")}':"$PATH"`,
+    );
+  });
+
+  test("writes the HTTP entry to ~/.claude.json", async () => {
+    await runInstall(BASIC);
+
+    expect(await claudeJson()).toStrictEqual({
+      mcpServers: { pounce: { type: "http", url: "http://127.0.0.1:29999/mcp" } },
+    });
+  });
+
+  test("copies the skill", async () => {
+    await runInstall(BASIC);
+
+    expect(await readFile(at(".claude", "skills", "pounce", "SKILL.md"), "utf8")).toBe(SKILL);
+  });
+
+  test("saves the choices to config.json", async () => {
+    await runInstall(BASIC);
+
+    expect(settings().ask).toStrictEqual({ mode: "off" });
+  });
+
+  test("keeps config.json private", async () => {
+    await runInstall(BASIC);
+
+    expect((await stat(at(".config", "pounce", "config.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  test("prints the first prompt to try", async () => {
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("Use pounce to open news.ycombinator.com");
+  });
+});
+
+test("--no-modify-path leaves the shell startup file alone", async () => {
+  await runInstall([...BASIC, "--no-modify-path"]);
+
+  expect(existsSync(at(".bashrc"))).toBe(false);
+});
+
+test("config.json goes to the old web-agent-mcp dir when only it exists", async () => {
+  await mkdir(at(".config", "web-agent-mcp"), { recursive: true });
+  await runInstall(BASIC);
+
+  expect(existsSync(at(".config", "web-agent-mcp", "config.json"))).toBe(true);
+});
+
+test("the old web-agent-mcp dir is not orphaned by a new pounce dir", async () => {
+  await mkdir(at(".config", "web-agent-mcp"), { recursive: true });
+  await runInstall(BASIC);
+
+  expect(existsSync(at(".config", "pounce"))).toBe(false);
+});
+
+describe("the service step", () => {
+  test("writes pounce.service that runs the installed binary as the daemon", async () => {
+    await runInstall(BASIC, { replies: {} });
+
+    expect(await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8")).toContain(
+      `ExecStart=${at(".local", "bin", "pounce")} --daemon`,
+    );
+  });
+
+  test("passes the install's WEB_AGENT settings to the service", async () => {
+    await runInstall(BASIC, { replies: {} });
+
+    expect(await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8")).toContain(
+      "Environment=WEB_AGENT_DAEMON_PORT=29999",
+    );
+  });
+
+  test("enables and starts it", async () => {
+    await runInstall(BASIC, { replies: {} });
+
+    expect(
+      commands.filter((command) => command[2] === "enable" || command[2] === "start"),
+    ).toStrictEqual([
+      ["systemctl", "--user", "enable", "pounce.service"],
+      ["systemctl", "--user", "start", "pounce.service"],
+    ]);
+  });
+
+  test("is skipped without systemd --user", async () => {
+    await runInstall(BASIC);
+
+    expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(false);
+  });
+
+  test("says why it was skipped without systemd --user", async () => {
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("systemd --user is not available");
+  });
+
+  test("leaves an existing claude-code-pair-web-agent.service alone", async () => {
+    await mkdir(at(".config", "systemd", "user"), { recursive: true });
+    await writeFile(
+      at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
+      "[Service]\n",
+    );
+    await runInstall(BASIC, { replies: {} });
+
+    expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(false);
+  });
+});
+
+describe("choosing agents without a terminal", () => {
+  test("an agent running install sets up itself", async () => {
+    await runInstall(["--ask", "off"], { env: { CLAUDECODE: "1" } });
+
+    expect(existsSync(at(".claude.json"))).toBe(true);
+  });
+
+  test("with no caller and no --agent no agent config is written", async () => {
+    await runInstall(["--ask", "off"]);
+
+    expect(existsSync(at(".claude.json"))).toBe(false);
+  });
+
+  test("--agent none prints the entry to add by hand", async () => {
+    await runInstall(["--agent", "none", "--ask", "off"]);
+
+    expect(printed()).toContain(
+      '{"mcpServers":{"pounce":{"type":"http","url":"http://127.0.0.1:29999/mcp"}}}',
+    );
+  });
+
+  test("-y configures every detected agent", async () => {
+    await mkdir(at(".codex"), { recursive: true });
+    await mkdir(at(".gemini"), { recursive: true });
+    await runInstall(["-y", "--ask", "off"]);
+
+    expect([
+      existsSync(at(".codex", "config.toml")),
+      existsSync(at(".gemini", "settings.json")),
+    ]).toStrictEqual([true, true]);
+  });
+
+  test("an unknown agent name is a usage error", async () => {
+    expect(await runInstall(["-a", "notepad"])).toBe(2);
+  });
+});
+
+describe("re-running install", () => {
+  test("reports the entry as already there", async () => {
+    await runInstall(BASIC);
+    output = [];
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("Claude Code already has pounce");
+  });
+
+  test("updates the entry it wrote when the port changed", async () => {
+    await runInstall(BASIC);
+    await runInstall(BASIC, { env: { WEB_AGENT_DAEMON_PORT: "29998" } });
+
+    expect(await claudeJson()).toStrictEqual({
+      mcpServers: { pounce: { type: "http", url: "http://127.0.0.1:29998/mcp" } },
+    });
+  });
+
+  test("leaves a pounce entry someone else wrote and exits 1", async () => {
+    await writeFile(
+      at(".claude.json"),
+      '{"mcpServers": {"pounce": {"type": "http", "url": "http://elsewhere/mcp"}}}',
+    );
+
+    expect(await runInstall(BASIC)).toBe(1);
+  });
+
+  test("offers the previous ask_pages choice as the default", async () => {
+    await runInstall(["-a", "claude", "--ask", "adapter", "--adapter", await fakeBinary()]);
+    asked = [];
+    await runInstall(["-a", "claude"], { tty: true });
+
+    expect(asked.find((question) => question.kind === "select")?.initial).toBe("adapter");
+  });
+});
+
+describe("the ask_pages step", () => {
+  test("stores the key from ANTHROPIC_API_KEY", async () => {
+    await runInstall(["-a", "claude", "--ask", "api-key"], {
+      env: { ANTHROPIC_API_KEY: FAKE_KEY },
+    });
+
+    expect(settings().ask).toStrictEqual({ mode: "api-key", apiKey: FAKE_KEY });
+  });
+
+  test("never prints the key", async () => {
+    await runInstall(["-a", "claude", "--ask", "api-key"], {
+      env: { ANTHROPIC_API_KEY: FAKE_KEY },
+    });
+
+    expect(printed()).not.toContain(FAKE_KEY);
+  });
+
+  test("asks for the key without echo in a terminal", async () => {
+    await runInstall(["-a", "claude", "--ask", "api-key"], {
+      tty: true,
+      answers: { secret: [FAKE_KEY] },
+    });
+
+    expect(settings().ask).toStrictEqual({ mode: "api-key", apiKey: FAKE_KEY });
+  });
+
+  test("api-key without a key and without a terminal fails", async () => {
+    expect(await runInstall(["-a", "claude", "--ask", "api-key"])).toBe(1);
+  });
+
+  test("offers the Claude Code login only when there is a session", async () => {
+    await runInstall(["-a", "claude"], { tty: true });
+
+    expect(asked.find((question) => question.kind === "select")?.labels).toStrictEqual([
+      "Anthropic API key",
+      "My own adapter file",
+      "Off",
+    ]);
+  });
+
+  test("defaults to the Claude Code login when there is a session", async () => {
+    await mkdir(at(".claude"), { recursive: true });
+    await writeFile(at(".claude", ".credentials.json"), "{}");
+    await runInstall(["-a", "claude", "--profile", "fresh"]);
+
+    expect(settings().ask).toStrictEqual({ mode: "claude" });
+  });
+
+  test("--ask claude without a session fails", async () => {
+    expect(await runInstall(["-a", "claude", "--ask", "claude"])).toBe(1);
+  });
+});
+
+async function chromeProfile() {
+  const userData = at(".config", "google-chrome");
+  await mkdir(path.join(userData, "Default"), { recursive: true });
+  await writeFile(
+    path.join(userData, "Local State"),
+    JSON.stringify({
+      profile: { info_cache: { Default: { name: "Person 1", user_name: "me@example.com" } } },
+    }),
+  );
+  await writeFile(path.join(userData, "Default", "Bookmarks"), '{"roots": {}}');
+}
+
+describe("the profile step", () => {
+  test("lists the user's browser profiles with their account", async () => {
+    await chromeProfile();
+    await runInstall(["-a", "claude", "--ask", "off"], { tty: true });
+
+    expect(asked.find((question) => question.question.includes("profile"))?.labels).toContain(
+      "Copy Google Chrome: Person 1 (me@example.com)",
+    );
+  });
+
+  test("copies the chosen profile into the agent profile", async () => {
+    await chromeProfile();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Default"]);
+
+    expect(
+      existsSync(path.join(loadConfig({ HOME: home }).profileDir, "Default", "Bookmarks")),
+    ).toBe(true);
+  });
+
+  test("prints the Chrome Sync hint for a fresh profile", async () => {
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("turn on Sync");
+  });
+});
+
+describe("the desktop step", () => {
+  test("makes pounce the default browser when asked", async () => {
+    await runInstall([...BASIC, "--desktop"], {
+      replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: "firefox.desktop\n" } },
+    });
+
+    expect(commands).toContainEqual([
+      "xdg-settings",
+      "set",
+      "default-web-browser",
+      "pounce.desktop",
+    ]);
+  });
+
+  test("writes a desktop entry that runs pounce open", async () => {
+    await runInstall([...BASIC, "--desktop"]);
+
+    expect(
+      await readFile(at(".local", "share", "applications", "pounce.desktop"), "utf8"),
+    ).toContain(`Exec=${at(".local", "bin", "pounce")} open %U`);
+  });
+
+  test("leaves a wrapper default browser alone", async () => {
+    await mkdir(at(".local", "share", "applications"), { recursive: true });
+    await writeFile(
+      at(".local", "share", "applications", "omarchy-browser.desktop"),
+      "[Desktop Entry]\nExec=omarchy-launch-browser %U\n",
+    );
+    await runInstall([...BASIC, "--desktop"], {
+      replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: "omarchy-browser.desktop\n" } },
+    });
+
+    expect(commands.some((command) => command[1] === "set")).toBe(false);
+  });
+
+  test("says what to change in a wrapper default browser", async () => {
+    await mkdir(at(".local", "share", "applications"), { recursive: true });
+    await writeFile(
+      at(".local", "share", "applications", "omarchy-browser.desktop"),
+      "[Desktop Entry]\nExec=omarchy-launch-browser %U\n",
+    );
+    await runInstall([...BASIC, "--desktop"], {
+      replies: { ...NO_SYSTEMD, "xdg-settings get": { stdout: "omarchy-browser.desktop\n" } },
+    });
+
+    expect(printed()).toContain(
+      `make that launcher run \`${at(".local", "bin", "pounce")} open %U\``,
+    );
+  });
+
+  test("is not touched without --desktop", async () => {
+    await runInstall(BASIC);
+
+    expect(commands.some((command) => command[0] === "xdg-settings")).toBe(false);
+  });
+});
+
+test("a Chrome that does not start fails the install", async () => {
+  expect(await runInstall(BASIC, { chromeOk: false })).toBe(1);
+});

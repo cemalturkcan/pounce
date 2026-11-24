@@ -16,6 +16,7 @@ import { SERVER_VERSION } from "./config/version.ts";
 import { ensureDaemon } from "./cli/daemon-control.ts";
 import { proxyStdioToDaemon } from "./cli/mcp-proxy.ts";
 import { launchDetached, openBrowser } from "./cli/open.ts";
+import { runInstall } from "./install/install.ts";
 import { desktopNotifier } from "./shared/notify.ts";
 import {
   daemonHoldsProfile,
@@ -90,6 +91,10 @@ async function runCommand(config: Config, command: string, rest: string[]) {
       launch: launchDetached,
       notify: desktopNotifier,
     });
+    return;
+  }
+  if (command === "install") {
+    process.exitCode = await runInstall(rest);
     return;
   }
   if (command === "help" || command === "--help" || command === "-h") return writeStdout(USAGE);
