@@ -82,6 +82,14 @@ Pass the API's stop reason through as `stopReason`: `max_tokens` and `model_cont
 cut off with the partial answers, `interrupted` as interrupted, and `refusal` as a failed call. `usage` is any map of
 numbers; pounce adds them up per call and logs them.
 
+### Call sizes
+
+`ask_pages` sets no limits by default: pages are not clipped, one call takes as many pages as fit about 3 million
+characters, the output limit is 128000 tokens, and a call has no time limit unless `timeout_ms` sets one. A call the
+API rejects because the prompt exceeds the context window or the request exceeds its size limit is split in half and
+retried, down to single pages. `batch_chars`, `max_pages_per_batch`, `max_chars_per_page` and `max_output_tokens`
+lower the sizes your adapter receives.
+
 ### converse (optional)
 
 With `converse`, `ask_pages` can browse: a page whose answer sits behind a toggle, tab, hover or same-site link is
