@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -207,6 +207,21 @@ test("isDaemonProcess of a compiled server rejects another executable run with -
   await withSleeper(["--daemon"], (pid) =>
     expect(isDaemonProcess(pid, { binary: "/usr/bin/env" })).toBe(false),
   );
+});
+
+test("isDaemonProcess accepts the server started through a bin link named pounce", async () => {
+  const binDir = await mkdtemp(path.join(tmpdir(), "pounce-bin-"));
+  try {
+    const link = path.join(binDir, "pounce");
+    await symlink(path.join(PACKAGE_DIR, "src", "server.ts"), link);
+    await withSleeper([link, "--daemon"], (pid) =>
+      expect(isDaemonProcess(pid, { script: path.join(PACKAGE_DIR, "src", "server.ts") })).toBe(
+        true,
+      ),
+    );
+  } finally {
+    await rm(binDir, { recursive: true, force: true });
+  }
 });
 
 test("host and origin validation only accepts the loopback endpoint", () => {

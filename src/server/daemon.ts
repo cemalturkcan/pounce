@@ -90,9 +90,7 @@ const SELF_LAUNCH: ServerLaunch = Bun.isStandaloneExecutable
 function launchedAs(pid: number, args: string[], launch: ServerLaunch) {
   if ("binary" in launch) return sameFile(`/proc/${pid}/exe`, launch.binary);
   const cwd = readlinkSync(`/proc/${pid}/cwd`);
-  return args.some(
-    (arg) => arg.endsWith("server.ts") && sameFile(path.resolve(cwd, arg), launch.script),
-  );
+  return args.some((arg) => sameFile(path.resolve(cwd, arg), launch.script));
 }
 
 export function isDaemonProcess(pid: number | undefined, launch = SELF_LAUNCH) {
