@@ -110,6 +110,7 @@ type Options = {
   answers?: Answers;
   replies?: Record<string, Partial<CommandResult>>;
   chromeOk?: boolean;
+  source?: string;
 };
 
 async function runInstall(args: string[], options: Options = {}) {
@@ -127,8 +128,10 @@ async function runInstall(args: string[], options: Options = {}) {
     print: (line) => output.push(line),
     prompts: scriptedPrompts(options.answers ?? {}),
     runner: runner(options.replies ?? NO_SYSTEMD),
-    executable: { path: binary, compiled: true },
-    sourceCommand: ["/usr/bin/bun", "/src/server.ts"],
+    executable: options.source
+      ? { path: "/usr/bin/bun", compiled: false }
+      : { path: binary, compiled: true },
+    sourceCommand: ["/usr/bin/bun", options.source ?? "/src/server.ts"],
     onPath: () => false,
     ensureDaemon: async (config): Promise<DaemonRegistry> => ({
       pid: 4242,
@@ -226,6 +229,43 @@ test("the old web-agent-mcp dir is not orphaned by a new pounce dir", async () =
   await runInstall(BASIC);
 
   expect(existsSync(at(".config", "pounce"))).toBe(false);
+});
+
+const uid = process.getuid?.() ?? 0;
+const BUNX_SOURCE = `/home/u/.bun/install/cache/.bunx-${uid}/pounce@latest/node_modules/pounce/src/server.ts`;
+
+describe("install run from bunx's cache", () => {
+  test("exits 1", async () => {
+    expect(await runInstall(BASIC, { source: BUNX_SOURCE })).toBe(1);
+  });
+
+  test("tells the user to install pounce globally first", async () => {
+    await runInstall(BASIC, { source: BUNX_SOURCE });
+
+    expect(printed()).toContain("run `bun add -g pounce`, then `pounce install`");
+  });
+
+  test("writes nothing to the home directory", async () => {
+    await runInstall([...BASIC, "--desktop"], { source: BUNX_SOURCE });
+
+    expect(await readdir(home)).toStrictEqual(["Downloads"]);
+  });
+
+  test("is refused for bunx's temp dir layout too", async () => {
+    expect(
+      await runInstall(BASIC, {
+        source: `/tmp/bunx-${uid}-pounce@latest/node_modules/pounce/src/server.ts`,
+      }),
+    ).toBe(1);
+  });
+});
+
+test("install from bun's global packages runs", async () => {
+  expect(
+    await runInstall(BASIC, {
+      source: "/home/u/.bun/install/global/node_modules/pounce/src/server.ts",
+    }),
+  ).toBe(0);
 });
 
 describe("the service step", () => {

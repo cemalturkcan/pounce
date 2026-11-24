@@ -36,6 +36,14 @@ export function packageManaged(executable: Executable) {
   );
 }
 
+export function inBunxCache(file: string) {
+  const parts = file.split(/[\\/]/);
+  const modules = parts.lastIndexOf("node_modules");
+  return parts
+    .slice(0, Math.max(modules, 0))
+    .some((part) => /^\.bunx-\d+$/.test(part) || /^bunx-\d+-./.test(part));
+}
+
 export type Placement = { command: string[]; placed?: string };
 
 export function placeBinary(

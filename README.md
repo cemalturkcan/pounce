@@ -15,11 +15,11 @@ curl -fsSL https://raw.githubusercontent.com/cemalturkcan/web-agent-mcp/main/ins
 ```
 
 The script downloads the Linux binary (x64 or arm64) from GitHub Releases, checks its SHA-256, puts it in
-`~/.local/bin/pounce` and runs `pounce install`. With [Bun](https://bun.sh) 1.4.5 or newer you can run the installer
-from npm instead:
+`~/.local/bin/pounce` and runs `pounce install`. With [Bun](https://bun.sh) 1.4.5 or newer you can install it from
+npm instead:
 
 ```sh
-bunx pounce install
+bun add -g pounce && pounce install
 ```
 
 `pounce install` asks:

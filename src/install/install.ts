@@ -36,6 +36,7 @@ import {
   addToPath,
   binDir,
   type Executable,
+  inBunxCache,
   onPathAlready,
   placeBinary,
   shellWord,
@@ -641,6 +642,14 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
     io.print(bad(messageOf(cause)));
     if (cause instanceof InstallUsageError) io.print(`\n${INSTALL_USAGE}`);
     return 2;
+  }
+  if (io.sourceCommand.some(inBunxCache)) {
+    io.print(
+      bad(
+        "pounce install cannot run from bunx's temporary cache; run `bun add -g pounce`, then `pounce install`.",
+      ),
+    );
+    return 1;
   }
   const { config } = loaded;
   const home = config.homeDir;

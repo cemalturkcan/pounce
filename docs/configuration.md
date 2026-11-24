@@ -7,7 +7,7 @@ pounce somewhere unusual.
 
 | What       | Where                                                          | Notes                                                                                                                  |
 | ---------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Binary     | `$XDG_BIN_HOME/pounce`, else `~/.local/bin/pounce`             | Left alone when pounce runs from a package manager (`bunx`, `bun add -g`)                                              |
+| Binary     | `$XDG_BIN_HOME/pounce`, else `~/.local/bin/pounce`             | Left alone when pounce runs from a package manager (`bun add -g`)                                                      |
 | Config dir | `$XDG_CONFIG_HOME/pounce`, else `~/.config/pounce`             | Holds `config.json` and an optional `ask-adapter.mjs`                                                                  |
 | Data dir   | `$XDG_DATA_HOME/pounce`, else `~/.local/share/pounce`          | Holds `profile/`, `output/`, `sites/`, `logs/` and the daemon registry `daemon.json`                                   |
 | Service    | `$XDG_CONFIG_HOME/systemd/user/pounce.service`                 | See [Service](#service)                                                                                                |
