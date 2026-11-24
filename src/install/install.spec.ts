@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CommandResult, Runner } from "../cli/process.ts";
@@ -30,7 +30,13 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-type Answers = { select?: string[]; pickMany?: string[][]; confirm?: boolean[]; secret?: string[] };
+type Answers = {
+  select?: string[];
+  pickMany?: string[][];
+  confirm?: boolean[];
+  secret?: string[];
+  onConfirm?: () => Promise<void>;
+};
 
 function scriptedPrompts(answers: Answers): Prompts {
   return {
@@ -53,6 +59,7 @@ function scriptedPrompts(answers: Answers): Prompts {
     },
     async confirm(question: string, initial: boolean) {
       asked.push({ kind: "confirm", question, initial: String(initial) });
+      await answers.onConfirm?.();
       return answers.confirm?.shift() ?? initial;
     },
     async secret(question: string) {
@@ -420,6 +427,10 @@ async function chromeProfile() {
   await writeFile(path.join(userData, "Default", "Bookmarks"), '{"roots": {}}');
 }
 
+async function runningChrome() {
+  await symlink(`host-${process.pid}`, at(".config", "google-chrome", "SingletonLock"));
+}
+
 describe("the profile step", () => {
   test("lists the user's browser profiles with their account", async () => {
     await chromeProfile();
@@ -437,6 +448,53 @@ describe("the profile step", () => {
     expect(
       existsSync(path.join(loadConfig({ HOME: home }).profileDir, "Default", "Bookmarks")),
     ).toBe(true);
+  });
+
+  test("asks to close a running browser before copying its profile", async () => {
+    await chromeProfile();
+    await runningChrome();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Default"], {
+      tty: true,
+      answers: { confirm: [false] },
+    });
+
+    expect(asked.some((question) => question.question.startsWith("Close Google Chrome"))).toBe(
+      true,
+    );
+  });
+
+  test("copies the profile once the running browser was closed", async () => {
+    await chromeProfile();
+    await runningChrome();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Default"], {
+      tty: true,
+      answers: {
+        confirm: [true],
+        onConfirm: () => rm(at(".config", "google-chrome", "SingletonLock")),
+      },
+    });
+
+    expect(
+      existsSync(path.join(loadConfig({ HOME: home }).profileDir, "Default", "Bookmarks")),
+    ).toBe(true);
+  });
+
+  test("without a terminal names how to finish once the browser is closed", async () => {
+    await chromeProfile();
+    await runningChrome();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Default"]);
+
+    expect(printed()).toContain(
+      "Close Google Chrome and run `pounce install --profile chrome:Default` again",
+    );
+  });
+
+  test("never suggests an option install does not have", async () => {
+    await chromeProfile();
+    await runningChrome();
+    await runInstall(["-a", "claude", "--ask", "off", "--profile", "chrome:Default"]);
+
+    expect(printed()).not.toContain("--live");
   });
 
   test("prints the Chrome Sync hint for a fresh profile", async () => {

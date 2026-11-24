@@ -30,9 +30,16 @@ const localState = z.object({
   }),
 });
 
+function browserOf(id: BrowserId) {
+  return BROWSERS.find((candidate) => candidate.id === id);
+}
+
 export function browserUserDataDir(id: BrowserId, configHome: string) {
-  const browser = BROWSERS.find((candidate) => candidate.id === id);
-  return path.join(configHome, ...(browser?.dir ?? []));
+  return path.join(configHome, ...(browserOf(id)?.dir ?? []));
+}
+
+export function browserName(id: BrowserId) {
+  return browserOf(id)?.name ?? id;
 }
 
 export function listProfiles(configHome: string): BrowserProfile[] {

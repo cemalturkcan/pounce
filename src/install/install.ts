@@ -7,6 +7,7 @@ import {
   importProfile,
   renderImportFailure,
   renderImportReport,
+  SourceBrowserRunning,
 } from "../browser/import-profile.ts";
 import { ensureDaemon, SERVICE_NAME } from "../cli/daemon-control.ts";
 import { runCommand, type Runner, selfCommand } from "../cli/process.ts";
@@ -30,6 +31,7 @@ import { type ChromeCheck, checkChrome } from "./health.ts";
 import {
   BROWSERS,
   type BrowserId,
+  browserName,
   browserUserDataDir,
   describeProfile,
   listProfiles,
@@ -469,12 +471,21 @@ async function importStep(run: Run, browser: BrowserId, dir: string) {
     profile: dir,
     live: false,
   };
+  const key = profileKey({ browser, dir });
+  const name = browserName(browser);
   try {
     const report = await importProfile(config, options, () => daemonHoldsProfile(config));
     io.print(ok(renderImportReport(config, options, report).split("\n").join("\n  ")));
-    run.settings = { ...run.settings, profile: profileKey({ browser, dir }) };
+    run.settings = { ...run.settings, profile: key };
   } catch (cause) {
-    if (cause instanceof ImportError) fail(run, renderImportFailure(config, cause));
+    if (cause instanceof SourceBrowserRunning) {
+      if (io.tty && (await io.prompts.confirm(`Close ${name}, then try the copy again?`, true)))
+        return importStep(run, browser, dir);
+      fail(
+        run,
+        `${name} is running. Close ${name} and run \`pounce install --profile ${key}\` again.`,
+      );
+    } else if (cause instanceof ImportError) fail(run, renderImportFailure(config, cause));
     else fail(run, messageOf(cause));
   }
 }

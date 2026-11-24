@@ -50,6 +50,15 @@ export class ImportError extends Error {
   }
 }
 
+export class SourceBrowserRunning extends Error {
+  constructor(from: string) {
+    super(
+      `Chrome is running on ${from}. Close it for a consistent copy, or pass --live to copy anyway with integrity checks.`,
+    );
+    this.name = "SourceBrowserRunning";
+  }
+}
+
 type Signature = Map<string, string>;
 
 export function defaultImportOptions(args: string[]): ImportOptions {
@@ -161,11 +170,8 @@ export async function importProfile(
       "The pounce daemon is running and owns the agent profile. Stop it first with `pounce daemon stop` (or `systemctl --user stop` for its service).",
     );
   }
-  if (!options.live && (await sourceChromeRunning(options.from))) {
-    throw new Error(
-      `Chrome is running on ${options.from}. Close it for a consistent copy, or pass --live to copy anyway with integrity checks.`,
-    );
-  }
+  if (!options.live && (await sourceChromeRunning(options.from)))
+    throw new SourceBrowserRunning(options.from);
 
   const report: ImportReport = { copied: [], skipped: [], failed: [], unstable: [] };
   const stamp = timestampSlug();
