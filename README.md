@@ -77,3 +77,7 @@ Most agents connect over HTTP to `http://127.0.0.1:29741/mcp`; clients that only
 - [docs/configuration.md](docs/configuration.md): `config.json`, environment variables, folders, the service, logs
 - [docs/adapters.md](docs/adapters.md): how `ask_pages` reaches a model, and writing your own adapter
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup, checks, tests and releases
+
+## License
+
+MIT, see [LICENSE](LICENSE).

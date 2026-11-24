@@ -6,6 +6,7 @@
   "bugs": {
     "url": "https://github.com/cemalturkcan/web-agent-mcp/issues"
   },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cemalturkcan/web-agent-mcp.git"
