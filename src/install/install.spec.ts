@@ -487,3 +487,18 @@ describe("the desktop step", () => {
 test("a Chrome that does not start fails the install", async () => {
   expect(await runInstall(BASIC, { chromeOk: false })).toBe(1);
 });
+
+test("a terminal run after an undetected run pre-ticks the detected agents", async () => {
+  await mkdir(at(".codex"), { recursive: true });
+  await runInstall(["--ask", "off"]);
+  asked = [];
+  await runInstall(["--ask", "off"], { tty: true });
+
+  expect(asked.find((question) => question.kind === "pickMany")?.initial).toBe("codex");
+});
+
+test("a usage error lists the install options", async () => {
+  await runInstall(["--frobnicate"]);
+
+  expect(printed()).toContain("--profile <choice>");
+});

@@ -59,6 +59,16 @@ type AgentEntries = NonNullable<Settings["entries"]>;
 
 export class InstallUsageError extends Error {}
 
+export const INSTALL_USAGE = `Usage: pounce install [options]
+
+  -a, --agent <names...>   ${AGENT_NAMES.join(", ")}, or none to print the entry
+  -y, --yes                set up every agent found on this machine
+  --ask <mode>             claude, api-key (key from ANTHROPIC_API_KEY or a prompt), adapter or off
+  --adapter <path>         the adapter module for --ask adapter
+  --profile <choice>       fresh, or <browser>[:<profile dir>] with browser chrome, chromium, brave or edge
+  --desktop, --no-desktop  make pounce the default browser, or leave it
+  --no-modify-path         do not add ~/.local/bin to PATH in the shell startup file`;
+
 export type InstallFlags = {
   agents: AgentName[];
   none: boolean;
@@ -196,7 +206,7 @@ function agentPlan(run: Run, specs: AgentSpec[]) {
   if (flags.yes) return { picker: false, selected: detected };
   if (!io.tty) return { picker: false, selected: [], undetected: true };
   const remembered = run.settings.agents?.flatMap((name) => agentName(name) ?? []);
-  return { picker: true, selected: remembered ?? detected };
+  return { picker: true, selected: remembered?.length ? remembered : detected };
 }
 
 function manualEntry(run: Run, command: readonly string[]) {
@@ -559,11 +569,16 @@ async function healthStep(run: Run, before: DaemonRegistry | undefined, askChang
 export async function install(args: readonly string[], io: InstallIo): Promise<number> {
   let flags: InstallFlags;
   let config: Config;
+  if (args.includes("--help") || args.includes("-h")) {
+    io.print(INSTALL_USAGE);
+    return 0;
+  }
   try {
     flags = parseInstallFlags(args);
     config = loadConfig(io.env);
   } catch (cause) {
     io.print(bad(messageOf(cause)));
+    if (cause instanceof InstallUsageError) io.print(`\n${INSTALL_USAGE}`);
     return 2;
   }
   const home = config.homeDir;

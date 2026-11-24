@@ -143,7 +143,7 @@ function indentUnit(text: string) {
     .filter((indent): indent is string => indent !== undefined);
   if (indents.some((indent) => indent.startsWith("\t"))) return "\t";
   const widths = indents.map((indent) => indent.length);
-  return " ".repeat(widths.length ? Math.min(...widths) : 2);
+  return " ".repeat(widths.length ? widths.reduce((least, width) => Math.min(least, width)) : 2);
 }
 
 function render(value: JsonValue, unit: string, indent: string) {
