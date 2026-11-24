@@ -16,7 +16,12 @@ import {
   renderImportReport,
   SourceBrowserRunning,
 } from "../browser/import-profile.ts";
-import { ensureDaemon, SERVICE_NAME } from "../cli/daemon-control.ts";
+import {
+  ensureDaemon,
+  LEGACY_SERVICE,
+  legacyUnitOtherDataDir,
+  SERVICE_NAME,
+} from "../cli/daemon-control.ts";
 import { runCommand, type Runner, selfCommand } from "../cli/process.ts";
 import { type Config, loadConfigLeniently } from "../config/config.ts";
 import {
@@ -691,6 +696,15 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
     backUpBeforeSave: false,
   };
   io.print(styleText("bold", `pounce ${SERVER_VERSION} setup`));
+  const legacyDataDir = legacyUnitOtherDataDir(config, io.env);
+  if (legacyDataDir) {
+    io.print(
+      bad(
+        `${LEGACY_SERVICE} from an older install already serves port ${config.port} with the data dir ${tilde(run, legacyDataDir)}; set WEB_AGENT_DAEMON_PORT to another port or remove that unit, then run \`pounce install\` again.`,
+      ),
+    );
+    return 1;
+  }
   try {
     if (loaded.problem) {
       if (!(await rewriteInvalidSettings(run, loaded.problem))) return 1;

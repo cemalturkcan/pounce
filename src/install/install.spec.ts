@@ -112,6 +112,7 @@ type Options = {
   replies?: Record<string, Partial<CommandResult>>;
   chromeOk?: boolean;
   source?: string;
+  onEnsureDaemon?: () => void;
 };
 
 async function runInstall(args: string[], options: Options = {}) {
@@ -134,15 +135,18 @@ async function runInstall(args: string[], options: Options = {}) {
       : { path: binary, compiled: true },
     sourceCommand: ["/usr/bin/bun", options.source ?? "/src/server.ts"],
     onPath: () => false,
-    ensureDaemon: async (config): Promise<DaemonRegistry> => ({
-      pid: 4242,
-      endpoint: config.endpoint,
-      port: config.port,
-      dataDir: config.dataDir,
-      profileDir: config.profileDir,
-      startedAt: new Date().toISOString(),
-      version: config.serverVersion,
-    }),
+    ensureDaemon: async (config): Promise<DaemonRegistry> => {
+      options.onEnsureDaemon?.();
+      return {
+        pid: 4242,
+        endpoint: config.endpoint,
+        port: config.port,
+        dataDir: config.dataDir,
+        profileDir: config.profileDir,
+        startedAt: new Date().toISOString(),
+        version: config.serverVersion,
+      };
+    },
     checkChrome: async () =>
       options.chromeOk === false
         ? { ok: false, executable: "/opt/google/chrome/chrome", detail: "not found" }
@@ -382,6 +386,53 @@ describe("the service step", () => {
     await runInstall(BASIC, { replies: {} });
 
     expect(printed()).toContain("pounce.service is enabled and started");
+  });
+});
+
+async function legacyUnitOnAnotherDataDir() {
+  await mkdir(at(".config", "systemd", "user"), { recursive: true });
+  await writeFile(
+    at(".config", "systemd", "user", "claude-code-pair-web-agent.service"),
+    "[Service]\nEnvironment=WEB_AGENT_DAEMON_PORT=29999 WEB_AGENT_DAEMON_DATA_DIR=%h/old-data\n",
+  );
+}
+
+describe("claude-code-pair-web-agent.service on the same port with another data dir", () => {
+  test("fails the install", async () => {
+    await legacyUnitOnAnotherDataDir();
+
+    expect(await runInstall(BASIC, { replies: {} })).toBe(1);
+  });
+
+  test("keeps pounce.service from being created", async () => {
+    await legacyUnitOnAnotherDataDir();
+    await runInstall(BASIC, { replies: {} });
+
+    expect(existsSync(at(".config", "systemd", "user", "pounce.service"))).toBe(false);
+  });
+
+  test("starts no daemon", async () => {
+    await legacyUnitOnAnotherDataDir();
+    let started = false;
+    await runInstall(BASIC, { replies: {}, onEnsureDaemon: () => (started = true) });
+
+    expect(started).toBe(false);
+  });
+
+  test("leaves config.json unwritten", async () => {
+    await legacyUnitOnAnotherDataDir();
+    await runInstall(BASIC, { replies: {} });
+
+    expect(existsSync(at(".config", "pounce", "config.json"))).toBe(false);
+  });
+
+  test("names the unit, its data dir and the ways out", async () => {
+    await legacyUnitOnAnotherDataDir();
+    await runInstall(BASIC, { replies: {} });
+
+    expect(printed()).toContain(
+      "claude-code-pair-web-agent.service from an older install already serves port 29999 with the data dir ~/old-data; set WEB_AGENT_DAEMON_PORT to another port or remove that unit, then run `pounce install` again.",
+    );
   });
 });
 

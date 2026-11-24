@@ -103,25 +103,39 @@ function unitEnvironment(file: string, home: string) {
   );
 }
 
-function unitServes(file: string, config: Config, env: NodeJS.ProcessEnv) {
-  if (!existsSync(file)) return false;
+function unitConfig(file: string, config: Config, env: NodeJS.ProcessEnv) {
+  if (!existsSync(file)) return undefined;
   try {
     const shared = Object.entries(env).filter(([key]) => !key.startsWith("WEB_AGENT_"));
-    const served = loadConfigLeniently({
+    return loadConfigLeniently({
       ...Object.fromEntries(shared),
       HOME: config.homeDir,
       ...unitEnvironment(file, config.homeDir),
     }).config;
-    return (
-      served.port === config.port && path.resolve(served.dataDir) === path.resolve(config.dataDir)
-    );
   } catch {
-    return false;
+    return undefined;
   }
 }
 
+function unitServes(file: string, config: Config, env: NodeJS.ProcessEnv) {
+  const served = unitConfig(file, config, env);
+  return (
+    served?.port === config.port && path.resolve(served.dataDir) === path.resolve(config.dataDir)
+  );
+}
+
+function legacyUnitFile(config: Config) {
+  return path.join(path.dirname(config.serviceFile), LEGACY_SERVICE);
+}
+
 export function legacyUnitServes(config: Config, env: NodeJS.ProcessEnv) {
-  return unitServes(path.join(path.dirname(config.serviceFile), LEGACY_SERVICE), config, env);
+  return unitServes(legacyUnitFile(config), config, env);
+}
+
+export function legacyUnitOtherDataDir(config: Config, env: NodeJS.ProcessEnv) {
+  const served = unitConfig(legacyUnitFile(config), config, env);
+  if (served?.port !== config.port) return undefined;
+  return path.resolve(served.dataDir) === path.resolve(config.dataDir) ? undefined : served.dataDir;
 }
 
 function installedUnit(config: Config, env: NodeJS.ProcessEnv) {
