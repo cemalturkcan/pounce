@@ -82,7 +82,8 @@ async function runDaemonCommand(config: Config, action: string | undefined) {
 }
 
 async function runCommand(config: Config, command: string, rest: string[]) {
-  if (command === "mcp") return proxyStdioToDaemon((await ensureDaemon(config)).endpoint);
+  if (command === "mcp")
+    return proxyStdioToDaemon(async () => (await ensureDaemon(config)).endpoint);
   if (command === "daemon") return runDaemonCommand(config, rest[0]);
   if (command === "import-profile") return runImport(config, rest);
   if (command === "open") {

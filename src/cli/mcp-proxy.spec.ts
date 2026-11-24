@@ -7,8 +7,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { loadConfig } from "../config/config.ts";
 import { PACKAGE_DIR } from "../config/version.ts";
 import { daemonStatus, stopDaemon } from "../server/daemon.ts";
+import { ensureDaemon } from "./daemon-control.ts";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { repeatUntil } from "../shared/async.ts";
 import { freePort, type SpawnedDaemon, spawnDaemon } from "../../tests/daemon.ts";
+import type { Config } from "../config/config.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -123,5 +126,96 @@ describe("two pounce mcp started at once with no daemon", () => {
     );
 
     expect(listed).toStrictEqual([true, true]);
+  }, 60_000);
+});
+
+async function stopAndWait(config: Config) {
+  await stopDaemon(config);
+  await repeatUntil(
+    async () => ((await daemonStatus(config)).state === "stopped" ? true : undefined),
+    { delayMs: () => 100, giveUp: (made) => made >= 100 },
+  );
+}
+
+describe("pounce mcp across a daemon restart", () => {
+  test("answers the next request without restarting the client", async () => {
+    const { env, config } = await isolatedEnv();
+    const client = await proxyClient(env);
+    await client.listTools();
+    await stopAndWait(config);
+    await ensureDaemon(config, env);
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+
+    expect(names).toContain("navigate");
+  }, 60_000);
+});
+
+describe("pounce mcp after its daemon stopped", () => {
+  test("starts the daemon again and answers the next request", async () => {
+    const { env, config } = await isolatedEnv();
+    const client = await proxyClient(env);
+    await client.listTools();
+    await stopAndWait(config);
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+
+    expect(names).toContain("navigate");
+  }, 60_000);
+});
+
+describe("pounce mcp when another server took the daemon's port", () => {
+  test("answers the request with an error that says so", async () => {
+    const { env, config } = await isolatedEnv();
+    const client = await proxyClient(env);
+    await client.listTools();
+    await stopAndWait(config);
+    const squatter = Bun.serve({
+      hostname: "127.0.0.1",
+      port: config.port,
+      fetch: () => new Response("gone", { status: 404 }),
+    });
+    cleanups.push(() => squatter.stop(true));
+
+    await expect(client.listTools()).rejects.toThrow(/pounce daemon/);
+  }, 60_000);
+});
+
+describe("pounce mcp reconnecting to a new daemon session", () => {
+  test("passes the client only the replies to its own requests", async () => {
+    const { env, config } = await isolatedEnv();
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/server.ts", "mcp"],
+      cwd: PACKAGE_DIR,
+      env,
+      stderr: "ignore",
+    });
+    const seen: JSONRPCMessage[] = [];
+    Object.assign(transport, { onmessage: (message: JSONRPCMessage) => seen.push(message) });
+    await transport.start();
+    cleanups.push(() => transport.close());
+    const answeredTo = (id: number) =>
+      repeatUntil(
+        async () =>
+          seen.some((message) => "id" in message && message.id === id) ? true : undefined,
+        { delayMs: () => 50, giveUp: (made) => made >= 400 },
+      );
+    await transport.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "proxy-spec", version: "0" },
+      },
+    });
+    await answeredTo(1);
+    await transport.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    await stopAndWait(config);
+    await transport.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    await answeredTo(2);
+    await Bun.sleep(500);
+
+    expect(seen.map((message) => ("id" in message ? message.id : undefined))).toStrictEqual([1, 2]);
   }, 60_000);
 });
