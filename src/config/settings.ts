@@ -4,7 +4,7 @@ import { parseJson } from "../shared/decode.ts";
 
 export const askSetting = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("claude") }),
-  z.object({ mode: z.literal("api-key"), apiKey: z.string().min(1).optional() }),
+  z.object({ mode: z.literal("api-key"), apiKey: z.string().trim().min(1).optional() }),
   z.object({ mode: z.literal("adapter"), path: z.string().min(1) }),
   z.object({ mode: z.literal("off") }),
 ]);

@@ -118,3 +118,9 @@ test("the strict load names the field that fails the schema", async () => {
 
   expect(() => loadConfig({ HOME: home })).toThrow("ask.apiKey");
 });
+
+test("a stored API key of only spaces fails the schema", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ ask: { mode: "api-key", apiKey: "   " } }));
+
+  expect(loadConfigLeniently({ HOME: home }).problem).toContain("ask.apiKey");
+});
