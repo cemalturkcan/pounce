@@ -624,11 +624,20 @@ async function healthStep(run: Run, before: DaemonRegistry | undefined, askChang
     );
 }
 
-function storedVariables(settings: Settings, env: NodeJS.ProcessEnv) {
-  const given = Object.entries(env).flatMap(([key, value]) =>
-    STORED_VARIABLE.test(key) && value ? [[key, value] as const] : [],
+const UNSTORED_VARIABLES = new Set(["WEB_AGENT_ASK_ADAPTER"]);
+
+function storable(env: NodeJS.ProcessEnv = {}) {
+  return Object.fromEntries(
+    Object.entries(env).flatMap(([key, value]) =>
+      STORED_VARIABLE.test(key) && !UNSTORED_VARIABLES.has(key) && value
+        ? [[key, value] as const]
+        : [],
+    ),
   );
-  const merged = { ...settings.env, ...Object.fromEntries(given) };
+}
+
+function storedVariables(settings: Settings, env: NodeJS.ProcessEnv) {
+  const merged = { ...storable(settings.env), ...storable(env) };
   return Object.keys(merged).length ? merged : undefined;
 }
 

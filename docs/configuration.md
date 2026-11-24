@@ -41,7 +41,7 @@ The installer saves its answers here with mode `0600`. Every field is optional.
 | `ask`     | The model behind `ask_pages` and `compare_design`; see below. Without it, `claude` is used                                                                                                                                                 |
 | `profile` | `fresh`, or the profile that was copied, as `<browser>:<profile dir>` (for example `chrome:Default`)                                                                                                                                       |
 | `desktop` | Whether pounce was made the default browser                                                                                                                                                                                                |
-| `env`     | `WEB_AGENT_*` variables from [the list below](#environment-variables), kept from every `pounce install` run that had them set                                                                                                              |
+| `env`     | `WEB_AGENT_*` variables from [the list below](#environment-variables), kept from every `pounce install` run that had them set, except `WEB_AGENT_ASK_ADAPTER`, which `ask` replaces                                                        |
 
 `ask` takes one of these:
 
@@ -59,8 +59,9 @@ message; `pounce install` offers to rewrite it and keeps a copy as `config.json.
 
 Environment variables override the defaults above. `pounce install` saves the `WEB_AGENT_*` variables set when it
 runs in the `env` field of `config.json`, adding to those saved by earlier runs, so the daemon, `pounce mcp`,
-`pounce open` and the desktop entry all use them. A variable set in the environment overrides the saved value; to
-drop a saved one, delete it from `env` and restart the daemon.
+`pounce open` and the desktop entry all use them. `WEB_AGENT_ASK_ADAPTER` is not saved, since the `ask` setting
+holds that choice, and a saved one is dropped. A variable set in the environment overrides the saved value; to drop
+a saved one, delete it from `env` and restart the daemon.
 
 | Variable                                                   | Default                                                  | Purpose                                                                                          |
 | ---------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |

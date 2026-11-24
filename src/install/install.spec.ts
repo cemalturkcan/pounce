@@ -16,6 +16,7 @@ import path from "node:path";
 import { ensureDaemon } from "../cli/daemon-control.ts";
 import type { CommandResult, Runner } from "../cli/process.ts";
 import { loadConfig, loadConfigLeniently } from "../config/config.ts";
+import { askSourceFor } from "../server/setup.ts";
 import type { DaemonRegistry } from "../server/daemon.ts";
 import { parseJsonc } from "./jsonc.ts";
 import { install, type InstallIo } from "./install.ts";
@@ -548,6 +549,24 @@ describe("re-running install", () => {
     await runInstall(BASIC, { env: { WEB_AGENT_CHROME_EXECUTABLE: "/opt/brave/brave" } });
 
     expect(loadConfig({ HOME: home }).executablePath).toBe("/opt/brave/brave");
+  });
+
+  test("lets a later --ask choice replace an adapter given by WEB_AGENT_ASK_ADAPTER", async () => {
+    await runInstall(BASIC, { env: { WEB_AGENT_ASK_ADAPTER: await fakeBinary() } });
+    await runInstall(BASIC);
+
+    expect(askSourceFor(loadConfig({ HOME: home })).label).toBe("off");
+  });
+
+  test("drops a WEB_AGENT_ASK_ADAPTER that an earlier version saved", async () => {
+    await mkdir(at(".config", "pounce"), { recursive: true });
+    await writeFile(
+      at(".config", "pounce", "config.json"),
+      JSON.stringify({ env: { WEB_AGENT_ASK_ADAPTER: await fakeBinary() } }),
+    );
+    await runInstall(BASIC);
+
+    expect(askSourceFor(loadConfig({ HOME: home })).label).toBe("off");
   });
 
   test("offers the previous ask_pages choice as the default", async () => {
