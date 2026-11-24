@@ -57,7 +57,7 @@ async function runScriptInChild(code: string, timeoutMs: number, cancelAfterMs =
     const controller = new AbortController();
     if (${cancelAfterMs}) setTimeout(() => controller.abort(), ${cancelAfterMs});
     const deps = {
-      manager: { config: { engine: "patchright" }, ensureContext: async () => ({}), holdRendering: () => () => undefined, tabOf: (candidate) => (candidate === page ? { id: "t1" } : undefined) },
+      manager: { config: { engine: "patchright" }, ensureContext: async () => ({}), givenRefs: () => new Map(), holdRendering: () => () => undefined, tabOf: (candidate) => (candidate === page ? { id: "t1" } : undefined) },
       secrets: { list: async () => [] },
     };
     let value;

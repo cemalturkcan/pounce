@@ -106,6 +106,7 @@ export class JobRunner {
     label: string,
     maxChars?: number,
   ) {
+    const given = deps.manager.givenRefs();
     this.counter += 1;
     const id = `j${this.counter}`;
     const dir = path.join(deps.store.root, "jobs", `${timestampSlug()}-${id}`);
@@ -210,7 +211,7 @@ export class JobRunner {
         label: label || undefined,
         codeChars: code.length,
       });
-      return runScript(deps, owner, tab, code, { signal: controller.signal, onLog }).then(
+      return runScript(deps, owner, tab, code, { given, signal: controller.signal, onLog }).then(
         async (result) => {
           job.state = "done";
           job.returned = keptValue(deps.redactor.redact(result.returned));

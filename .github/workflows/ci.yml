@@ -29,8 +29,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install pdftotext
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Install pdftotext and ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils ffmpeg
 
       - name: Check Google Chrome
         run: google-chrome --version
@@ -59,8 +59,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install pdftotext
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Install pdftotext and ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils ffmpeg
 
       - name: Check Google Chrome
         run: google-chrome --version

@@ -887,13 +887,18 @@ document.getElementById("follow").onclick = (event) => {
       html: EDGE_HTML(
         "Frozen frame",
         `<main><p id="state">none</p><button onclick="document.getElementById('state').textContent = 'clicked'">Ana</button><iframe id="frame" title="Reklam"></iframe></main>
-<script>document.getElementById("frame").src = location.origin.replace("127.0.0.1", "localhost") + "/snapshot/frozen";</script>`,
+<script>
+const frame = document.getElementById("frame");
+frame.onload = () => { document.body.dataset.loaded = "yes"; };
+addEventListener("message", (event) => { if (event.data === "frozen") document.body.dataset.frozen = "yes"; });
+frame.src = location.origin.replace("127.0.0.1", "localhost") + "/snapshot/frozen";
+</script>`,
       ),
     },
     "/snapshot/frozen": {
       html: EDGE_HTML(
         "Frozen",
-        `<button>Reklam</button><script>setTimeout(() => { const start = Date.now(); while (Date.now() - start < 20000) {} }, 1500);</script>`,
+        `<button>Reklam</button><script>addEventListener("message", (event) => { if (event.data !== "freeze") return; parent.postMessage("frozen", "*"); setTimeout(() => { const start = Date.now(); while (Date.now() - start < 20000) {} }, 0); });</script>`,
       ),
     },
     "/snapshot/login": {

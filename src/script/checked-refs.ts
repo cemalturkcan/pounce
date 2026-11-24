@@ -221,21 +221,50 @@ async function shownBy(locator: Locator, deadline: number): Promise<number> {
   return shownBy(locator, deadline);
 }
 
+export type GivenRefs = Map<string, Map<string, IssuedRef>>;
+
+function laterRefRefused(tab: Tab, ref: string) {
+  return new ToolError(
+    `Ref ${ref} cannot be used: it is from a snapshot of tab ${tab.id} taken after the script was submitted.`,
+    "Take a snapshot inside the script and use a ref from it.",
+  );
+}
+
 export class CheckedRefs {
   private readonly checks = new WeakMap<object, ScriptRef[]>();
   private readonly bare = new WeakMap<object, ScriptRef>();
   private readonly steps = new WeakMap<object, Step>();
   private readonly memberChains = new WeakSet<object>();
   private readonly manager: BrowserManager;
+  private readonly given: GivenRefs;
 
-  constructor(manager: BrowserManager) {
+  constructor(manager: BrowserManager, given: GivenRefs) {
     this.manager = manager;
+    this.given = given;
+  }
+
+  take(tab: Tab, issued: ReadonlyMap<string, IssuedRef>) {
+    const refs = this.given.get(tab.id) ?? new Map<string, IssuedRef>();
+    for (const [ref, record] of issued) refs.set(ref, record);
+    this.given.set(tab.id, refs);
+  }
+
+  private issuedIn(tab: Tab, ref: string) {
+    const given = this.given.get(tab.id) ?? new Map<string, IssuedRef>();
+    if (!given.has(ref) && tab.refs.has(ref)) throw laterRefRefused(tab, ref);
+    return this.manager.issued(tab, ref, given);
+  }
+
+  resolve(tab: Tab, target: string) {
+    const ref = parseRef(target);
+    if (!ref) return this.manager.resolve(tab, target);
+    return this.manager.confirmIssued(tab, ref, this.issuedIn(tab, ref), ACTION_TIMEOUT_MS, target);
   }
 
   locate(tab: Tab, target: string) {
     const ref = parseRef(target);
     if (!ref) return this.manager.locate(tab, target);
-    const issued = this.manager.issued(tab, ref);
+    const issued = this.issuedIn(tab, ref);
     const locator = this.manager.locateIssued(tab, ref, issued, target);
     const check = { tab, ref, issued };
     this.checks.set(locator, [check]);

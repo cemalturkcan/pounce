@@ -17,7 +17,7 @@ import {
 } from "./checks.ts";
 import { RENDER_MAX_MS, settleRendering, waitForContent } from "./settle.ts";
 import { checkedLines, parseRef, targetLabel } from "../browser/ref.ts";
-import { aiSnapshot, rememberShownRef } from "../browser/ref-check.ts";
+import { aiSnapshot, rememberShownRef, shownAt } from "../browser/ref-check.ts";
 import {
   changedLines,
   clipByImportance,
@@ -172,13 +172,14 @@ export async function statusLine(
 export async function targetName(tab: Tab, locator: Locator, target: string) {
   const checked = checkedLines.get(locator);
   if (checked !== undefined) return targetLabel(checked, target);
+  const shown = shownAt(tab);
   const snapshot = await withDeadline(
     aiSnapshot(locator, { depth: 1, timeout: PROBE_TIMEOUT_MS }),
     PROBE_TIMEOUT_MS * 2,
   ).catch((): typeof TIMED_OUT => TIMED_OUT);
   if (snapshot === TIMED_OUT) return target;
   const line = snapshot.split("\n")[0] ?? "";
-  if (!parseRef(target)) await rememberShownRef(tab, locator, line);
+  if (!parseRef(target)) await rememberShownRef(tab, locator, line, shown);
   return targetLabel(line, target);
 }
 
@@ -375,10 +376,16 @@ async function scopeRefs(manager: BrowserManager, tab: Tab, target: string) {
   return refs;
 }
 
-export async function rawSnapshot(
+type RawSnapshotOptions = Pick<SnapshotOptions, "target" | "depth" | "boxes">;
+
+export async function rawSnapshot(manager: BrowserManager, tab: Tab, options: RawSnapshotOptions) {
+  return (await issuingSnapshot(manager, tab, options)).text;
+}
+
+export async function issuingSnapshot(
   manager: BrowserManager,
   tab: Tab,
-  options: Pick<SnapshotOptions, "target" | "depth" | "boxes">,
+  options: RawSnapshotOptions,
 ) {
   const refs = options.target ? await scopeRefs(manager, tab, options.target) : undefined;
   const { text: full, issue } = await takeSnapshot(
@@ -386,7 +393,16 @@ export async function rawSnapshot(
     refs ? undefined : options.depth,
     options.boxes,
   );
-  await manager.rememberRefs(tab, full, issue);
+  const issued = await manager.rememberRefs(tab, full, issue);
+  return { text: scopedText(tab, full, refs, options), issued };
+}
+
+function scopedText(
+  tab: Tab,
+  full: string,
+  refs: string[] | undefined,
+  options: RawSnapshotOptions,
+) {
   if (!refs || !options.target) return full;
   const parts = refs
     .map((ref) => cutSubtree(full, ref))
@@ -402,12 +418,16 @@ export async function rawSnapshot(
 }
 
 async function takeSnapshot(tab: Tab, depth?: number, boxes?: boolean) {
-  const issue: RefIssue = { loads: tab.loads, url: tab.page.url() };
+  const loads = tab.loads;
+  const url = tab.page.url();
+  const shown = shownAt(tab);
+  const startedAt = performance.now();
   const text = await aiSnapshot(tab.page, {
     depth,
     boxes,
     timeout: SNAPSHOT_TIMEOUT_MS,
   });
+  const issue: RefIssue = { loads, url, shown, snapshotMs: performance.now() - startedAt };
   tab.snapshotLoads = issue.loads;
   if (depth === undefined) tab.lastSnapshot = { text, loads: issue.loads };
   return { text, issue };

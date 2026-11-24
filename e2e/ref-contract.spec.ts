@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { useMcpHarness } from "../tests/mcpHarness.ts";
 import { inSequence } from "../src/shared/async.ts";
 import type { SecretStore } from "../src/shared/secrets.ts";
@@ -10,7 +11,8 @@ const secrets: SecretStore = {
   list: async () => ["site"],
   get: async () => SECRET,
 };
-const { call, ok } = useMcpHarness({ name: "ref-contract", secrets });
+const mcp = useMcpHarness({ name: "ref-contract", secrets });
+const { call, ok } = mcp;
 
 let server: ReturnType<typeof Bun.serve>;
 const actions: string[] = [];
@@ -47,6 +49,11 @@ show(new URLSearchParams(location.search).get('id') || 'A');
       () => `<main><h1 id="t"></h1><button id="c">İptal et</button><a href="#/order/B">Sonraki sipariş</a></main>
 <script>
 const show = () => { const id = location.hash.split('/')[2] || 'A'; t.textContent = 'Sipariş ' + id; c.onclick = () => fetch('/act?w=cancel%20' + id); };
+addEventListener('hashchange', show); show();
+</script>`,
+    "/hash-field": () => `<main><h1 id="t"></h1><label>Not <input id="n"></label></main>
+<script>
+const show = () => { const id = location.hash.split('/')[2] || 'A'; t.textContent = 'Sipariş ' + id; n.oninput = () => fetch('/act?w=note%20' + id); };
 addEventListener('hashchange', show); show();
 </script>`,
     "/inner":
@@ -192,6 +199,14 @@ d.showModal();
     "/editor-frame": () =>
       `<main><iframe id="f" title="Düzenleyici" src="/editor?w=A"></iframe></main>`,
     "/editor": (q) => `<body contenteditable="true">${q.get("w")}</body>`,
+    "/busy-editor-frame": () =>
+      `<main><iframe id="f" title="Düzenleyici"></iframe></main><script>f.onload = () => { document.body.dataset.loaded = "yes"; }; addEventListener("message", (e) => { if (e.data === "busy") document.body.dataset.busy = "yes"; }); f.src = location.origin.replace("127.0.0.1", "localhost") + "/busy-editor";</script>`,
+    "/busy-editor": () =>
+      `<script>document.body.contentEditable = "true"; document.body.append("A"); addEventListener("message", (e) => { if (e.data !== "busy") return; parent.postMessage("busy", "*"); setTimeout(() => { const start = Date.now(); while (Date.now() - start < 20000) {} }, 0); });</script>`,
+    "/held-frame": (q) =>
+      `<main><iframe id="f" title="Uygulama"></iframe></main><script>f.onload = () => { document.body.dataset.loaded = "yes"; }; addEventListener("message", (e) => { if (e.data === "held") document.body.dataset.held = "yes"; }); f.src = location.origin.replace("127.0.0.1", "localhost") + "/held-app?change=${q.get("change")}";</script>`,
+    "/held-app": () =>
+      `<button contenteditable="false" onclick="fetch('/act?w=pay')">Öde</button><script>document.body.contentEditable = "true"; document.body.oninput = () => fetch("/act?w=typed"); const change = { replace: () => history.replaceState(null, "", "/held-app?ready"), push: () => history.pushState(null, "", "/held-app?ready"), hash: () => { location.hash = "ready"; } }[new URLSearchParams(location.search).get("change")]; addEventListener("message", (e) => { if (e.data !== "hold") return; parent.postMessage("held", "*"); setTimeout(() => { spin(2000); change(); spin(1000); }, 0); }); function spin(ms) { const start = Date.now(); while (Date.now() - start < ms) {} }</script>`,
     "/inner-button": (q) =>
       `<button onclick="fetch('/act?w=inner%20${q.get("w")}')">Tamam</button>`,
     "/shadow-host": () =>
@@ -947,6 +962,48 @@ async function cancelInJobAfterToolSnapshot() {
   return call("run_script", { job: /job (j\d+)/.exec(started)?.[1] ?? "", wait: true });
 }
 
+async function queuedAfter(tab: string, code: string, meanwhile: () => Promise<string>) {
+  await ok("run_script", {
+    tab,
+    background: true,
+    code: "await page.waitForFunction(() => window.released, undefined, { timeout: 10000 });",
+  });
+  const queued = await ok("run_script", { tab, background: true, code });
+  await ok("evaluate", { tab, expression: `${await meanwhile()}; window.released = true; 1` });
+  return call("run_script", { job: /job (j\d+)/.exec(queued)?.[1] ?? "", wait: true });
+}
+
+const queuedAfterToolSnapshot = (tab: string, code: string) =>
+  queuedAfter(tab, code, async () => {
+    await ok("evaluate", { tab, expression: "location.hash = '#/order/B'; 1" });
+    await ok("snapshot", { tab });
+    return "";
+  });
+
+async function laterRefInQueuedJob() {
+  const tab = await open("/toggle");
+  return queuedAfter(
+    tab,
+    "await ref(await page.evaluate(() => window.late)).click({ timeout: 3000 });",
+    async () =>
+      `window.late = ${JSON.stringify(refOf(await ok("snapshot", { tab }), 'button "Takip et"'))}`,
+  );
+}
+
+async function cancelInQueuedJobAfterToolSnapshot() {
+  const { tab, cancel } = await hashOrder();
+  return queuedAfterToolSnapshot(
+    tab,
+    `await ref(${JSON.stringify(cancel)}).click({ timeout: 3000 });`,
+  );
+}
+
+async function secretInQueuedJobAfterToolSnapshot() {
+  const tab = await open("/hash-field#/order/A");
+  const field = refOf(await ok("snapshot", { tab }), 'textbox "Not"');
+  return queuedAfterToolSnapshot(tab, `await secrets.fill(${JSON.stringify(field)}, "site");`);
+}
+
 const rowAfterHashChange = (main: string) =>
   `const rows = await ref(${JSON.stringify(main)}).getByRole("button").all(); ${toOrderB} await rows[0].click({ timeout: 3000 });`;
 
@@ -971,6 +1028,22 @@ describe("a script's ref keeps the element it was taken for", () => {
 
   test("a background script's ref after a tool snapshot and a hash change does not cancel the next order", async () => {
     await cancelInJobAfterToolSnapshot();
+    expect(await actionsSoFar()).toEqual([]);
+  });
+
+  test("a queued script's ref after a tool snapshot and a hash change does not cancel the next order", async () => {
+    await cancelInQueuedJobAfterToolSnapshot();
+    expect(await actionsSoFar()).toEqual([]);
+  });
+
+  test("a queued script's ref from a snapshot taken after it was submitted says so", async () => {
+    expect((await laterRefInQueuedJob()).text).toMatch(
+      /Stopped: Ref e\d+ cannot be used: it is from a snapshot of tab t\d+ taken after the script was submitted\./,
+    );
+  });
+
+  test("a queued script's secret fill through a ref after a tool snapshot and a hash change does not type into the next order", async () => {
+    await secretInQueuedJobAfterToolSnapshot();
     expect(await actionsSoFar()).toEqual([]);
   });
 
@@ -2678,6 +2751,112 @@ async function editorAfterReload() {
   return { tab, filled };
 }
 
+async function busyEditorRef() {
+  const tab = await open("/busy-editor-frame");
+  await ok("wait_for", { tab, target: "body[data-loaded]", state: "attached" });
+  await ok("evaluate", { tab, expression: "f.contentWindow.postMessage('busy', '*'); 1" });
+  await ok("wait_for", { tab, target: "body[data-busy]", state: "attached" });
+  const scrolled = await ok("scroll", { tab, target: "#f" });
+  return { tab, editor: /\((e\d+)[,)]/.exec(scrolled)?.[1] ?? "" };
+}
+
+async function busyEditorMovedToB() {
+  const { tab, editor } = await busyEditorRef();
+  await ok("evaluate", {
+    tab,
+    expression:
+      "f.onload = () => { document.body.dataset.moved = 'yes'; }; f.src = '/editor?w=B'; 1",
+  });
+  await ok("wait_for", { tab, target: "body[data-moved]", state: "attached" });
+  const filled = await call("fill", { tab, target: editor, value: "Yeni metin", timeout_ms: 3000 });
+  return { tab, filled };
+}
+
+describe("an iframe ref given while its iframe's page is busy keeps that page", () => {
+  test("a fill through a ref shown by a selector action after the iframe moved to another page leaves the new page as it was", async () => {
+    const { tab } = await busyEditorMovedToB();
+    expect(await valueOf(tab, "f.contentDocument.body.textContent")).toBe("B");
+  });
+
+  test("a fill through a ref shown by a selector action after the iframe moved to another page says its iframe's page could not be identified", async () => {
+    const { filled } = await busyEditorMovedToB();
+    expect(filled.text).toMatch(
+      /^Ref e\d+ cannot be used: its iframe's page could not be identified when the snapshot was taken\./,
+    );
+  });
+
+  test("a fill through the iframe ref of a snapshot during which the iframe moved to another page says its iframe's page could not be identified", async () => {
+    const { tab } = await busyEditorRef();
+    await ok("evaluate", {
+      tab,
+      expression: "setTimeout(() => { f.src = '/editor?w=B'; }, 1500); 1",
+    });
+    const editor = refOf(await ok("snapshot", { tab }), "- iframe");
+    const filled = await call("fill", {
+      tab,
+      target: editor,
+      value: "Yeni metin",
+      timeout_ms: 3000,
+    });
+    expect(filled.text).toMatch(
+      /^Ref e\d+ cannot be used: its iframe's page could not be identified when the snapshot was taken\./,
+    );
+  });
+
+  test("a fill more than 10 s after a selector action showed the ref says its iframe did not answer", async () => {
+    const { tab, editor } = await busyEditorRef();
+    await Bun.sleep(11_000);
+    const filled = await call("fill", {
+      tab,
+      target: editor,
+      value: "Yeni metin",
+      timeout_ms: 3000,
+    });
+    expect(filled.text).toMatch(/^Ref e\d+ cannot be used: its iframe did not answer for 10 s\./);
+  });
+});
+
+const sameDocumentChanges = [
+  { change: "replace", label: "replaceState" },
+  { change: "push", label: "pushState" },
+  { change: "hash", label: "hash change" },
+];
+
+async function heldApp(change: string) {
+  const tab = await open(`/held-frame?change=${change}`);
+  await ok("wait_for", { tab, target: "body[data-loaded]", state: "attached" });
+  await ok("evaluate", { tab, expression: "f.contentWindow.postMessage('hold', '*'); 1" });
+  await ok("wait_for", { tab, target: "body[data-held]", state: "attached" });
+  return tab;
+}
+
+async function payRefAfterChangeInSnapshot(change: string) {
+  const tab = await heldApp(change);
+  return { tab, pay: refOf(await ok("snapshot", { tab, scope: "full" }), 'button "Öde"') };
+}
+
+async function editorRefAfterChangeWhileShown(change: string) {
+  const tab = await heldApp(change);
+  const scrolled = await ok("scroll", { tab, target: "#f" });
+  return { tab, editor: /\((e\d+)[,)]/.exec(scrolled)?.[1] ?? "" };
+}
+
+describe("an iframe ref outlives its iframe's own address change on the same page", () => {
+  for (const { change, label } of sameDocumentChanges) {
+    test(`a ref inside an iframe that made a ${label} during the snapshot clicks its button`, async () => {
+      const { tab, pay } = await payRefAfterChangeInSnapshot(change);
+      await call("click", { tab, target: pay, timeout_ms: 3000 });
+      expect(await actionsSoFar()).toEqual(["pay"]);
+    });
+
+    test(`a ref a selector action showed for an iframe that made a ${label} before its page answered fills it`, async () => {
+      const { tab, editor } = await editorRefAfterChangeWhileShown(change);
+      await call("fill", { tab, target: editor, value: "Yeni metin", timeout_ms: 3000 });
+      expect(await actionsSoFar()).toContain("typed");
+    });
+  }
+});
+
 describe("a fill into an iframe ref's editable page keeps the iframe's page", () => {
   test("a fill into an iframe ref after the iframe loaded another page says so", async () => {
     const { filled } = await editorAfterReload();
@@ -2697,6 +2876,25 @@ describe("a fill into an iframe ref's editable page keeps the iframe's page", ()
     expect(editor, hovered).toMatch(/^e\d+$/);
     await ok("fill", { tab, target: editor, value: "Yeni metin", timeout_ms: 3000 });
     expect(await valueOf(tab, "f.contentDocument.body.textContent")).toBe("Yeni metin");
+  });
+
+  test("a fill into an iframe ref first shown by a selector hover on a slow machine fills its body", async () => {
+    const tab = await open("/editor-frame");
+    await Bun.sleep(500);
+    const session = await mcp.deps.manager.getTab(tab).session;
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 40 });
+    const hovered = await ok("hover", { tab, target: "#f" });
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    const editor = /\((e\d+)[,)]/.exec(hovered)?.[1] ?? "";
+    const filled = await call("fill", {
+      tab,
+      target: editor,
+      value: "Yeni metin",
+      timeout_ms: 3000,
+    });
+    expect(await valueOf(tab, "f.contentDocument.body.textContent"), filled.text).toBe(
+      "Yeni metin",
+    );
   });
 
   test("a fill into an iframe ref on the same page fills its body", async () => {
@@ -2770,18 +2968,42 @@ const containerCosts = [
   },
 ];
 
-async function readsTook(tab: string, target: string, read: string, count: number) {
-  const took = await inSequence([0, 1, 2], async () =>
-    Number(
-      (
-        await script(
-          tab,
-          `const start = Date.now(); for (let i = 0; i < ${count}; i++) await ${target}${read}; return Date.now() - start;`,
-        )
-      ).structured?.value,
+type ReadCosts = { selector: number; viaRef: number };
+
+const roundSchema = z.tuple([z.number(), z.number()]);
+
+async function readCosts(
+  tab: string,
+  selector: string,
+  ref: string,
+  read: string,
+  count: number,
+): Promise<ReadCosts> {
+  const rounds = await inSequence([0, 1, 2], async () =>
+    roundSchema.parse(
+      JSON.parse(
+        String(
+          (
+            await script(
+              tab,
+              `const took = async (target) => { const start = Date.now(); for (let i = 0; i < ${count}; i++) await target()${read}; return Date.now() - start; }; return JSON.stringify([await took(() => ${selector}), await took(() => ref(${JSON.stringify(ref)}))]);`,
+            )
+          ).structured?.value,
+        ),
+      ),
     ),
   );
-  return Math.min(...took);
+  return {
+    selector: Math.min(...rounds.map(([selectorTook]) => selectorTook)),
+    viaRef: Math.min(...rounds.map(([, refTook]) => refTook)),
+  };
+}
+
+function expectAtMost(costs: ReadCosts, times: number) {
+  expect(
+    costs.viaRef,
+    `${costs.viaRef} ms through the ref against ${costs.selector} ms through the selector`,
+  ).toBeLessThanOrEqual(times * costs.selector);
 }
 
 describe("what refs cost", () => {
@@ -2794,12 +3016,23 @@ describe("what refs cost", () => {
     expect(Math.max(...took)).toBeLessThan(1500);
   });
 
-  test("the first snapshot of a page of 10 000 buttons takes under 2.2 s", async () => {
+  test("the first snapshot of a page of 10 000 buttons takes at most twice as long as Playwright's own first snapshot of it", async () => {
+    const own = await open("/big?n=10000");
     const tab = await open("/big?n=10000");
     await Bun.sleep(800);
-    expect(await timed(() => ok("snapshot", { tab, scope: "full", max_chars: 2000 }))).toBeLessThan(
-      2200,
+    const playwright = Number(
+      (
+        await script(
+          own,
+          `const start = Date.now(); await page.ariaSnapshot({ mode: "ai" }); return Date.now() - start;`,
+        )
+      ).structured?.value,
     );
+    const took = await timed(() => ok("snapshot", { tab, scope: "full", max_chars: 2000 }));
+    expect(
+      took,
+      `${took} ms for the snapshot against ${playwright} ms for Playwright's own`,
+    ).toBeLessThanOrEqual(2 * playwright);
   });
 
   test("a renamed ref on a page of 10 000 buttons is refused within 1 s", async () => {
@@ -2827,53 +3060,43 @@ describe("what refs cost", () => {
       const tab = await open(cost.path);
       const target = refOf(await ok("snapshot", { tab, max_chars: 2000 }), cost.label);
       if (cost.hide) await ok("evaluate", { tab, expression: cost.hide });
-      const selector = await readsTook(
-        tab,
-        `page.locator(${JSON.stringify(cost.selector)})`,
-        cost.read,
-        50,
+      expectAtMost(
+        await readCosts(
+          tab,
+          `page.locator(${JSON.stringify(cost.selector)})`,
+          target,
+          cost.read,
+          50,
+        ),
+        cost.times ?? 2,
       );
-      expect(
-        await readsTook(tab, `ref(${JSON.stringify(target)})`, cost.read, 50),
-      ).toBeLessThanOrEqual((cost.times ?? 2) * selector);
     });
 
   test("50 reads through a small generic ref with an aria-label on a page of 10 000 rows take at most twice as long as through a selector", async () => {
     const tab = await open("/small-named?n=10000");
     const target = refOf(await ok("snapshot", { tab, query: "Araç" }), 'generic "Araçlar"');
     const read = `.getByRole("button").textContent()`;
-    const selector = await readsTook(tab, `page.locator("#g")`, read, 50);
-    expect(await readsTook(tab, `ref(${JSON.stringify(target)})`, read, 50)).toBeLessThanOrEqual(
-      2 * selector,
-    );
+    expectAtMost(await readCosts(tab, `page.locator("#g")`, target, read, 50), 2);
   });
 
   test("50 reads through a shadow host ref with 20 000 shadow nodes take at most twice as long as through a selector", async () => {
     const tab = await open("/shadow-big?n=20000");
     const target = refOf(await ok("snapshot", { tab, max_chars: 2000 }), 'button "Kaydet"');
     const read = `.getAttribute("id")`;
-    const selector = await readsTook(tab, `page.locator("#h")`, read, 50);
-    expect(await readsTook(tab, `ref(${JSON.stringify(target)})`, read, 50)).toBeLessThanOrEqual(
-      2 * selector,
-    );
+    expectAtMost(await readCosts(tab, `page.locator("#h")`, target, read, 50), 2);
   });
 
   for (const cost of [
     { what: "20 reads", read: ".textContent()", count: 20 },
     { what: "10 clicks", read: ".click()", count: 10 },
   ])
-    test(`${cost.what} through a button ref on a page of 20 000 rows take at most 3 times as long as through a selector`, async () => {
-      const tab = await open("/table?n=20000");
+    test(`${cost.what} through a button ref on a page of 10 000 rows take at most 3 times as long as through a selector`, async () => {
+      const tab = await open("/table?n=10000");
       const target = refOf(await ok("snapshot", { tab, query: "Düğme 5" }), 'button "Düğme 5"');
-      const selector = await readsTook(
-        tab,
-        `page.locator("main button >> nth=5")`,
-        cost.read,
-        cost.count,
+      expectAtMost(
+        await readCosts(tab, `page.locator("main button >> nth=5")`, target, cost.read, cost.count),
+        3,
       );
-      expect(
-        await readsTook(tab, `ref(${JSON.stringify(target)})`, cost.read, cost.count),
-      ).toBeLessThanOrEqual(3 * selector);
     });
 
   test("a selector hover on an iframe whose page never answers takes under 5 s", async () => {

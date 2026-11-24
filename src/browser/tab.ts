@@ -1,4 +1,4 @@
-import type { CDPSession, Dialog, Page, Request, Response, Route } from "playwright-core";
+import type { CDPSession, Dialog, Frame, Page, Request, Response, Route } from "playwright-core";
 import { z } from "zod";
 import type { IssuedRef } from "./ref.ts";
 import { localClock } from "../shared/output.ts";
@@ -81,6 +81,8 @@ export type Tab = {
   rules: InterceptRule[];
   ruleCounter: number;
   loads: number;
+  frameCommits: number;
+  committedFrames: WeakMap<Frame, number>;
   routes: number;
   routePath?: string;
   committedAt?: number;

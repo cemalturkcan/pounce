@@ -1,4 +1,4 @@
-import type { Frame, FrameLocator, Locator, Page } from "playwright-core";
+import type { ElementHandle, Frame, FrameLocator, Locator, Page } from "playwright-core";
 import { z } from "zod";
 import { isCallable, isText } from "../script/wire.ts";
 import { sleep, TIMED_OUT, withDeadline, withTimeout } from "../shared/async.ts";
@@ -55,6 +55,13 @@ export function refQuery(root: Element | Document, body: string): Element[] {
     return [];
   }
   if (command === "here") return [document.documentElement];
+  if (command === "same")
+    return root instanceof Element &&
+      root !== root.ownerDocument.documentElement &&
+      String(performance.timeOrigin) === token &&
+      location.href === decodeURIComponent(ref)
+      ? [document.documentElement]
+      : [document.createElement("div")];
   if (registry.first === undefined || Number(token) < registry.first) return [];
   if (command === "document") return [document.documentElement];
   const element = registry.bound.get(ref)?.deref();
@@ -127,15 +134,36 @@ const bindIn = (scope: Page | Frame | Locator, command: string) =>
 
 export type Shown = { place: Place; bound: Promise<boolean> };
 
+export type ShownAt = { commits: number; at: number };
+
+export const shownAt = (tab: Tab): ShownAt => ({ commits: tab.frameCommits, at: Date.now() });
+
+const committedSince = (tab: Tab, frame: Frame, shown: ShownAt) =>
+  frame.isDetached() || (tab.committedFrames.get(frame) ?? 0) > shown.commits;
+
+export async function shownFramePlace(tab: Tab, frame: Frame, shown: ShownAt, budget: number) {
+  if (committedSince(tab, frame, shown)) return undefined;
+  const place = await answeredPlace(frame.evaluate(placeHere), budget);
+  return place !== TIMED_OUT && committedSince(tab, frame, shown) ? undefined : place;
+}
+
 const bindInWorld = (frame: Page | Frame, command: string) =>
   frame.evaluate(`(${refQuery.toString()})(document, ${JSON.stringify(command)}).length`).then(
     () => true,
     () => false,
   );
 
-export async function boundPlace(frame: Page | Frame, showing: string, engine: Engine) {
-  const place = await placeWithin(frame.evaluate(placeHere), PLACE_MS);
-  if (!place) return undefined;
+export async function boundPlace(
+  frame: Page | Frame,
+  showing: string,
+  engine: Engine,
+  lookup: Promise<Place | undefined | typeof TIMED_OUT> = answeredPlace(
+    frame.evaluate(placeHere),
+    PLACE_MS,
+  ),
+) {
+  const place = await lookup;
+  if (!place || place === TIMED_OUT) return undefined;
   const command = `bind:${showing}`;
   const bound = engine === "patchright" ? bindInWorld(frame, command) : bindIn(frame, command);
   return { place, bound };
@@ -189,14 +217,16 @@ export const filterRef = (tab: Tab, ref: string, issued: IssuedRef, root?: Frame
 
 const inFrame = (issued: IssuedRef) => issued.frameRef !== undefined || issued.frame !== undefined;
 
-const where = (issued: IssuedRef) => (inFrame(issued) ? "its iframe" : "the page");
+const IFRAME = "its iframe";
 
-function silentFrame(ref: string, issued: IssuedRef) {
-  return refusedRef(ref, `${where(issued)} did not answer for ${PLACE_MS / 1000} s`);
+const where = (issued: IssuedRef) => (inFrame(issued) ? IFRAME : "the page");
+
+function silentFrame(ref: string, subject: string) {
+  return refusedRef(ref, `${subject} did not answer for ${PLACE_MS / 1000} s`);
 }
 
 async function answered<T>(ref: string, issued: IssuedRef, lookup: Promise<T>) {
-  return withTimeout(lookup, PLACE_MS, () => silentFrame(ref, issued));
+  return withTimeout(lookup, PLACE_MS, () => silentFrame(ref, where(issued)));
 }
 
 const attachedCount = (locator: Locator, issued: IssuedRef) =>
@@ -515,6 +545,19 @@ async function hasOwnName(
   return outcome?.matches === true;
 }
 
+const inPlaceAt = (place: Place) =>
+  `${REF_ENGINE}=same:${place.document}:${encodeURIComponent(place.href).replaceAll("'", "%27")}`;
+
+async function sameAtOnce(matching: Locator, issued: IssuedRef) {
+  if (!confirmedByName(issued) || issued.document === undefined || issued.href === undefined)
+    return false;
+  const same = await withDeadline(
+    matching.locator(inPlaceAt({ document: issued.document, href: issued.href })).isVisible(),
+    OWN_CHECK_MS,
+  ).catch(() => false);
+  return same === true;
+}
+
 async function sameInPlace(
   tab: Tab,
   ref: string,
@@ -525,9 +568,9 @@ async function sameInPlace(
   const scope = frameScope(tab, issued, issued.path);
   const probe = sameProbe(scope, ref, issued, shown, hiddenByRole);
   if (!probe) return false;
-  const matched = await probe
-    .or(scope.locator(`${REF_ENGINE}=document:${issued.token}`))
-    .last()
+  const matching = probe.or(scope.locator(`${REF_ENGINE}=document:${issued.token}`)).last();
+  if (await sameAtOnce(matching, issued)) return true;
+  const matched = await matching
     .evaluate(matchedPlace, undefined, { timeout: OWN_CHECK_MS })
     .catch(() => undefined);
   if (matched === undefined || checkedPlace(tab, ref, issued, matched) !== undefined) return false;
@@ -627,20 +670,16 @@ export async function confirmRef(
   return locator;
 }
 
-const insidePlace = (iframe: Locator, budget: number) =>
-  placeWithin(
-    iframe
-      .contentFrame()
-      .locator(`${REF_ENGINE}=here`)
-      .evaluate(placeHere, undefined, { timeout: budget }),
-    budget,
-  );
+const placeInside = (iframe: Locator, timeout: number) =>
+  iframe.contentFrame().locator(`${REF_ENGINE}=here`).evaluate(placeHere, undefined, { timeout });
 
 export async function checkInsideFrame(tab: Tab, ref: string, issued: IssuedRef) {
-  if (!issued.content)
+  const content = await (issued.content ?? Promise.resolve(undefined));
+  if (content === TIMED_OUT) throw silentFrame(ref, IFRAME);
+  if (!content)
     throw refusedRef(ref, "its iframe's page could not be identified when the snapshot was taken");
-  const place = await insidePlace(boundRef(tab, ref, issued), PLACE_MS);
-  const refused = place && movedPlace(tab, ref, true, issued.content, place);
+  const place = await placeWithin(placeInside(boundRef(tab, ref, issued), PLACE_MS), PLACE_MS);
+  const refused = place && movedPlace(tab, ref, true, content, place);
   if (refused) throw refused;
 }
 
@@ -648,16 +687,26 @@ export async function refBound(ref: string, issued: IssuedRef) {
   if (!(await answered(ref, issued, issued.bound))) throw unidentified(ref, issued);
 }
 
-async function ownerFrame(locator: Locator) {
-  const handle = await locator.elementHandle({ timeout: OWN_SNAPSHOT_MS });
+async function handleFrame(
+  locator: Locator,
+  timeout: number,
+  frameOf: (handle: ElementHandle) => Promise<Frame | null>,
+) {
+  const handle = await locator.elementHandle({ timeout });
   try {
-    return (await handle.ownerFrame()) ?? undefined;
+    return (await frameOf(handle)) ?? undefined;
   } finally {
     await handle.dispose();
   }
 }
 
-export async function rememberShownRef(tab: Tab, locator: Locator, line: string) {
+export const contentFrameOf = (locator: Locator, timeout: number) =>
+  handleFrame(locator, timeout, (handle) => handle.contentFrame());
+
+const ownerFrame = (locator: Locator) =>
+  handleFrame(locator, OWN_SNAPSHOT_MS, (handle) => handle.ownerFrame());
+
+export async function rememberShownRef(tab: Tab, locator: Locator, line: string, shown: ShownAt) {
   const ref = parseRef(/\[ref=([^\]\s]+)\]/.exec(line)?.[1] ?? "");
   if (!ref || tab.refs.has(ref)) return;
   const loads = tab.loads;
@@ -665,10 +714,12 @@ export async function rememberShownRef(tab: Tab, locator: Locator, line: string)
   const token = nextShowing();
   const bound = bindIn(locator, `own:${token}`);
   const identity = refIdentities(line).get(ref);
-  const [place, frame, content] = await Promise.all([
+  const [place, frame, inner] = await Promise.all([
     placeOf(locator),
     ref.startsWith("f") ? ownerFrame(locator).catch(() => undefined) : undefined,
-    identity?.role === "iframe" ? insidePlace(locator, FRAME_PLACE_MS) : undefined,
+    identity?.role === "iframe"
+      ? contentFrameOf(locator, PLACE_MS).catch(() => undefined)
+      : undefined,
   ]);
   if (!place || !identity || tab.loads !== loads) return;
   if (ref.startsWith("f") && !frame) return;
@@ -683,6 +734,6 @@ export async function rememberShownRef(tab: Tab, locator: Locator, line: string)
     bound,
   };
   if (frame) issued.frame = frame;
-  if (content) issued.content = content;
+  if (inner) issued.content = shownFramePlace(tab, inner, shown, shown.at + PLACE_MS - Date.now());
   tab.refs.set(ref, issued);
 }

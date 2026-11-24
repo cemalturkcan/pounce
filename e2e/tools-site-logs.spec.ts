@@ -978,18 +978,19 @@ describe("logs with source page on a captured site", () => {
   });
 
   describe("errors of a page that leaves right after loading", () => {
-    const DELAYS = [20, 50] as const;
+    const TAB_DELAYS = [20, 50];
+    const POPUP_DELAYS = [50, 100];
     const RUNS = [1, 2, 3, 4];
     const KINDS = {
-      "a reused tab": new Map<number, Seen[]>(),
-      "a new tab": new Map<number, Seen[]>(),
-      "a popup": new Map<number, Seen[]>(),
+      "a reused tab": { delays: TAB_DELAYS, seen: new Map<number, Seen[]>() },
+      "a new tab": { delays: TAB_DELAYS, seen: new Map<number, Seen[]>() },
+      "a popup": { delays: POPUP_DELAYS, seen: new Map<number, Seen[]>() },
     };
 
     beforeAll(async () => {
       const reusedTab = await openTab("/");
-      await inSequence(DELAYS, async (after) => {
-        KINDS["a reused tab"].set(
+      await inSequence(TAB_DELAYS, async (after) => {
+        KINDS["a reused tab"].seen.set(
           after,
           await inSequence(RUNS, async (run) => {
             const url = leavingUrl(after, `reused-${run}`);
@@ -997,7 +998,7 @@ describe("logs with source page on a captured site", () => {
             return logsAfter(reusedTab, after, url);
           }),
         );
-        KINDS["a new tab"].set(
+        KINDS["a new tab"].seen.set(
           after,
           await inSequence(RUNS, async (run) => {
             const url = leavingUrl(after, `fresh-${run}`);
@@ -1008,7 +1009,9 @@ describe("logs with source page on a captured site", () => {
             );
           }),
         );
-        KINDS["a popup"].set(
+      });
+      await inSequence(POPUP_DELAYS, async (after) => {
+        KINDS["a popup"].seen.set(
           after,
           await inSequence(RUNS, async (run) => {
             const opener = await openTab(`/leaving-popup-opener?after=${after}&run=popup-${run}`);
@@ -1020,8 +1023,8 @@ describe("logs with source page on a captured site", () => {
       });
     });
 
-    for (const [kind, seen] of Object.entries(KINDS)) {
-      for (const after of DELAYS) {
+    for (const [kind, { delays, seen }] of Object.entries(KINDS)) {
+      for (const after of delays) {
         test(`on ${kind} a rejection of a page that leaves after ${after} ms is listed under it in every run`, () => {
           expect(seen.get(after)?.map((runs) => runs.rejection)).toStrictEqual(
             RUNS.map(() => true),

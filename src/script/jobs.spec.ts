@@ -85,7 +85,7 @@ afterAll(() => rm(outputRoot, { recursive: true, force: true }));
 
 type ScriptManager = Pick<
   BrowserManager,
-  "beginWork" | "holdRendering" | "untilDrawn" | "tabOf"
+  "beginWork" | "givenRefs" | "holdRendering" | "untilDrawn" | "tabOf"
 > & {
   config: Pick<BrowserManager["config"], "engine">;
   ensureContext: () => Promise<object>;
@@ -99,6 +99,7 @@ function fakeDeps(): ScriptDeps {
     untilDrawn: async () => true,
     tabOf: () => undefined,
     beginWork: () => () => undefined,
+    givenRefs: () => new Map(),
   };
   return {
     // SAFETY: a job reaches only these members of the manager for a script that makes no browser call

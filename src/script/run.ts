@@ -5,13 +5,13 @@ import { logEvent } from "../log/logger.ts";
 import { describeError, describeScriptMessage, messageOf, ToolError } from "../shared/errors.ts";
 import { extractPage } from "../page/extract.ts";
 import type { OutputStore, Redactor } from "../shared/output.ts";
-import { pageLinks, pageText, rawSnapshot, shownTitle } from "../page/page.ts";
+import { issuingSnapshot, pageLinks, pageText, shownTitle } from "../page/page.ts";
 import { registerSecret, type SecretField, type SecretStore } from "../shared/secrets.ts";
 import { interactiveOnly } from "../page/snapshot.ts";
 import { type CompareOptions, compareDesign } from "../visual/compare.ts";
 import type { ScriptWatch, Tab } from "../browser/tab.ts";
 import type { AskAdapterSource } from "../ask/adapter-source.ts";
-import { CheckedRefs } from "./checked-refs.ts";
+import { CheckedRefs, type GivenRefs } from "./checked-refs.ts";
 import { mainWorldMember } from "./main-world.ts";
 import { ScriptHost, type ScriptOutcome, ThrownByScript } from "./host.ts";
 import { z } from "zod";
@@ -27,6 +27,7 @@ export type ScriptDeps = {
 };
 
 type ScriptOptions = {
+  given?: GivenRefs;
   timeoutMs?: number;
   signal?: AbortSignal;
   onLog?: (line: string) => void;
@@ -92,6 +93,7 @@ export async function runScript(
   options: ScriptOptions = {},
 ): Promise<ScriptResult> {
   const { manager, store, secrets, redactor } = deps;
+  const refs = new CheckedRefs(manager, options.given ?? manager.givenRefs());
   const context = await manager.ensureContext();
   const logs: string[] = [];
   const opened = new Set<Tab>();
@@ -143,7 +145,6 @@ export async function runScript(
     return drive(found);
   };
 
-  const refs = new CheckedRefs(manager);
   const scope = {
     tab: (id: string) => drive(manager.getTab(id)).page,
     tabId: (page: Page) => manager.tabOf(page)?.id,
@@ -163,8 +164,10 @@ export async function runScript(
       page?: Page | string,
       snapshotOptions: { interactive?: boolean; target?: string; depth?: number } = {},
     ) => {
-      const full = await rawSnapshot(manager, pageOf(page), snapshotOptions);
-      return snapshotOptions.interactive ? interactiveOnly(full) : full;
+      const target = pageOf(page);
+      const { text, issued } = await issuingSnapshot(manager, target, snapshotOptions);
+      refs.take(target, issued);
+      return snapshotOptions.interactive ? interactiveOnly(text) : text;
     },
     text: (page?: Page | string, textScope: "main" | "page" = "main") =>
       pageText(pageOf(page).page, textScope),
@@ -177,11 +180,17 @@ export async function runScript(
     ) => {
       const { ask } = deps;
       if (!ask) throw new ToolError("compareDesign is not available in this script context.");
+      const compared = pageOf(page);
+      const { target } = compareOptions;
       const { text, ...report } = await compareDesign(
         { manager, store, ask },
-        pageOf(page),
+        compared,
         referencePath,
-        { ...compareOptions, signal: host.controller.signal },
+        {
+          ...compareOptions,
+          target: isText(target) ? await refs.resolve(compared, target) : target,
+          signal: host.controller.signal,
+        },
       );
       return { ...report, summary: text };
     },
@@ -202,7 +211,7 @@ export async function runScript(
     ) => {
       const value = await secrets.get(name, field);
       registerSecret(redactor, name, field, value);
-      const locator = isText(target) ? await manager.resolve(pageOf(), target) : target;
+      const locator = isText(target) ? await refs.resolve(pageOf(), target) : target;
       const fill = refs.replacement(locator, "fill");
       await (fill ? fill(value) : locator.fill(value));
     },

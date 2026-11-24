@@ -13,6 +13,7 @@ import {
   checkInsideFrame,
   checkRefIdentity,
   confirmRef,
+  contentFrameOf,
   filterRef,
   type FilterRoot,
   FRAME_PLACE_MS,
@@ -20,8 +21,10 @@ import {
   probedRef,
   type RefQuestion,
   type Shown,
+  type ShownAt,
   refBound,
   refFromEarlierPage,
+  shownFramePlace,
 } from "./ref-check.ts";
 import { launchOptions, loadChromium, sandboxLaunchError } from "./launch.ts";
 import { belongsElsewhere, nextFrame, RenderKeeper } from "./foreground.ts";
@@ -269,6 +272,8 @@ export class BrowserManager {
       rules: [],
       ruleCounter: 0,
       loads: 0,
+      frameCommits: 0,
+      committedFrames: new WeakMap(),
       routes: 0,
       refs: new Map(),
       popupChecks: new Set(),
@@ -647,8 +652,12 @@ export class BrowserManager {
     return locator;
   }
 
-  issued(tab: Tab, ref: string) {
-    return tab.refs.get(ref) ?? this.unissued(tab, ref);
+  issued(tab: Tab, ref: string, refs: ReadonlyMap<string, IssuedRef> = tab.refs) {
+    return refs.get(ref) ?? this.unissued(tab, ref);
+  }
+
+  givenRefs() {
+    return new Map(this.listTabs().map((tab) => [tab.id, new Map(tab.refs)]));
   }
 
   locateIssued(tab: Tab, ref: string, issued: IssuedRef, target = ref) {
@@ -718,12 +727,18 @@ export class BrowserManager {
   async rememberRefs(tab: Tab, snapshot: string, issue: RefIssue) {
     const identities = refIdentities(snapshot);
     const token = nextShowing();
-    const places = await placesOf(tab.page, identities, token, this.config.engine);
+    const places = await placesOf(
+      tab,
+      identities,
+      { showing: token, shown: issue.shown, engine: this.config.engine },
+      Math.max(FRAME_PLACE_MS, issue.snapshotMs),
+    );
     dropOldLoads(tab.refs, issue.loads);
+    const issued = new Map<string, IssuedRef>();
     for (const [ref, identity] of identities) {
       if (issue.only && !issue.only.has(ref)) continue;
       const shown = places.shownFor(identity);
-      tab.refs.set(ref, {
+      issued.set(ref, {
         ...identity,
         loads: issue.loads,
         url: issue.url,
@@ -732,9 +747,11 @@ export class BrowserManager {
         bound: shown?.bound ?? Promise.resolve(false),
         token,
         path: framePath(identities, identity.frameRef),
-        content: places.inside(ref),
+        content: Promise.resolve(places.inside(ref)),
       });
     }
+    for (const [ref, record] of issued) tab.refs.set(ref, record);
+    return issued;
   }
 
   private unissued(tab: Tab, ref: string): never {
@@ -761,17 +778,23 @@ export class BrowserManager {
 export type RefIssue = {
   loads: number;
   url: string;
+  shown: ShownAt;
+  snapshotMs: number;
   only?: ReadonlySet<string>;
 };
 
-async function framePlace(page: Page, ref: string, showing: string, engine: Engine) {
-  const handle = await page.getByRef(ref).elementHandle({ timeout: FRAME_PLACE_MS });
-  try {
-    const frame = await handle.contentFrame();
-    return frame ? await boundPlace(frame, showing, engine) : undefined;
-  } finally {
-    await handle.dispose();
-  }
+type Showing = { showing: string; shown: ShownAt; engine: Engine };
+
+async function framePlace(
+  tab: Tab,
+  ref: string,
+  { showing, shown, engine }: Showing,
+  budget: number,
+) {
+  const frame = await contentFrameOf(tab.page.getByRef(ref), budget);
+  return frame
+    ? boundPlace(frame, showing, engine, shownFramePlace(tab, frame, shown, budget))
+    : undefined;
 }
 
 function framePath(identities: ReadonlyMap<string, RefIdentity>, frameRef?: string): string[] {
@@ -780,22 +803,22 @@ function framePath(identities: ReadonlyMap<string, RefIdentity>, frameRef?: stri
 }
 
 async function placesOf(
-  page: Page,
+  tab: Tab,
   identities: ReadonlyMap<string, RefIdentity>,
-  showing: string,
-  engine: Engine,
+  showing: Showing,
+  budget: number,
 ) {
   const refs = [...identities].flatMap(([ref, identity]) =>
     identity.role === "iframe" ? [ref] : [],
   );
   const lookups = refs.map(async (ref) => {
-    const place = await withDeadline(framePlace(page, ref, showing, engine), FRAME_PLACE_MS).catch(
+    const place = await withDeadline(framePlace(tab, ref, showing, budget), budget).catch(
       () => undefined,
     );
     return [ref, place === TIMED_OUT ? undefined : place] as const;
   });
   const [main, found] = await Promise.all([
-    boundPlace(page, showing, engine),
+    boundPlace(tab.page, showing.showing, showing.engine),
     Promise.all(lookups),
   ]);
   const frames = new Map<string, Shown>(

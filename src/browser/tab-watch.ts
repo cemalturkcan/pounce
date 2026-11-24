@@ -1,7 +1,17 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserContext, Dialog, Download, Page, Request, Response } from "playwright-core";
+import type {
+  BrowserContext,
+  Dialog,
+  Download,
+  Frame,
+  Page,
+  Request,
+  Response,
+} from "playwright-core";
+import { z } from "zod";
 import type { Config } from "../config/config.ts";
+import { isCallable } from "../script/wire.ts";
 import { isStreamingMime, isTextualMime } from "../shared/mime.ts";
 import type { ProfileSettings } from "./profile-settings.ts";
 import { logEvent } from "../log/logger.ts";
@@ -100,6 +110,13 @@ export function watchTab(tab: Tab, host: TabHost) {
   tab.documents.push({ id: tab.currentDocument, url: page.url() });
 
   page.on("close", () => host.closed(tab));
+  const countNewDocuments = (frame: Frame) =>
+    onNewDocument(frame, () => {
+      tab.frameCommits += 1;
+      tab.committedFrames.set(frame, tab.frameCommits);
+    });
+  for (const frame of page.frames()) countNewDocuments(frame);
+  page.on("frameattached", countNewDocuments);
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;
     const routePath = URL.parse(page.url())?.pathname;
@@ -259,6 +276,26 @@ export function watchTab(tab: Tab, host: TabHost) {
   });
 }
 export const downloadSavedEvent = (target: string) => `download saved to ${target}`;
+
+type FrameNavigation = { newDocument?: unknown; error?: string };
+
+type NavigationEmitter = {
+  on(event: "navigated", listener: (navigation: FrameNavigation) => void): void;
+};
+
+const navigationEmitter = z
+  .object({
+    _eventEmitter: z.custom<NavigationEmitter>(
+      (value) => value instanceof Object && "on" in value && isCallable(value.on),
+    ),
+  })
+  .transform((frame) => frame["_eventEmitter"]);
+
+function onNewDocument(frame: Frame, listener: () => void) {
+  navigationEmitter.parse(frame).on("navigated", (navigation) => {
+    if (navigation.newDocument && !navigation.error) listener();
+  });
+}
 
 type DialogListeners = { listeners(event: "dialog"): unknown[] };
 

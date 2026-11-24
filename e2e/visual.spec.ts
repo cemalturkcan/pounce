@@ -342,6 +342,34 @@ return shot.data;`,
     expect(text).toMatch(/"R2 40,200"/);
   });
 
+  test("run_script's compareDesign in a queued script refuses a target ref from a snapshot taken after the script was submitted", async () => {
+    await ok("run_script", {
+      tab: page,
+      background: true,
+      code: "await page.waitForFunction(() => window.released, undefined, { timeout: 10000 });",
+    });
+    const queued = await ok("run_script", {
+      tab: page,
+      background: true,
+      code: `const target = await page.evaluate(() => window.late); return (await compareDesign(page, ${JSON.stringify(reference)}, { model: "none", target })).summary;`,
+    });
+    const snapshot = await ok("snapshot", { tab: page });
+    const late = /\[ref=(e\d+)\]/.exec(
+      snapshot.split("\n").find((line) => line.includes('button "Sign up"')) ?? "",
+    )?.[1];
+    await ok("evaluate", {
+      tab: page,
+      expression: `window.late = ${JSON.stringify(late)}; window.released = true; 1`,
+    });
+    const result = await call("run_script", {
+      job: /job (j\d+)/.exec(queued)?.[1] ?? "",
+      wait: true,
+    });
+    expect(result.text).toMatch(
+      /Ref e\d+ cannot be used: it is from a snapshot of tab t\d+ taken after the script was submitted\./,
+    );
+  });
+
   test("a missing reference is a clear error and no tab is left behind", async () => {
     const result = await call("compare_design", {
       tab: page,

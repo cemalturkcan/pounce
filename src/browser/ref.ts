@@ -1,5 +1,6 @@
 import type { Frame, Locator } from "playwright-core";
 import { z } from "zod";
+import type { TIMED_OUT } from "../shared/async.ts";
 import { parseJson } from "../shared/decode.ts";
 
 const REF_PATTERN = /^(?:f\d+)?e\d+$/;
@@ -58,7 +59,7 @@ export type IssuedRef = RefIdentity & {
   path: string[];
   bound: Promise<boolean>;
   frame?: Frame;
-  content?: Place;
+  content?: Promise<Place | undefined | typeof TIMED_OUT>;
 };
 
 export type LineElement = { role: string; name: string | undefined; inline: string | undefined };

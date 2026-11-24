@@ -406,6 +406,16 @@ describe("refs whose element now shows another record", () => {
     expect(await stateOf(tab)).toMatch(/\bopen\b/);
   });
 
+  test("a ref inside an iframe is used on a slow machine", async () => {
+    const tab = await openRoute("/snapshot/frame-order");
+    const session = await mcp.deps.manager.getTab(tab).session;
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 40 });
+    const snapshot = await ok("snapshot", { tab, scope: "full" });
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await call("click", { tab, target: refOf(snapshot, 'button "İptal et"') });
+    expect(await stateOf(tab)).toMatch(/\bcancelled A\b/);
+  });
+
   test("a ref inside an iframe that moved to the next order says the iframe's address changed", async () => {
     const tab = await openRoute("/snapshot/frame-order");
     const snapshot = await ok("snapshot", { tab, scope: "full" });
@@ -533,21 +543,27 @@ describe("refs whose element is hidden for a moment", () => {
   });
 });
 
+async function frozenFrameSnapshot() {
+  const tab = await openRoute("/snapshot/frozen-frame");
+  await ok("wait_for", { tab, target: "body[data-loaded]", state: "attached" });
+  const snapshot = await ok("snapshot", { tab, scope: "full" });
+  await ok("evaluate", {
+    tab,
+    expression: "document.getElementById('frame').contentWindow.postMessage('freeze', '*'); 1",
+  });
+  await ok("wait_for", { tab, target: "body[data-frozen]", state: "attached" });
+  return { tab, snapshot };
+}
+
 describe("a ref next to a frozen iframe", () => {
   test("a ref click on the page goes through while a cross-site iframe is frozen", async () => {
-    const tab = await openRoute("/snapshot/frozen-frame");
-    await Bun.sleep(500);
-    const snapshot = await ok("snapshot", { tab, scope: "full" });
-    await Bun.sleep(1500);
+    const { tab, snapshot } = await frozenFrameSnapshot();
     await call("click", { tab, target: refOf(snapshot, 'button "Ana"') });
     expect(await stateOf(tab)).toMatch(/\bclicked\b/);
   });
 
   test("a ref click on a page button hidden for a moment waits for it while a cross-site iframe is frozen", async () => {
-    const tab = await openRoute("/snapshot/frozen-frame");
-    await Bun.sleep(500);
-    const snapshot = await ok("snapshot", { tab, scope: "full" });
-    await Bun.sleep(1500);
+    const { tab, snapshot } = await frozenFrameSnapshot();
     await ok("evaluate", {
       tab,
       expression:
@@ -558,11 +574,23 @@ describe("a ref next to a frozen iframe", () => {
   });
 
   test("a ref inside a frozen iframe says the iframe did not answer", async () => {
-    const tab = await openRoute("/snapshot/frozen-frame");
-    await Bun.sleep(500);
-    const snapshot = await ok("snapshot", { tab, scope: "full" });
-    await Bun.sleep(1500);
+    const { tab, snapshot } = await frozenFrameSnapshot();
     const result = await call("click", { tab, target: refOf(snapshot, 'button "Reklam"') });
+    await ok("tabs", { close: [tab] });
+    expect(result.text).toMatch(/^Ref \w+ cannot be used: its iframe did not answer for \d+ s\./);
+  });
+
+  test("an iframe ref shown by a selector action while its iframe is frozen says the iframe did not answer", async () => {
+    const tab = await openRoute("/snapshot/frozen-frame");
+    await ok("wait_for", { tab, target: "body[data-loaded]", state: "attached" });
+    await ok("evaluate", {
+      tab,
+      expression: "document.getElementById('frame').contentWindow.postMessage('freeze', '*'); 1",
+    });
+    await ok("wait_for", { tab, target: "body[data-frozen]", state: "attached" });
+    const scrolled = await ok("scroll", { tab, target: "#frame" });
+    const frame = /\((e\d+)[,)]/.exec(scrolled)?.[1] ?? "";
+    const result = await call("fill", { tab, target: frame, value: "Yeni metin" });
     await ok("tabs", { close: [tab] });
     expect(result.text).toMatch(/^Ref \w+ cannot be used: its iframe did not answer for \d+ s\./);
   });
