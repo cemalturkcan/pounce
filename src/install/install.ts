@@ -335,7 +335,11 @@ async function agentsStep(run: Run, command: readonly string[]) {
     io.print(ok(`${changed ? "Copied" : "Kept"} the pounce skill at ${tilde(run, file)}`));
   }
   if (!chosen.length) manualEntry(run, command);
-  run.settings = { ...run.settings, agents: selected, entries };
+  run.settings = {
+    ...run.settings,
+    agents: plan.undetected ? run.settings.agents : selected,
+    entries,
+  };
   saveSettings(run);
   return configured;
 }

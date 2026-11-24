@@ -823,6 +823,20 @@ test("a Chrome that does not start fails the install", async () => {
   expect(await runInstall(BASIC, { chromeOk: false })).toBe(1);
 });
 
+test("a run without a terminal that could not tell the agent keeps the remembered agents", async () => {
+  await runInstall(["-a", "codex", "--ask", "off", "--profile", "fresh"]);
+  await runInstall(["--ask", "off"]);
+
+  expect(settings().agents).toStrictEqual(["codex"]);
+});
+
+test("--agent none forgets the remembered agents", async () => {
+  await runInstall(["-a", "codex", "--ask", "off", "--profile", "fresh"]);
+  await runInstall(["--agent", "none", "--ask", "off"]);
+
+  expect(settings().agents).toStrictEqual([]);
+});
+
 test("a terminal run after an undetected run pre-ticks the detected agents", async () => {
   await mkdir(at(".codex"), { recursive: true });
   await runInstall(["--ask", "off"]);
