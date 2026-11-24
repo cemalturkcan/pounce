@@ -178,6 +178,37 @@ test("isDaemonProcess requires this package's server.ts and --daemon", async () 
   }
 });
 
+async function withSleeper(args: string[], check: (pid: number | undefined) => void) {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)", ...args], {
+    cwd: tmpdir(),
+    stdio: "ignore",
+  });
+  try {
+    await sleep(200);
+    check(child.pid);
+  } finally {
+    child.kill();
+  }
+}
+
+test("isDaemonProcess of a compiled server accepts its own executable run with --daemon", async () => {
+  await withSleeper(["--daemon"], (pid) =>
+    expect(isDaemonProcess(pid, { binary: process.execPath })).toBe(true),
+  );
+});
+
+test("isDaemonProcess of a compiled server rejects its own executable run without --daemon", async () => {
+  await withSleeper([], (pid) =>
+    expect(isDaemonProcess(pid, { binary: process.execPath })).toBe(false),
+  );
+});
+
+test("isDaemonProcess of a compiled server rejects another executable run with --daemon", async () => {
+  await withSleeper(["--daemon"], (pid) =>
+    expect(isDaemonProcess(pid, { binary: "/usr/bin/env" })).toBe(false),
+  );
+});
+
 test("host and origin validation only accepts the loopback endpoint", () => {
   expect(isAllowedHost("127.0.0.1:29741", 29741)).toBe(true);
   expect(isAllowedHost("localhost:29741", 29741)).toBe(true);

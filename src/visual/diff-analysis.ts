@@ -13,6 +13,7 @@ import {
 } from "./pixels.ts";
 import { decodePng, encodePng } from "./png.ts";
 import { imageSize } from "../ask/model-images.ts";
+import { DIFF_WORKER_URL } from "../workers.ts";
 
 export const REPORTED_REGION_LIMIT = 200;
 const WORKER_PIXEL_THRESHOLD = 1_000_000;
@@ -155,7 +156,7 @@ function pixelsOf(png: Buffer) {
 
 function analyzeInWorker(input: AnalysisInput, signal?: AbortSignal) {
   return new Promise<AnalysisResult>((resolve, reject) => {
-    const worker = new Worker(new URL("./diff-worker.ts", import.meta.url), { workerData: input });
+    const worker = new Worker(DIFF_WORKER_URL, { workerData: input });
     let settled = false;
     const finish = (action: () => void) => {
       if (settled) return;

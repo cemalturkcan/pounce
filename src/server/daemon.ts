@@ -81,15 +81,25 @@ function sameFile(candidate: string, expected: string) {
   }
 }
 
-export function isDaemonProcess(pid: number | undefined, script = SERVER_SCRIPT) {
+type ServerLaunch = { readonly binary: string } | { readonly script: string };
+
+const SELF_LAUNCH: ServerLaunch = Bun.isStandaloneExecutable
+  ? { binary: process.execPath }
+  : { script: SERVER_SCRIPT };
+
+function launchedAs(pid: number, args: string[], launch: ServerLaunch) {
+  if ("binary" in launch) return sameFile(`/proc/${pid}/exe`, launch.binary);
+  const cwd = readlinkSync(`/proc/${pid}/cwd`);
+  return args.some(
+    (arg) => arg.endsWith("server.ts") && sameFile(path.resolve(cwd, arg), launch.script),
+  );
+}
+
+export function isDaemonProcess(pid: number | undefined, launch = SELF_LAUNCH) {
   if (!pid || pid <= 0) return false;
   try {
     const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
-    if (!args.includes("--daemon")) return false;
-    const cwd = readlinkSync(`/proc/${pid}/cwd`);
-    return args.some(
-      (arg) => arg.endsWith("server.ts") && sameFile(path.resolve(cwd, arg), script),
-    );
+    return args.includes("--daemon") && launchedAs(pid, args, launch);
   } catch {
     try {
       process.kill(pid, 0);

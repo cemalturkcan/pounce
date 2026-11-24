@@ -21,6 +21,7 @@ import {
   type Waiter,
   type WireError,
 } from "./wire.ts";
+import { SCRIPT_WORKER_URL } from "../workers.ts";
 
 const LISTENER_METHODS = new Set([
   "on",
@@ -168,7 +169,7 @@ export class ScriptHost {
     });
     const { port1, port2 } = new MessageChannel();
     this.replies = port1;
-    this.worker = new Worker(new URL("./worker.ts", import.meta.url), {
+    this.worker = new Worker(SCRIPT_WORKER_URL, {
       workerData: {
         code,
         port: port2,
