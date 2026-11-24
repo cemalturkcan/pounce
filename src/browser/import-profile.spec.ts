@@ -49,7 +49,7 @@ test("import copies into a staging folder and swaps it in, keeping a backup", as
   await writeFile(path.join(config.profileDir, "Default", "Bookmarks"), "old agent bookmarks");
   const options: ImportOptions = { from, profile: "Default", live: false };
 
-  const report = await importProfile(config, options, () => false);
+  const report = await importProfile(config, options, async () => false);
 
   expect(report.backup).toStartWith(`${config.profileDir}.bak-`);
   expect(await readFile(path.join(report.backup ?? "", "Default", "Bookmarks"), "utf8")).toBe(
@@ -89,7 +89,7 @@ test("a failed import leaves the existing profile in place and says so", async (
   const error = await importProfile(
     config,
     { from, profile: "Default", live: false },
-    () => false,
+    async () => false,
   ).then(
     () => undefined,
     (cause: unknown) => cause,

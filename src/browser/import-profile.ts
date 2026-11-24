@@ -152,11 +152,11 @@ function removeSqlite(target: string) {
 export async function importProfile(
   config: Config,
   options: ImportOptions,
-  daemonRunning: () => boolean,
+  daemonRunning: () => Promise<boolean>,
 ): Promise<ImportReport> {
   const sourceDir = path.join(options.from, options.profile);
   if (!(await exists(sourceDir))) throw new Error(`Source profile not found: ${sourceDir}`);
-  if (daemonRunning()) {
+  if (await daemonRunning()) {
     throw new Error(
       "The pounce daemon is running and owns the agent profile. Stop it first (bun run daemon:stop or systemctl --user stop).",
     );

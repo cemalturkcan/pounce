@@ -1,15 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { parseJsonOrThrow } from "../shared/decode.ts";
 import { PACKAGE_DIR } from "../config/version.ts";
-import { isAllowedHost, isAllowedOrigin, isDaemonProcess } from "./daemon.ts";
+import { loadConfig } from "../config/config.ts";
+import { daemonStatus, isAllowedHost, isAllowedOrigin, stopDaemon } from "./daemon.ts";
 import { sleep } from "../shared/async.ts";
-import { healthy, type SpawnedDaemon, spawnDaemon } from "../../tests/daemon.ts";
+import { freePort, healthy, type SpawnedDaemon, spawnDaemon } from "../../tests/daemon.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const FORBIDDEN_MESSAGE =
@@ -156,72 +157,133 @@ describe("a request body over the size limit", () => {
   }, 15_000);
 });
 
-test("isDaemonProcess requires this package's server.ts and --daemon", async () => {
-  expect(isDaemonProcess(process.pid)).toBe(false);
+async function withSleeper(check: (pid: number) => Promise<void>) {
   const child = spawn(
     process.execPath,
     ["-e", "setTimeout(() => {}, 10000)", "src/server.ts", "--daemon"],
     { cwd: PACKAGE_DIR, stdio: "ignore" },
   );
-  const other = spawn(
-    process.execPath,
-    ["-e", "setTimeout(() => {}, 10000)", "/elsewhere/server.ts", "--daemon"],
-    { cwd: tmpdir(), stdio: "ignore" },
-  );
   try {
     await sleep(200);
-    expect(isDaemonProcess(child.pid)).toBe(true);
-    expect(isDaemonProcess(other.pid)).toBe(false);
-  } finally {
-    child.kill();
-    other.kill();
-  }
-});
-
-async function withSleeper(args: string[], check: (pid: number | undefined) => void) {
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)", ...args], {
-    cwd: tmpdir(),
-    stdio: "ignore",
-  });
-  try {
-    await sleep(200);
-    check(child.pid);
+    await check(child.pid ?? 0);
   } finally {
     child.kill();
   }
 }
 
-test("isDaemonProcess of a compiled server accepts its own executable run with --daemon", async () => {
-  await withSleeper(["--daemon"], (pid) =>
-    expect(isDaemonProcess(pid, { binary: process.execPath })).toBe(true),
+async function configWithRegistry(pid: number, port: number) {
+  const dataDir = await mkdtemp(path.join(workDir, "registry-"));
+  const config = loadConfig({
+    WEB_AGENT_DAEMON_DATA_DIR: dataDir,
+    WEB_AGENT_DAEMON_PORT: String(port),
+  });
+  await writeFile(
+    config.registryPath,
+    JSON.stringify({
+      pid,
+      endpoint: config.endpoint,
+      port,
+      dataDir,
+      profileDir: config.profileDir,
+      startedAt: new Date().toISOString(),
+      version: config.serverVersion,
+    }),
   );
-});
+  return config;
+}
 
-test("isDaemonProcess of a compiled server rejects its own executable run without --daemon", async () => {
-  await withSleeper([], (pid) =>
-    expect(isDaemonProcess(pid, { binary: process.execPath })).toBe(false),
-  );
-});
-
-test("isDaemonProcess of a compiled server rejects another executable run with --daemon", async () => {
-  await withSleeper(["--daemon"], (pid) =>
-    expect(isDaemonProcess(pid, { binary: "/usr/bin/env" })).toBe(false),
-  );
-});
-
-test("isDaemonProcess accepts the server started through a bin link named pounce", async () => {
-  const binDir = await mkdtemp(path.join(tmpdir(), "pounce-bin-"));
+function isAlive(pid: number) {
   try {
-    const link = path.join(binDir, "pounce");
-    await symlink(path.join(PACKAGE_DIR, "src", "server.ts"), link);
-    await withSleeper([link, "--daemon"], (pid) =>
-      expect(isDaemonProcess(pid, { script: path.join(PACKAGE_DIR, "src", "server.ts") })).toBe(
-        true,
-      ),
-    );
-  } finally {
-    await rm(binDir, { recursive: true, force: true });
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+test("daemonStatus says running for the daemon its registry names", async () => {
+  const config = loadConfig({
+    WEB_AGENT_DAEMON_DATA_DIR: workDir,
+    WEB_AGENT_DAEMON_PORT: String(daemon.port),
+  });
+
+  expect((await daemonStatus(config)).running).toBe(true);
+});
+
+test("daemonStatus says not running when the registered port answers with another pid", async () => {
+  await withSleeper(async (pid) => {
+    const config = await configWithRegistry(pid, daemon.port);
+
+    expect((await daemonStatus(config)).running).toBe(false);
+  });
+});
+
+test("daemonStatus says not running when nothing answers on the registered port", async () => {
+  await withSleeper(async (pid) => {
+    const config = await configWithRegistry(pid, freePort());
+
+    expect((await daemonStatus(config)).running).toBe(false);
+  });
+});
+
+test("stopDaemon leaves the registered pid alive when the registered port answers with another pid", async () => {
+  await withSleeper(async (pid) => {
+    await stopDaemon(await configWithRegistry(pid, daemon.port));
+    await sleep(200);
+
+    expect(isAlive(pid)).toBe(true);
+  });
+});
+
+describe("a second daemon on the data dir of a running one", () => {
+  let second: SpawnedDaemon;
+
+  beforeAll(async () => {
+    second = await spawnDaemon(workDir);
+  });
+
+  afterAll(async () => {
+    await second?.stop();
+  });
+
+  test("refuses to start", () => {
+    expect(second.process.exitCode, second.stderr()).toBe(1);
+  });
+
+  test("says which daemon is running", () => {
+    expect(second.stderr()).toContain(`already running at ${daemon.endpoint.href}`);
+  });
+
+  test("leaves the registry naming the running daemon", async () => {
+    const registry = parseJsonOrThrow(
+      await readFile(path.join(workDir, "daemon.json"), "utf8"),
+      z.object({ pid: z.number() }),
+    );
+
+    expect(registry.pid).toBe(daemon.process.pid ?? 0);
+  });
+});
+
+describe("a second daemon on the port of a running one", () => {
+  let second: SpawnedDaemon;
+
+  beforeAll(async () => {
+    second = await spawnDaemon(await mkdtemp(path.join(workDir, "other-")), {
+      WEB_AGENT_DAEMON_PORT: String(daemon.port),
+    });
+  });
+
+  afterAll(async () => {
+    await second?.stop();
+  });
+
+  test("refuses to start", () => {
+    expect(second.process.exitCode, second.stderr()).toBe(1);
+  });
+
+  test("says the port is in use", () => {
+    expect(second.stderr()).toContain(`Is port ${daemon.port} in use?`);
+  });
 });
 
 test("host and origin validation only accepts the loopback endpoint", () => {

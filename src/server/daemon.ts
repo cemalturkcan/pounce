@@ -1,15 +1,7 @@
 import { randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  readFileSync,
-  readlinkSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import path from "node:path";
 import { z } from "zod";
 import { withDeadline } from "../shared/async.ts";
 import type { Config } from "../config/config.ts";
@@ -17,7 +9,6 @@ import { parseJson } from "../shared/decode.ts";
 import { messageOf } from "../shared/errors.ts";
 import { activeLogger, type Logger, logEvent } from "../log/logger.ts";
 import { writeStderr } from "../log/stderr.ts";
-import { SERVER_SCRIPT } from "../config/version.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const IDLE_SESSION_MS = 12 * 60 * 60 * 1000;
@@ -25,6 +16,7 @@ const SWEEP_INTERVAL_MS = 30 * 60 * 1000;
 const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
 const LOG_FLUSH_MS = 2000;
 const IDLE_TIMEOUT_S = 120;
+const HEALTH_TIMEOUT_MS = 2000;
 
 const daemonRegistry = z.object({
   pid: z.number(),
@@ -36,6 +28,8 @@ const daemonRegistry = z.object({
   version: z.string(),
 });
 type DaemonRegistry = z.infer<typeof daemonRegistry>;
+
+const healthReport = z.object({ pid: z.number() });
 
 const jsonValue = z.json();
 type JsonValue = z.infer<typeof jsonValue>;
@@ -73,39 +67,21 @@ function readRegistry(config: Config): DaemonRegistry | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-function sameFile(candidate: string, expected: string) {
+async function answersAs(registry: DaemonRegistry) {
   try {
-    return realpathSync(candidate) === realpathSync(expected);
+    const response = await fetch(`http://127.0.0.1:${registry.port}/healthz`, {
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    });
+    const parsed = parseJson(await response.text(), healthReport);
+    return parsed.success && parsed.data.pid === registry.pid;
   } catch {
     return false;
   }
 }
 
-type ServerLaunch = { readonly binary: string } | { readonly script: string };
-
-const SELF_LAUNCH: ServerLaunch = Bun.isStandaloneExecutable
-  ? { binary: process.execPath }
-  : { script: SERVER_SCRIPT };
-
-function launchedAs(pid: number, args: string[], launch: ServerLaunch) {
-  if ("binary" in launch) return sameFile(`/proc/${pid}/exe`, launch.binary);
-  const cwd = readlinkSync(`/proc/${pid}/cwd`);
-  return args.some((arg) => sameFile(path.resolve(cwd, arg), launch.script));
-}
-
-export function isDaemonProcess(pid: number | undefined, launch = SELF_LAUNCH) {
-  if (!pid || pid <= 0) return false;
-  try {
-    const args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
-    return args.includes("--daemon") && launchedAs(pid, args, launch);
-  } catch {
-    try {
-      process.kill(pid, 0);
-      return process.platform !== "linux";
-    } catch {
-      return false;
-    }
-  }
+export async function runningDaemon(config: Config) {
+  const registry = readRegistry(config);
+  return registry && (await answersAs(registry)) ? registry : undefined;
 }
 
 function json(status: number, body: JsonValue, headers: Record<string, string> = {}) {
@@ -200,7 +176,12 @@ export async function startDaemon(
 
   async function handle(request: Request, pathname: string): Promise<Response> {
     if (pathname === "/healthz")
-      return json(200, { ok: true, endpoint: config.endpoint, version: config.serverVersion });
+      return json(200, {
+        ok: true,
+        endpoint: config.endpoint,
+        version: config.serverVersion,
+        pid: process.pid,
+      });
     if (pathname === "/open" && openBrowser) {
       if (request.method !== "POST")
         return json(
@@ -239,6 +220,7 @@ export async function startDaemon(
   const httpServer = Bun.serve({
     hostname: config.host,
     port: config.port,
+    reusePort: false,
     idleTimeout: IDLE_TIMEOUT_S,
     development: false,
     fetch: async (request) => {
@@ -319,18 +301,18 @@ export async function startDaemon(
     process.once(signal, () => void shutdown(signal));
 }
 
-export function daemonStatus(config: Config) {
+export async function daemonStatus(config: Config) {
   const registry = readRegistry(config);
   return {
-    running: isDaemonProcess(registry?.pid),
+    running: registry !== undefined && (await answersAs(registry)),
     endpoint: registry?.endpoint ?? config.endpoint,
     registry,
   };
 }
 
-export function stopDaemon(config: Config) {
-  const registry = readRegistry(config);
-  if (!registry || !isDaemonProcess(registry.pid)) return { stopped: false, reason: "not_running" };
+export async function stopDaemon(config: Config) {
+  const registry = await runningDaemon(config);
+  if (!registry) return { stopped: false, reason: "not_running" };
   process.kill(registry.pid, "SIGTERM");
   return { stopped: true, pid: registry.pid };
 }

@@ -2,6 +2,7 @@ import path from "node:path";
 import type { BunPlugin } from "bun";
 
 const ROOT = path.join(import.meta.dir, "..");
+const TARGETS = { x64: "bun-linux-x64-baseline", arm64: "bun-linux-arm64" } as const;
 const ARCHES = ["x64", "arm64"] as const;
 const ENTRYPOINTS = ["src/server.ts", "src/script/worker.ts", "src/visual/diff-worker.ts"];
 const CORES = ["patchright-core", "playwright-core"];
@@ -41,8 +42,10 @@ function embedPlaywrightManifests(embedded: Set<string>): BunPlugin {
   };
 }
 
-async function buildBinary(arch: (typeof ARCHES)[number]) {
-  const outfile = path.join(ROOT, "dist", `pounce-linux-${arch}`);
+export async function buildBinary(
+  arch: (typeof ARCHES)[number],
+  outfile = path.join(ROOT, "dist", `pounce-linux-${arch}`),
+) {
   const embedded = new Set<string>();
   await Bun.build({
     entrypoints: ENTRYPOINTS.map((entry) => path.join(ROOT, entry)),
@@ -50,7 +53,7 @@ async function buildBinary(arch: (typeof ARCHES)[number]) {
     external: ["chromium-bidi", "chromium-bidi/*"],
     plugins: [embedPlaywrightManifests(embedded)],
     compile: {
-      target: `bun-linux-${arch}`,
+      target: TARGETS[arch],
       outfile,
       autoloadDotenv: false,
       autoloadBunfig: false,
@@ -62,4 +65,4 @@ async function buildBinary(arch: (typeof ARCHES)[number]) {
   process.stdout.write(`${path.relative(ROOT, outfile)}\n`);
 }
 
-if (import.meta.main) await Promise.all(ARCHES.map(buildBinary));
+if (import.meta.main) await Promise.all(ARCHES.map((arch) => buildBinary(arch)));
