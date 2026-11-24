@@ -57,7 +57,7 @@ describe("open when the daemon opens a tab itself", () => {
     const { config, deps, exchange } = await fakeDaemon(() =>
       Response.json({ launched: true, running: false }),
     );
-    await openBrowser(config, "https://example.com/", deps);
+    await openBrowser(config, ["https://example.com/"], deps);
 
     expect(exchange.bodies).toStrictEqual([JSON.stringify({ url: "https://example.com/" })]);
   });
@@ -66,7 +66,7 @@ describe("open when the daemon opens a tab itself", () => {
     const { config, deps, exchange } = await fakeDaemon(() =>
       Response.json({ launched: true, running: false }),
     );
-    await openBrowser(config, undefined, deps);
+    await openBrowser(config, [], deps);
 
     expect(exchange.launched).toStrictEqual([]);
   });
@@ -75,7 +75,7 @@ describe("open when the daemon opens a tab itself", () => {
     const { config, deps, exchange } = await fakeDaemon(() =>
       Response.json({ launched: true, running: false }),
     );
-    await openBrowser(config, undefined, deps);
+    await openBrowser(config, [], deps);
 
     expect(exchange.bodies).toStrictEqual(["{}"]);
   });
@@ -86,7 +86,7 @@ describe("open when the daemon says its browser is still starting", () => {
     const { config, deps, exchange, registry } = await fakeDaemon(() =>
       Response.json({ launched: false, running: true }),
     );
-    await openBrowser(config, "https://example.com/", deps);
+    await openBrowser(config, ["https://example.com/"], deps);
 
     expect(exchange.launched).toStrictEqual([
       [
@@ -105,14 +105,14 @@ describe("open when the daemon refuses", () => {
       Response.json({ error: "boom" }, { status: 500 }),
     );
 
-    expect(await openBrowser(config, undefined, deps)).toBe(1);
+    expect(await openBrowser(config, [], deps)).toBe(1);
   });
 
   test("tells the user what the daemon said", async () => {
     const { config, deps, exchange } = await fakeDaemon(() =>
       Response.json({ error: "boom" }, { status: 500 }),
     );
-    await openBrowser(config, undefined, deps);
+    await openBrowser(config, [], deps);
 
     expect(exchange.notes).toStrictEqual([
       'The pounce daemon could not open the browser: {"error":"boom"}',
@@ -123,13 +123,54 @@ describe("open when the daemon refuses", () => {
 describe("open when the daemon cannot start", () => {
   test("names the reason", async () => {
     const { config, deps, exchange } = await fakeDaemon(() => Response.json({}));
-    await openBrowser(config, undefined, {
+    await openBrowser(config, [], {
       ...deps,
       ensure: () => Promise.reject(new Error("port taken")),
     });
 
     expect(exchange.notes).toStrictEqual([
       "The pounce daemon is not running and could not be started: port taken",
+    ]);
+  });
+});
+
+const URLS = ["https://example.com/a", "https://example.com/b", "https://example.com/c"];
+
+describe("open with several URLs", () => {
+  test("sends the first to the daemon", async () => {
+    const { config, deps, exchange } = await fakeDaemon(() =>
+      Response.json({ launched: true, running: false }),
+    );
+    await openBrowser(config, URLS, deps);
+
+    expect(exchange.bodies).toStrictEqual([JSON.stringify({ url: URLS[0] })]);
+  });
+
+  test("hands the rest to Chrome on the daemon's profile once the daemon opened the first", async () => {
+    const { config, deps, exchange, registry } = await fakeDaemon(() =>
+      Response.json({ launched: true, running: false }),
+    );
+    await openBrowser(config, URLS, deps);
+
+    expect(exchange.launched).toStrictEqual([
+      [
+        "/opt/test/chrome",
+        `--user-data-dir=${registry.profileDir}`,
+        "--test-type",
+        "https://example.com/b",
+        "https://example.com/c",
+      ],
+    ]);
+  });
+
+  test("hands them all to Chrome when the daemon's browser is still starting", async () => {
+    const { config, deps, exchange, registry } = await fakeDaemon(() =>
+      Response.json({ launched: false, running: true }),
+    );
+    await openBrowser(config, URLS, deps);
+
+    expect(exchange.launched).toStrictEqual([
+      ["/opt/test/chrome", `--user-data-dir=${registry.profileDir}`, "--test-type", ...URLS],
     ]);
   });
 });

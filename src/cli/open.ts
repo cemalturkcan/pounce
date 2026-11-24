@@ -31,7 +31,22 @@ async function fail(deps: OpenDeps, message: string) {
   return 1;
 }
 
-export async function openBrowser(config: Config, url: string | undefined, deps: OpenDeps) {
+function launchOnProfile(
+  config: Config,
+  registry: DaemonRegistry,
+  urls: readonly string[],
+  deps: OpenDeps,
+) {
+  deps.launch([
+    chromeExecutable(config),
+    `--user-data-dir=${registry.profileDir}`,
+    "--test-type",
+    ...urls,
+  ]);
+}
+
+export async function openBrowser(config: Config, urls: readonly string[], deps: OpenDeps) {
+  const [url, ...rest] = urls;
   let registry: DaemonRegistry;
   try {
     registry = await deps.ensure();
@@ -54,14 +69,12 @@ export async function openBrowser(config: Config, url: string | undefined, deps:
     return fail(deps, `The pounce daemon did not answer: ${messageOf(cause)}`);
   }
   const reply = parseJson(text, openReply);
-  if (reply.success && reply.data.launched) return 0;
+  if (reply.success && reply.data.launched) {
+    if (rest.length) launchOnProfile(config, registry, rest, deps);
+    return 0;
+  }
   if (reply.success && reply.data.running) {
-    deps.launch([
-      chromeExecutable(config),
-      `--user-data-dir=${registry.profileDir}`,
-      "--test-type",
-      ...(url ? [url] : []),
-    ]);
+    launchOnProfile(config, registry, urls, deps);
     return 0;
   }
   return fail(deps, `The pounce daemon could not open the browser: ${text}`);

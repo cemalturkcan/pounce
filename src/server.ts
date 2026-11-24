@@ -41,7 +41,7 @@ const USAGE = `Usage: pounce [command]
   (no command)          MCP server on stdio with its own browser
   mcp                   MCP server on stdio, served by the shared daemon (started when down)
   daemon start|stop|status
-  open [url]            open a page in the daemon's browser for you
+  open [url...]         open pages in the daemon's browser for you
   import-profile [--from <user data dir>] [--profile <name>] [--live]
   install               set pounce up for your agents
   --version`;
@@ -87,7 +87,7 @@ async function runCommand(config: Config, command: string, rest: string[]) {
   if (command === "daemon") return runDaemonCommand(config, rest[0]);
   if (command === "import-profile") return runImport(config, rest);
   if (command === "open") {
-    process.exitCode = await openBrowser(config, rest[0], {
+    process.exitCode = await openBrowser(config, rest, {
       ensure: () => ensureDaemon(config),
       launch: launchDetached,
       notify: desktopNotifier,
