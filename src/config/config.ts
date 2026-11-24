@@ -3,12 +3,12 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { type LogLevel, parseLogLevel } from "../log/logger.ts";
-import { messageOf } from "../shared/errors.ts";
 import {
   type AskSetting,
   invalidSettings,
   readSettingsLeniently,
   resolveAsk,
+  type Settings,
   type SettingsRead,
 } from "./settings.ts";
 import { SERVER_VERSION } from "./version.ts";
@@ -154,16 +154,28 @@ function decodeEnvironment(source: NodeJS.ProcessEnv) {
 
 type LoadedConfig = { config: Config; read: SettingsRead };
 
+function invalidVariable(source: NodeJS.ProcessEnv, key: string, value: string) {
+  if (source[key] !== undefined) return undefined;
+  const parsed = environment.safeParse({ ...source, [key]: value });
+  return parsed.success ? undefined : parsed.error.issues.map((issue) => issue.message).join("; ");
+}
+
 function withStoredVariables(source: NodeJS.ProcessEnv, read: SettingsRead) {
   const stored = read.settings.env;
   if (!stored) return { env: decodeEnvironment(source), read };
-  try {
-    return { env: decodeEnvironment({ ...stored, ...source }), read };
-  } catch (cause) {
-    const { env: _invalid, ...settings } = read.settings;
-    const problem = [read.problem, `env: ${messageOf(cause)}`].filter(Boolean).join("; ");
-    return { env: decodeEnvironment(source), read: { settings, problem } };
-  }
+  const problems = Object.entries(stored).flatMap(([key, value]) => {
+    const problem = invalidVariable(source, key, value);
+    return problem ? [{ key, problem }] : [];
+  });
+  if (!problems.length) return { env: decodeEnvironment({ ...stored, ...source }), read };
+  const invalid = new Set(problems.map(({ key }) => key));
+  const kept = Object.fromEntries(Object.entries(stored).filter(([key]) => !invalid.has(key)));
+  const { env: _all, ...rest } = read.settings;
+  const settings: Settings = Object.keys(kept).length ? { ...rest, env: kept } : rest;
+  const problem = [read.problem, ...problems.map((entry) => `env: ${entry.problem}`)]
+    .filter(Boolean)
+    .join("; ");
+  return { env: decodeEnvironment({ ...kept, ...source }), read: { settings, problem } };
 }
 
 function buildConfig(source: NodeJS.ProcessEnv): LoadedConfig {

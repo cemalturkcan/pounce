@@ -169,6 +169,38 @@ test("the lenient load drops a stored setting with an invalid value", async () =
   expect(loadConfigLeniently({ HOME: home }).config.port).toBe(29741);
 });
 
+const MIXED_VALUES = {
+  WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium",
+  WEB_AGENT_DAEMON_PORT: "abc",
+};
+
+test("the lenient load keeps the stored settings beside one with an invalid value", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: MIXED_VALUES }));
+
+  expect(loadConfigLeniently({ HOME: home }).settings.env).toStrictEqual({
+    WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium",
+  });
+});
+
+test("the lenient load uses the stored settings beside one with an invalid value", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: MIXED_VALUES }));
+
+  expect(loadConfigLeniently({ HOME: home }).config.executablePath).toBe("/usr/bin/chromium");
+});
+
+test("the lenient load keeps the stored settings beside one with an invalid name", async () => {
+  await writeSettings(
+    newConfigDir(),
+    JSON.stringify({
+      env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium", HOME: "/elsewhere" },
+    }),
+  );
+
+  expect(loadConfigLeniently({ HOME: home }).settings.env).toStrictEqual({
+    WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium",
+  });
+});
+
 test("the strict load names config.json when a stored setting is invalid", async () => {
   await writeSettings(newConfigDir(), JSON.stringify({ env: { WEB_AGENT_DAEMON_PORT: "abc" } }));
 

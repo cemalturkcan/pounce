@@ -28,6 +28,7 @@ export type Settings = z.infer<typeof settingsSchema>;
 export type SettingsRead = { settings: Settings; problem?: string };
 
 const jsonObject = z.record(z.string(), z.json());
+type JsonField = z.infer<typeof jsonObject>[string];
 
 function describeIssues(error: z.ZodError) {
   return error.issues
@@ -37,11 +38,23 @@ function describeIssues(error: z.ZodError) {
     .join("; ");
 }
 
+const variableName = z.string().regex(STORED_VARIABLE);
+const variableValue = z.string();
+
+function validVariables(field: JsonField | undefined) {
+  const variables = jsonObject.safeParse(field);
+  if (!variables.success) return undefined;
+  const valid = Object.entries(variables.data).filter(
+    ([key, value]) => variableName.safeParse(key).success && variableValue.safeParse(value).success,
+  );
+  return valid.length ? Object.fromEntries(valid) : undefined;
+}
+
 function validFields(raw: z.infer<typeof jsonObject>): Settings {
   return settingsSchema.parse(
     Object.fromEntries(
       Object.entries(SETTING_FIELDS).flatMap(([key, schema]) => {
-        const field = schema.safeParse(raw[key]);
+        const field = schema.safeParse(key === "env" ? validVariables(raw[key]) : raw[key]);
         return field.success && field.data !== undefined ? [[key, field.data]] : [];
       }),
     ),
