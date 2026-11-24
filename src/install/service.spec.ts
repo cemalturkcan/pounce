@@ -55,9 +55,15 @@ test("a % in the binary path is doubled in ExecStart", () => {
   );
 });
 
-test("a $ in the binary path is doubled in ExecStart", () => {
+test("a $ in the program path is kept, since systemd does not expand it there", () => {
   expect(lines(serviceUnit(["/opt/$HOME/pounce"], {}, false))).toContain(
-    'ExecStart="/opt/$$HOME/pounce" --daemon',
+    'ExecStart="/opt/$HOME/pounce" --daemon',
+  );
+});
+
+test("a $ in an argument is doubled in ExecStart", () => {
+  expect(lines(serviceUnit(["/usr/bin/bun", "/opt/$HOME/server.ts"], {}, false))).toContain(
+    'ExecStart=/usr/bin/bun "/opt/$$HOME/server.ts" --daemon',
   );
 });
 

@@ -13,8 +13,12 @@ function systemdQuote(value: string) {
     : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
-function execArgument(value: string) {
-  return systemdQuote(value.replaceAll("%", "%%").replaceAll("$", "$$$$"));
+function execLine(command: readonly string[]) {
+  const [program = "", ...args] = command;
+  return [
+    systemdQuote(program.replaceAll("%", "%%")),
+    ...args.map((arg) => systemdQuote(arg.replaceAll("%", "%%").replaceAll("$", "$$$$"))),
+  ].join(" ");
 }
 
 function environmentLine(key: string, value: string) {
@@ -48,7 +52,7 @@ export function serviceUnit(
     "",
     "[Service]",
     "Type=simple",
-    `ExecStart=${[...command, "--daemon"].map(execArgument).join(" ")}`,
+    `ExecStart=${execLine([...command, "--daemon"])}`,
     "Restart=on-failure",
     "RestartSec=5",
     "SuccessExitStatus=143",
