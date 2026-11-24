@@ -5,7 +5,7 @@ import { PRODUCT_NAME } from "../config/config.ts";
 import type { ConfigFormat, EntryTarget } from "./agent-config.ts";
 import type { JsonValue } from "./jsonc.ts";
 
-export const AGENT_LABELS = {
+const AGENT_LABELS = {
   claude: "Claude Code",
   codex: "Codex",
   cursor: "Cursor",

@@ -14,8 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CommandResult, Runner } from "../cli/process.ts";
-import { loadConfig } from "../config/config.ts";
-import { readSettings } from "../config/settings.ts";
+import { loadConfig, loadConfigLeniently } from "../config/config.ts";
 import type { DaemonRegistry } from "../server/daemon.ts";
 import { parseJsonc } from "./jsonc.ts";
 import { install, type InstallIo } from "./install.ts";
@@ -153,7 +152,11 @@ async function runInstall(args: string[], options: Options = {}) {
 const BASIC = ["-a", "claude", "--ask", "off", "--profile", "fresh"];
 const printed = () => output.join("\n");
 const at = (...parts: string[]) => path.join(home, ...parts);
-const settings = () => readSettings(loadConfig({ HOME: home }).configFile);
+function settings() {
+  const { settings: saved, problem } = loadConfigLeniently({ HOME: home });
+  if (problem) throw new Error(problem);
+  return saved;
+}
 
 async function claudeJson() {
   return parseJsonc(await readFile(at(".claude.json"), "utf8"));

@@ -30,7 +30,7 @@ export const LEGACY_SERVER = "web-agent-mcp";
 
 const jsonObject = z.record(z.string(), z.json());
 
-export class ConfigEditError extends Error {}
+class ConfigEditError extends Error {}
 
 function valueAt(root: JsonValue, keys: readonly string[]): JsonValue | undefined {
   let node: JsonValue | undefined = root;

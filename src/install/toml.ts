@@ -3,7 +3,7 @@ import type { JsonValue } from "./jsonc.ts";
 
 const jsonValue = z.json();
 
-export class TomlError extends Error {}
+class TomlError extends Error {}
 
 export function parseToml(text: string): JsonValue {
   try {

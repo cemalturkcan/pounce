@@ -12,7 +12,7 @@ import path from "node:path";
 import type { Runner } from "../cli/process.ts";
 import { quotedWords, SAFE_WORD } from "../shared/words.ts";
 
-export const DESKTOP_ID = "pounce.desktop";
+const DESKTOP_ID = "pounce.desktop";
 
 const KNOWN_BROWSERS =
   /^(google-chrome|chrome|chromium|brave|microsoft-edge|msedge|firefox|librewolf|vivaldi|opera|zen|epiphany|falkon|qutebrowser|floorp|waterfox|thorium|helium)/;
@@ -65,7 +65,7 @@ function execQuote(value: string) {
   return `"${word.replaceAll(/["`$\\]/g, "\\$&").replaceAll("\\", "\\\\")}"`;
 }
 
-export function desktopEntry(command: readonly string[]) {
+function desktopEntry(command: readonly string[]) {
   return [
     "[Desktop Entry]",
     "Type=Application",

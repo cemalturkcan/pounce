@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { parseJson } from "../shared/decode.ts";
 
-export const askSetting = z.discriminatedUnion("mode", [
+const askSetting = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("claude") }),
   z.object({ mode: z.literal("api-key"), apiKey: z.string().trim().min(1).optional() }),
   z.object({ mode: z.literal("adapter"), path: z.string().min(1) }),
@@ -22,7 +22,7 @@ const SETTING_FIELDS = {
   desktop: z.boolean().optional(),
 };
 
-export const settingsSchema = z.object(SETTING_FIELDS);
+const settingsSchema = z.object(SETTING_FIELDS);
 export type Settings = z.infer<typeof settingsSchema>;
 
 export type SettingsRead = { settings: Settings; problem?: string };
@@ -64,12 +64,6 @@ export function readSettingsLeniently(file: string): SettingsRead {
 
 export function invalidSettings(file: string, problem: string) {
   return new Error(`Invalid ${file}: ${problem}. Fix it or run \`pounce install\` again.`);
-}
-
-export function readSettings(file: string): Settings {
-  const { settings, problem } = readSettingsLeniently(file);
-  if (!problem) return settings;
-  throw invalidSettings(file, problem);
 }
 
 export function resolveAsk(

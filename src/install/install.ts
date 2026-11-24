@@ -79,9 +79,9 @@ export type InstallIo = {
 
 type AgentEntries = NonNullable<Settings["entries"]>;
 
-export class InstallUsageError extends Error {}
+class InstallUsageError extends Error {}
 
-export const INSTALL_USAGE = `Usage: pounce install [options]
+const INSTALL_USAGE = `Usage: pounce install [options]
 
   -a, --agent <names...>   ${AGENT_NAMES.join(", ")}, or none to print the entry
   -y, --yes                set up every agent found on this machine
@@ -106,7 +106,7 @@ function isAskMode(value: string): value is AskMode {
   return ASK_MODES.some((mode) => mode === value);
 }
 
-export function parseInstallFlags(args: readonly string[]): InstallFlags {
+function parseInstallFlags(args: readonly string[]): InstallFlags {
   const flags: InstallFlags = { agents: [], none: false, yes: false, modifyPath: true };
   const value = (index: number, flag: string) => {
     const next = args[index + 1];
@@ -717,7 +717,7 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
   return run.failed ? 1 : 0;
 }
 
-export function defaultInstallIo(): InstallIo {
+function defaultInstallIo(): InstallIo {
   const env = process.env;
   return {
     env,

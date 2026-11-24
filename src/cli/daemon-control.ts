@@ -55,7 +55,7 @@ function spawnDetached(
 
 export const defaultDaemonControl: DaemonControl = { runner: runCommand, spawnDetached };
 
-export function daemonLogFile(config: Config) {
+function daemonLogFile(config: Config) {
   return path.join(config.dataDir, "daemon.log");
 }
 

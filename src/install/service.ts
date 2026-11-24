@@ -66,9 +66,9 @@ export type ServiceResult =
   | { kind: "unavailable" }
   | { kind: "legacy" }
   | { kind: "failed"; step: string; detail: string }
-  | { kind: "installed"; started: boolean; changed: boolean };
+  | { kind: "installed"; started: boolean };
 
-export async function systemdAvailable(runner: Runner) {
+async function systemdAvailable(runner: Runner) {
   return (await runner(["systemctl", "--user", "show-environment"])).code === 0;
 }
 
@@ -86,9 +86,7 @@ export async function installService(
       await runner(["systemctl", "--user", "is-active", "graphical-session.target"])
     ).stdout.trim() === "active";
   const unit = serviceUnit(command, env, graphical);
-  const changed =
-    !existsSync(config.serviceFile) || readFileSync(config.serviceFile, "utf8") !== unit;
-  if (changed) {
+  if (!existsSync(config.serviceFile) || readFileSync(config.serviceFile, "utf8") !== unit) {
     mkdirSync(path.dirname(config.serviceFile), { recursive: true });
     writeFileSync(config.serviceFile, unit);
   }
@@ -104,5 +102,5 @@ export async function installService(
     if (result.code !== 0) failure = { step, detail: result.stderr.trim() };
   });
   if (failure) return { kind: "failed", ...failure };
-  return { kind: "installed", started: !daemonRunning, changed };
+  return { kind: "installed", started: !daemonRunning };
 }

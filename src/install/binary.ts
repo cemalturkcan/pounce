@@ -29,7 +29,7 @@ function samePath(left: string, right: string) {
   }
 }
 
-export function packageManaged(executable: Executable) {
+function packageManaged(executable: Executable) {
   return (
     !executable.compiled ||
     executable.path.includes("/node_modules/") ||
@@ -72,7 +72,7 @@ export function shellWord(value: string) {
   return SAFE_WORD.test(value) ? value : quoted(value);
 }
 
-export function shellStartupFile(home: string, env: NodeJS.ProcessEnv, configHome: string) {
+function shellStartupFile(home: string, env: NodeJS.ProcessEnv, configHome: string) {
   const shell = path.basename(env.SHELL ?? "sh");
   const zdot = env.ZDOTDIR ?? home;
   const candidates =
