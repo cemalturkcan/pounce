@@ -34,14 +34,14 @@ The installer saves its answers here with mode `0600`. Every field is optional.
 }
 ```
 
-| Field     | Meaning                                                                                                                              |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `agents`  | The agents picked last time; the picker starts with them checked                                                                     |
-| `entries` | The MCP entry pounce wrote into each agent's config. A `pounce` entry that differs from this one is someone else's and is left alone |
-| `ask`     | The model behind `ask_pages` and `compare_design`; see below. Without it, `claude` is used                                           |
-| `profile` | `fresh`, or the profile that was copied, as `<browser>:<profile dir>` (for example `chrome:Default`)                                 |
-| `desktop` | Whether pounce was made the default browser                                                                                          |
-| `env`     | `WEB_AGENT_*` variables from [the list below](#environment-variables), kept from every `pounce install` run that had them set        |
+| Field     | Meaning                                                                                                                                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agents`  | The agents picked last time; the picker starts with them checked                                                                                                                                                                           |
+| `entries` | The MCP entry pounce wrote into each agent's config. A `pounce` entry that differs from this one is someone else's and is left alone. A `web-agent-mcp` entry from an older install that points at the same daemon is replaced by `pounce` |
+| `ask`     | The model behind `ask_pages` and `compare_design`; see below. Without it, `claude` is used                                                                                                                                                 |
+| `profile` | `fresh`, or the profile that was copied, as `<browser>:<profile dir>` (for example `chrome:Default`)                                                                                                                                       |
+| `desktop` | Whether pounce was made the default browser                                                                                                                                                                                                |
+| `env`     | `WEB_AGENT_*` variables from [the list below](#environment-variables), kept from every `pounce install` run that had them set                                                                                                              |
 
 `ask` takes one of these:
 

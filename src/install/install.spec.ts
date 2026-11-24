@@ -418,6 +418,66 @@ describe("choosing agents without a terminal", () => {
   });
 });
 
+const LEGACY_ENTRY = { type: "http", url: "http://127.0.0.1:29999/mcp" };
+
+describe("an agent config with the old web-agent-mcp entry for the same daemon", () => {
+  test("has that entry replaced by pounce", async () => {
+    await writeFile(
+      at(".claude.json"),
+      JSON.stringify({ mcpServers: { context7: { url: "x" }, "web-agent-mcp": LEGACY_ENTRY } }),
+    );
+    await runInstall(BASIC);
+
+    expect(await claudeJson()).toStrictEqual({
+      mcpServers: { context7: { url: "x" }, pounce: LEGACY_ENTRY },
+    });
+  });
+
+  test("says the old entry was replaced", async () => {
+    await writeFile(
+      at(".claude.json"),
+      JSON.stringify({ mcpServers: { "web-agent-mcp": LEGACY_ENTRY } }),
+    );
+    await runInstall(BASIC);
+
+    expect(printed()).toContain("Replaced web-agent-mcp with pounce in Claude Code");
+  });
+
+  test("loses it when pounce is already there too", async () => {
+    await writeFile(
+      at(".claude.json"),
+      JSON.stringify({ mcpServers: { "web-agent-mcp": LEGACY_ENTRY, pounce: LEGACY_ENTRY } }),
+    );
+    await runInstall(BASIC);
+
+    expect(await claudeJson()).toStrictEqual({ mcpServers: { pounce: LEGACY_ENTRY } });
+  });
+
+  test("has it replaced in Codex's TOML too", async () => {
+    await mkdir(at(".codex"), { recursive: true });
+    await writeFile(
+      at(".codex", "config.toml"),
+      '[mcp_servers.web-agent-mcp]\nurl = "http://127.0.0.1:29999/mcp"\n\n[other]\nkey = 1\n',
+    );
+    await runInstall(["-a", "codex", "--ask", "off", "--profile", "fresh"]);
+
+    expect(Bun.TOML.parse(await readFile(at(".codex", "config.toml"), "utf8"))).toStrictEqual({
+      mcp_servers: { pounce: { url: "http://127.0.0.1:29999/mcp" } },
+      other: { key: 1 },
+    });
+  });
+});
+
+test("a web-agent-mcp entry for another daemon is left alone", async () => {
+  const other = { type: "http", url: "http://127.0.0.1:31000/mcp" };
+  await writeFile(at(".claude.json"), JSON.stringify({ mcpServers: { "web-agent-mcp": other } }));
+  await runInstall(BASIC);
+
+  expect(await claudeJson()).toStrictEqual({
+    mcpServers: { "web-agent-mcp": other, pounce: LEGACY_ENTRY },
+  });
+});
+
 describe("re-running install", () => {
   test("reports the entry as already there", async () => {
     await runInstall(BASIC);

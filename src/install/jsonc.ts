@@ -232,6 +232,34 @@ export function setJsoncMember(text: string, keys: readonly string[], value: Jso
   return `${source.slice(0, existing.value.start)}${rendered}${source.slice(existing.value.end)}`;
 }
 
+function removalRange(text: string, members: MemberNode[], index: number) {
+  const member = members[index];
+  const next = members[index + 1];
+  const previous = members[index - 1];
+  if (!member) return undefined;
+  const lineOrKey = (node: MemberNode) =>
+    ownsLine(text, node.keyStart) ? lineStart(text, node.keyStart) : node.keyStart;
+  if (next) return { start: lineOrKey(member), end: lineOrKey(next) };
+  if (previous) return { start: previous.value.end, end: member.value.end };
+  return undefined;
+}
+
+export function removeJsoncMember(text: string, keys: readonly string[]): string {
+  let object = parseTree(text);
+  for (const key of keys.slice(0, -1)) {
+    const member = object.members.find((candidate) => candidate.key === key);
+    if (member?.value.kind !== "object") return text;
+    object = member.value;
+  }
+  const index = object.members.findIndex((member) => member.key === keys.at(-1));
+  if (index === -1) return text;
+  const range = removalRange(text, object.members, index) ?? {
+    start: object.start + 1,
+    end: object.end - 1,
+  };
+  return `${text.slice(0, range.start)}${text.slice(range.end)}`;
+}
+
 export function parseJsonc(text: string): JsonValue {
   if (onlyTrivia(text)) return {};
   parseTree(text);

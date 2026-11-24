@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PACKAGE_DIR } from "../config/version.ts";
-import { JsoncError, parseJsonc, setJsoncMember } from "./jsonc.ts";
+import { JsoncError, parseJsonc, removeJsoncMember, setJsoncMember } from "./jsonc.ts";
 
 const ENTRY = { type: "http", url: "http://127.0.0.1:29741/mcp" };
 
@@ -102,4 +102,20 @@ test("broken JSON is refused", () => {
   expect(() => setJsoncMember('{"mcpServers": {', ["mcpServers", "pounce"], ENTRY)).toThrow(
     JsoncError,
   );
+});
+
+test("removing a member in the middle of a one-line object keeps the others", () => {
+  expect(JSON.parse(removeJsoncMember('{"s":{"a":1,"b":2,"c":3}}', ["s", "b"]))).toStrictEqual({
+    s: { a: 1, c: 3 },
+  });
+});
+
+test("removing the last member leaves no trailing comma", () => {
+  expect(JSON.parse(removeJsoncMember('{\n  "a": 1,\n  "b": 2\n}\n', ["b"]))).toStrictEqual({
+    a: 1,
+  });
+});
+
+test("removing the only member leaves an empty object", () => {
+  expect(JSON.parse(removeJsoncMember('{"s": {"b": 2}}', ["s", "b"]))).toStrictEqual({ s: {} });
 });

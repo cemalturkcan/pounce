@@ -28,7 +28,7 @@ import {
 import { SERVER_VERSION } from "../config/version.ts";
 import { daemonHoldsProfile, type DaemonRegistry, runningDaemon } from "../server/daemon.ts";
 import { messageOf } from "../shared/errors.ts";
-import { readConfig, writeEntry } from "./agent-config.ts";
+import { LEGACY_SERVER, readConfig, writeEntry } from "./agent-config.ts";
 import {
   AGENT_NAMES,
   type AgentName,
@@ -280,13 +280,13 @@ function configureAgent(
       return false;
     }
     entries[spec.name] = entry;
-    run.io.print(
-      ok(
-        outcome === "unchanged"
-          ? `${spec.label} already has pounce (${where})`
-          : `${outcome === "added" ? "Added" : "Updated"} pounce in ${spec.label} (${where})`,
-      ),
-    );
+    const done = {
+      unchanged: `${spec.label} already has pounce`,
+      added: `Added pounce in ${spec.label}`,
+      updated: `Updated pounce in ${spec.label}`,
+      replaced: `Replaced ${LEGACY_SERVER} with pounce in ${spec.label}`,
+    }[outcome];
+    run.io.print(ok(`${done} (${where})`));
     return true;
   } catch (cause) {
     fail(run, `Could not edit ${where} for ${spec.label}: ${messageOf(cause)}`);
