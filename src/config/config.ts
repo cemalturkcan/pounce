@@ -46,6 +46,9 @@ export type Config = {
   consoleHook: ConsoleHookMode;
   askAdapter?: string;
   askAdapterPath: string;
+  configDir: string;
+  configFile: string;
+  serviceFile: string;
 };
 
 const DEFAULT_PORT = 29741;
@@ -188,5 +191,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     consoleHook: env.WEB_AGENT_CONSOLE_HOOK,
     askAdapter: env.WEB_AGENT_ASK_ADAPTER,
     askAdapterPath: path.join(configDir, "ask-adapter.mjs"),
+    configDir,
+    configFile: path.join(configDir, "config.json"),
+    serviceFile: path.join(configHome, "systemd", "user", `${PRODUCT_NAME}.service`),
   };
 }

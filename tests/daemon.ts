@@ -50,11 +50,12 @@ export async function runServer(
   dataDir: string,
   port: number,
   args: string[],
+  env: NodeJS.ProcessEnv = {},
 ) {
   const [command = "", ...rest] = server;
   const child = Bun.spawn([command, ...rest, ...args], {
     cwd: PACKAGE_DIR,
-    env: serverEnv(dataDir, port, {}),
+    env: serverEnv(dataDir, port, env),
     stdout: "pipe",
     stderr: "pipe",
   });

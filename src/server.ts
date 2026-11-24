@@ -11,7 +11,12 @@ import {
 } from "./browser/import-profile.ts";
 import { writeStderr } from "./log/stderr.ts";
 import { normalizeUrl } from "./page/collect.ts";
-import { loadConfig } from "./config/config.ts";
+import { type Config, loadConfig } from "./config/config.ts";
+import { SERVER_VERSION } from "./config/version.ts";
+import { ensureDaemon } from "./cli/daemon-control.ts";
+import { proxyStdioToDaemon } from "./cli/mcp-proxy.ts";
+import { launchDetached, openBrowser } from "./cli/open.ts";
+import { desktopNotifier } from "./shared/notify.ts";
 import {
   daemonHoldsProfile,
   daemonPresence,
@@ -30,35 +35,82 @@ function writeStdout(text: string) {
   process.stdout.write(`${text}\n`);
 }
 
-async function main() {
-  const config = loadConfig();
-  const args = process.argv.slice(2);
+const USAGE = `Usage: pounce [command]
 
-  if (args.includes("--daemon-status")) {
+  (no command)          MCP server on stdio with its own browser
+  mcp                   MCP server on stdio, served by the shared daemon (started when down)
+  daemon start|stop|status
+  open [url]            open a page in the daemon's browser for you
+  import-profile [--from <user data dir>] [--profile <name>] [--live]
+  install               set pounce up for your agents
+  --version`;
+
+async function runImport(config: Config, args: string[]) {
+  const options = defaultImportOptions(args);
+  try {
+    writeStdout(
+      renderImportReport(
+        config,
+        options,
+        await importProfile(config, options, () => daemonHoldsProfile(config)),
+      ),
+    );
+  } catch (cause) {
+    if (!(cause instanceof ImportError)) throw cause;
+    writeStderr(renderImportFailure(config, cause));
+    process.exitCode = 1;
+  }
+}
+
+async function runDaemonCommand(config: Config, action: string | undefined) {
+  if (action === "status") {
     writeStdout(JSON.stringify(await daemonStatus(config), null, 2));
     return;
   }
-  if (args.includes("--daemon-stop")) {
+  if (action === "stop") {
     writeStdout(JSON.stringify(await stopDaemon(config)));
     return;
   }
-  if (args.includes("--import-profile")) {
-    const options = defaultImportOptions(args);
-    try {
-      writeStdout(
-        renderImportReport(
-          config,
-          options,
-          await importProfile(config, options, () => daemonHoldsProfile(config)),
-        ),
-      );
-    } catch (cause) {
-      if (!(cause instanceof ImportError)) throw cause;
-      writeStderr(renderImportFailure(config, cause));
-      process.exitCode = 1;
-    }
+  if (action === "start") {
+    const registry = await ensureDaemon(config);
+    writeStdout(`pounce daemon running at ${registry.endpoint} (pid ${registry.pid})`);
     return;
   }
+  writeStderr(USAGE);
+  process.exitCode = 2;
+}
+
+async function runCommand(config: Config, command: string, rest: string[]) {
+  if (command === "mcp") return proxyStdioToDaemon((await ensureDaemon(config)).endpoint);
+  if (command === "daemon") return runDaemonCommand(config, rest[0]);
+  if (command === "import-profile") return runImport(config, rest);
+  if (command === "open") {
+    process.exitCode = await openBrowser(config, rest[0], {
+      ensure: () => ensureDaemon(config),
+      launch: launchDetached,
+      notify: desktopNotifier,
+    });
+    return;
+  }
+  if (command === "help" || command === "--help" || command === "-h") return writeStdout(USAGE);
+  writeStderr(`Unknown command: ${command}\n\n${USAGE}`);
+  process.exitCode = 2;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const [command, ...rest] = args;
+  if (command === "--version" || command === "-v" || command === "version") {
+    writeStdout(SERVER_VERSION);
+    return;
+  }
+  const config = loadConfig();
+  if (command !== undefined && (!command.startsWith("-") || ["--help", "-h"].includes(command)))
+    return runCommand(config, command, rest);
+
+  if (args.includes("--daemon-status")) return runDaemonCommand(config, "status");
+  if (args.includes("--daemon-stop")) return runDaemonCommand(config, "stop");
+  if (args.includes("--import-profile")) return runImport(config, args);
 
   if (args.includes("--daemon")) {
     const { state, registry } = await daemonPresence(config);

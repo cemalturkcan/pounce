@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { SERVER_VERSION } from "./config/version.ts";
+import { freePort, runServer, SOURCE_SERVER } from "../tests/daemon.ts";
 
 const EXIT_WAIT_MS = 4000;
 
@@ -34,4 +36,38 @@ test("the stdio server exits when its client closes stdin", async () => {
     });
   });
   expect(exit).toBe("exited with 0");
+});
+
+async function cli(args: string[]) {
+  dataDir = await mkdtemp(path.join(tmpdir(), "pounce-cli-"));
+  return runServer(SOURCE_SERVER, path.join(dataDir, "data"), freePort(), args, {
+    HOME: dataDir,
+    XDG_CONFIG_HOME: path.join(dataDir, ".config"),
+  });
+}
+
+test("--version prints the package version", async () => {
+  expect((await cli(["--version"])).stdout.trim()).toBe(SERVER_VERSION);
+});
+
+test("an unknown command exits with 2", async () => {
+  expect((await cli(["frobnicate"])).exitCode).toBe(2);
+});
+
+test("daemon start leaves a daemon running that daemon status reports", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "pounce-cli-"));
+  const port = freePort();
+  const env = { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
+  const data = path.join(home, "data");
+  await runServer(SOURCE_SERVER, data, port, ["daemon", "start"], env);
+  const status = await runServer(SOURCE_SERVER, data, port, ["daemon", "status"], env);
+  await runServer(SOURCE_SERVER, data, port, ["daemon", "stop"], env);
+
+  expect(JSON.parse(status.stdout).state).toBe("running");
+}, 40_000);
+
+test("the legacy --daemon-status flag still reports the daemon", async () => {
+  const status = await cli(["--daemon-status"]);
+
+  expect(JSON.parse(status.stdout).running).toBe(false);
 });

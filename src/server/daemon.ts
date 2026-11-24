@@ -27,7 +27,7 @@ const daemonRegistry = z.object({
   startedAt: z.string(),
   version: z.string(),
 });
-type DaemonRegistry = z.infer<typeof daemonRegistry>;
+export type DaemonRegistry = z.infer<typeof daemonRegistry>;
 
 const healthReport = z.object({ pid: z.number() });
 
