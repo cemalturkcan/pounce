@@ -1,4 +1,6 @@
 import type { BrowserType } from "playwright-core";
+import { LEGACY_SERVICE, SERVICE_NAME } from "../cli/daemon-control.ts";
+import type { Runner } from "../cli/process.ts";
 import type { Config } from "../config/config.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
 import { REF_ENGINE, refEngineSource } from "./ref-check.ts";
@@ -59,4 +61,36 @@ export function launchOptions(config: Config) {
       ...config.extraArgs,
     ],
   };
+}
+
+const DISPLAY_VARIABLES = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]);
+
+async function sessionDisplay(runner: Runner) {
+  const result = await runner(["systemctl", "--user", "show-environment"]);
+  if (result.code !== 0) return [];
+  return result.stdout.split("\n").flatMap((line) => {
+    const split = line.indexOf("=");
+    const key = line.slice(0, split);
+    const value = line.slice(split + 1);
+    return split > 0 && DISPLAY_VARIABLES.has(key) && value && !value.startsWith("$'")
+      ? [[key, value] as const]
+      : [];
+  });
+}
+
+function runsAsService(cgroup: string) {
+  const unit = cgroup.trim().split("/").at(-1);
+  return unit === SERVICE_NAME || unit === LEGACY_SERVICE;
+}
+
+export async function launchEnvironment(
+  env: NodeJS.ProcessEnv,
+  runner: Runner,
+  cgroup: string,
+): Promise<Record<string, string>> {
+  const inherited = Object.entries(env).flatMap(([key, value]) =>
+    value === undefined ? [] : [[key, value] as const],
+  );
+  const session = runsAsService(cgroup) ? await sessionDisplay(runner) : [];
+  return Object.fromEntries([...inherited, ...session]);
 }

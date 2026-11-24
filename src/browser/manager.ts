@@ -1,5 +1,6 @@
 import type { BrowserContext, CDPSession, Frame, Locator, Page } from "playwright-core";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { runCommand } from "../cli/process.ts";
 import type { Config, Engine } from "../config/config.ts";
 import { inSequence, sleep, TIMED_OUT, withDeadline } from "../shared/async.ts";
 import { messageOf, ToolError } from "../shared/errors.ts";
@@ -26,7 +27,7 @@ import {
   refFromEarlierPage,
   shownFramePlace,
 } from "./ref-check.ts";
-import { launchOptions, loadChromium, sandboxLaunchError } from "./launch.ts";
+import { launchEnvironment, launchOptions, loadChromium, sandboxLaunchError } from "./launch.ts";
 import { belongsElsewhere, nextFrame, RenderKeeper } from "./foreground.ts";
 import {
   ConsoleHookScript,
@@ -62,6 +63,10 @@ const ORPHAN_SWEEP_MS = 5 * 60 * 1000;
 const BEHIND_MARKER = "about:blank#web-agent-behind-";
 
 export const DRAW_WAIT_MS = 1000;
+
+function ownCgroup() {
+  return readFile("/proc/self/cgroup", "utf8").catch(() => "");
+}
 
 export class BrowserManager {
   readonly config: Config;
@@ -186,7 +191,10 @@ export class BrowserManager {
     if (lock === "in-use")
       logEvent("profile_lock_in_use", { profileDir: config.profileDir }, "warn");
     const context = await chromium
-      .launchPersistentContext(config.profileDir, launchOptions(config))
+      .launchPersistentContext(config.profileDir, {
+        ...launchOptions(config),
+        env: await launchEnvironment(process.env, runCommand, await ownCgroup()),
+      })
       .catch((cause: unknown) => {
         throw sandboxLaunchError(cause, config.chromeSandbox) ?? cause;
       });
