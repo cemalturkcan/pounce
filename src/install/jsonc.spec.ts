@@ -119,3 +119,41 @@ test("removing the last member leaves no trailing comma", () => {
 test("removing the only member leaves an empty object", () => {
   expect(JSON.parse(removeJsoncMember('{"s": {"b": 2}}', ["s", "b"]))).toStrictEqual({ s: {} });
 });
+
+test("removing a member keeps the comment above the next one", () => {
+  expect(
+    removeJsoncMember('{\n  "old": {"x": 1},\n  // about b\n  "b": 2\n}\n', ["old"]),
+  ).toContain("// about b");
+});
+
+test("removing a member keeps the next one readable", () => {
+  expect(
+    parseJsonc(
+      removeJsoncMember('{\n  "old": {"x": 1}, // old one\n  // about b\n  "b": 2\n}\n', ["old"]),
+    ),
+  ).toStrictEqual({ b: 2 });
+});
+
+test("removing a member drops its own line comment", () => {
+  expect(
+    removeJsoncMember('{\n  "old": {"x": 1}, // old one\n  "b": 2\n}\n', ["old"]),
+  ).not.toContain("// old one");
+});
+
+test("removing the last member keeps the line comment of the one before", () => {
+  expect(removeJsoncMember('{\n  "a": 1, // a note\n  "old": {"x": 1}\n}\n', ["old"])).toContain(
+    "// a note",
+  );
+});
+
+test("removing the last member keeps the one before readable", () => {
+  expect(
+    parseJsonc(removeJsoncMember('{\n  "a": 1, // a note\n  "old": {"x": 1}\n}\n', ["old"])),
+  ).toStrictEqual({ a: 1 });
+});
+
+test("removing the last member of a file with trailing commas keeps the one before readable", () => {
+  expect(
+    parseJsonc(removeJsoncMember('{\n  "a": 1, // a note\n  "old": {"x": 1},\n}\n', ["old"])),
+  ).toStrictEqual({ a: 1 });
+});

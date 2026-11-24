@@ -22,6 +22,16 @@ function escapeHeader(header: string) {
   return header.replaceAll(".", "\\.");
 }
 
+function commentsAbove(text: string, header: number, floor: number) {
+  let start = header;
+  while (start > floor) {
+    const previous = text.lastIndexOf("\n", start - 2) + 1;
+    if (previous < floor || !/^[ \t]*#/.test(text.slice(previous, start - 1))) return start;
+    start = previous;
+  }
+  return start;
+}
+
 function tableRange(text: string, keys: readonly string[]) {
   const found = new RegExp(
     `^[ \\t]*\\[${escapeHeader(keys.join("."))}\\][ \\t]*(#[^\\n]*)?$`,
@@ -32,7 +42,7 @@ function tableRange(text: string, keys: readonly string[]) {
   const next = /^[ \t]*\[/m.exec(text.slice(bodyStart));
   return {
     start: found.index,
-    end: next ? bodyStart + next.index : text.length,
+    end: next ? commentsAbove(text, bodyStart + next.index, bodyStart) : text.length,
     last: next === null,
   };
 }

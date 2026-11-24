@@ -232,16 +232,37 @@ export function setJsoncMember(text: string, keys: readonly string[], value: Jso
   return `${source.slice(0, existing.value.start)}${rendered}${source.slice(existing.value.end)}`;
 }
 
-function removalRange(text: string, members: MemberNode[], index: number) {
+function memberLineEnd(text: string, member: MemberNode) {
+  const comma = /^[ \t]*,?/.exec(text.slice(member.value.end))?.[0].length ?? 0;
+  const at = endOfLineComment(text, member.value.end + comma);
+  const newline = /^[ \t\r]*\n/.exec(text.slice(at));
+  return newline ? at + newline[0].length : at;
+}
+
+function commaAfter(text: string, offset: number) {
+  const scanner = new Scanner(text);
+  scanner.position = offset;
+  scanner.skipTrivia();
+  return text[scanner.position] === "," ? scanner.position : undefined;
+}
+
+function removalCuts(text: string, members: MemberNode[], index: number) {
   const member = members[index];
   const next = members[index + 1];
   const previous = members[index - 1];
   if (!member) return undefined;
-  const lineOrKey = (node: MemberNode) =>
-    ownsLine(text, node.keyStart) ? lineStart(text, node.keyStart) : node.keyStart;
-  if (next) return { start: lineOrKey(member), end: lineOrKey(next) };
-  if (previous) return { start: previous.value.end, end: member.value.end };
-  return undefined;
+  const ownLine = ownsLine(text, member.keyStart);
+  const start = ownLine ? lineStart(text, member.keyStart) : member.keyStart;
+  if (next) {
+    if (!ownsLine(text, next.keyStart)) return [{ start, end: next.keyStart }];
+    return [{ start, end: Math.min(memberLineEnd(text, member), lineStart(text, next.keyStart)) }];
+  }
+  if (!previous) return undefined;
+  if (!ownLine) return [{ start: previous.value.end, end: member.value.end }];
+  const cut = { start, end: memberLineEnd(text, member) };
+  const comma = commaAfter(text, previous.value.end);
+  if (comma === undefined || commaAfter(text, member.value.end) !== undefined) return [cut];
+  return [cut, { start: comma, end: comma + 1 }];
 }
 
 export function removeJsoncMember(text: string, keys: readonly string[]): string {
@@ -253,11 +274,10 @@ export function removeJsoncMember(text: string, keys: readonly string[]): string
   }
   const index = object.members.findIndex((member) => member.key === keys.at(-1));
   if (index === -1) return text;
-  const range = removalRange(text, object.members, index) ?? {
-    start: object.start + 1,
-    end: object.end - 1,
-  };
-  return `${text.slice(0, range.start)}${text.slice(range.end)}`;
+  const cuts = removalCuts(text, object.members, index) ?? [
+    { start: object.start + 1, end: object.end - 1 },
+  ];
+  return cuts.reduce((kept, cut) => `${kept.slice(0, cut.start)}${kept.slice(cut.end)}`, text);
 }
 
 export function parseJsonc(text: string): JsonValue {
