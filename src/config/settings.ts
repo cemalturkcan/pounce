@@ -11,7 +11,10 @@ export const askSetting = z.discriminatedUnion("mode", [
 export type AskSetting = z.infer<typeof askSetting>;
 export type AskMode = AskSetting["mode"];
 
+export const STORED_VARIABLE = /^WEB_AGENT_[A-Z0-9_]+$/;
+
 const SETTING_FIELDS = {
+  env: z.record(z.string().regex(STORED_VARIABLE), z.string()).optional(),
   ask: askSetting.optional(),
   agents: z.array(z.string()).optional(),
   entries: z.record(z.string(), z.json()).optional(),
@@ -59,10 +62,14 @@ export function readSettingsLeniently(file: string): SettingsRead {
   return { settings: raw.success ? validFields(raw.data) : {}, problem };
 }
 
+export function invalidSettings(file: string, problem: string) {
+  return new Error(`Invalid ${file}: ${problem}. Fix it or run \`pounce install\` again.`);
+}
+
 export function readSettings(file: string): Settings {
   const { settings, problem } = readSettingsLeniently(file);
   if (!problem) return settings;
-  throw new Error(`Invalid ${file}: ${problem}. Fix it or run \`pounce install\` again.`);
+  throw invalidSettings(file, problem);
 }
 
 export function resolveAsk(

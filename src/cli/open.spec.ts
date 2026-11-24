@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../config/config.ts";
@@ -172,5 +172,22 @@ describe("open with several URLs", () => {
     expect(exchange.launched).toStrictEqual([
       ["/opt/test/chrome", `--user-data-dir=${registry.profileDir}`, "--test-type", ...URLS],
     ]);
+  });
+});
+
+describe("open with the browser chosen at install time", () => {
+  test("launches the executable stored in config.json when Chrome already runs", async () => {
+    const { deps, exchange } = await fakeDaemon(() =>
+      Response.json({ launched: false, running: true }),
+    );
+    const home = await mkdtemp(path.join(tmpdir(), "pounce-open-home-"));
+    await mkdir(path.join(home, ".config", "pounce"), { recursive: true });
+    await writeFile(
+      path.join(home, ".config", "pounce", "config.json"),
+      JSON.stringify({ env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium" } }),
+    );
+    await openBrowser(loadConfig({ HOME: home }), ["https://example.com/"], deps);
+
+    expect(exchange.launched[0]?.[0]).toBe("/usr/bin/chromium");
   });
 });

@@ -67,14 +67,14 @@ test("a $ in an argument is doubled in ExecStart", () => {
   );
 });
 
-test("a % in a WEB_AGENT setting is doubled", () => {
-  expect(lines(serviceUnit(["/opt/pounce"], { WEB_AGENT_LOG_DIR: "/logs/%h" }, false))).toContain(
-    "Environment=WEB_AGENT_LOG_DIR=/logs/%%h",
+test("a % in a display variable is doubled", () => {
+  expect(lines(serviceUnit(["/opt/pounce"], { XAUTHORITY: "/run/%h/xauth" }, false))).toContain(
+    "Environment=XAUTHORITY=/run/%%h/xauth",
   );
 });
 
-test("a $ in a WEB_AGENT setting is kept as written", () => {
-  expect(
-    lines(serviceUnit(["/opt/pounce"], { WEB_AGENT_LOG_DIR: "/logs/$USER" }, false)),
-  ).toContain('Environment="WEB_AGENT_LOG_DIR=/logs/$USER"');
+test("a $ in a display variable is kept as written", () => {
+  expect(lines(serviceUnit(["/opt/pounce"], { XAUTHORITY: "/run/$USER/xauth" }, false))).toContain(
+    'Environment="XAUTHORITY=/run/$USER/xauth"',
+  );
 });

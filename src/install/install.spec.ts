@@ -204,6 +204,12 @@ describe("a non-interactive install for Claude Code", () => {
     expect((await stat(at(".config", "pounce", "config.json"))).mode & 0o777).toBe(0o600);
   });
 
+  test("makes its WEB_AGENT settings visible to a pounce started without them", async () => {
+    await runInstall(BASIC);
+
+    expect(loadConfig({ HOME: home }).endpoint).toBe("http://127.0.0.1:29999/mcp");
+  });
+
   test("prints the first prompt to try", async () => {
     await runInstall(BASIC);
 
@@ -277,12 +283,12 @@ describe("the service step", () => {
     );
   });
 
-  test("passes the install's WEB_AGENT settings to the service", async () => {
+  test("leaves the install's WEB_AGENT settings to config.json, so editing it is enough", async () => {
     await runInstall(BASIC, { replies: {} });
 
-    expect(await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8")).toContain(
-      "Environment=WEB_AGENT_DAEMON_PORT=29999",
-    );
+    expect(
+      await readFile(at(".config", "systemd", "user", "pounce.service"), "utf8"),
+    ).not.toContain("WEB_AGENT_");
   });
 
   test("enables and starts it", async () => {
@@ -429,6 +435,20 @@ describe("re-running install", () => {
     );
 
     expect(await runInstall(BASIC)).toBe(1);
+  });
+
+  test("keeps a WEB_AGENT setting from an earlier run that this run's environment lacks", async () => {
+    await runInstall(BASIC, { env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium" } });
+    await runInstall(BASIC);
+
+    expect(loadConfig({ HOME: home }).executablePath).toBe("/usr/bin/chromium");
+  });
+
+  test("lets this run's environment replace a WEB_AGENT setting from an earlier run", async () => {
+    await runInstall(BASIC, { env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium" } });
+    await runInstall(BASIC, { env: { WEB_AGENT_CHROME_EXECUTABLE: "/opt/brave/brave" } });
+
+    expect(loadConfig({ HOME: home }).executablePath).toBe("/opt/brave/brave");
   });
 
   test("offers the previous ask_pages choice as the default", async () => {

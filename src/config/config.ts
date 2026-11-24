@@ -3,9 +3,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { type LogLevel, parseLogLevel } from "../log/logger.ts";
+import { messageOf } from "../shared/errors.ts";
 import {
   type AskSetting,
-  readSettings,
+  invalidSettings,
   readSettingsLeniently,
   resolveAsk,
   type SettingsRead,
@@ -153,14 +154,29 @@ function decodeEnvironment(source: NodeJS.ProcessEnv) {
 
 type LoadedConfig = { config: Config; read: SettingsRead };
 
-function buildConfig(
-  source: NodeJS.ProcessEnv,
-  readSettingsFile: (file: string) => SettingsRead,
-): LoadedConfig {
-  const env = decodeEnvironment(source);
-  const home = env.HOME ?? homedir();
+function withStoredVariables(source: NodeJS.ProcessEnv, read: SettingsRead) {
+  const stored = read.settings.env;
+  if (!stored) return { env: decodeEnvironment(source), read };
+  try {
+    return { env: decodeEnvironment({ ...stored, ...source }), read };
+  } catch (cause) {
+    const { env: _invalid, ...settings } = read.settings;
+    const problem = [read.problem, `env: ${messageOf(cause)}`].filter(Boolean).join("; ");
+    return { env: decodeEnvironment(source), read: { settings, problem } };
+  }
+}
+
+function buildConfig(source: NodeJS.ProcessEnv): LoadedConfig {
+  const base = decodeEnvironment(source);
+  const home = base.HOME ?? homedir();
+  const configHome = base.XDG_CONFIG_HOME ?? path.join(home, ".config");
+  const configDir = preferNewDir(
+    path.join(configHome, PRODUCT_NAME),
+    path.join(home, ".config", "web-agent-mcp"),
+  );
+  const configFile = path.join(configDir, "config.json");
+  const { env, read } = withStoredVariables(source, readSettingsLeniently(configFile));
   const dataHome = env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
-  const configHome = env.XDG_CONFIG_HOME ?? path.join(home, ".config");
   const dataDir =
     env.WEB_AGENT_DAEMON_DATA_DIR ??
     env.WEB_AGENT_DATA_DIR ??
@@ -168,12 +184,6 @@ function buildConfig(
       path.join(dataHome, PRODUCT_NAME),
       path.join(dataHome, "claude-code-pair", "web-agent"),
     );
-  const configDir = preferNewDir(
-    path.join(configHome, PRODUCT_NAME),
-    path.join(home, ".config", "web-agent-mcp"),
-  );
-  const configFile = path.join(configDir, "config.json");
-  const read = readSettingsFile(configFile);
   const port = env.WEB_AGENT_DAEMON_PORT;
   const hasDisplay = Boolean(env.WAYLAND_DISPLAY || env.DISPLAY);
 
@@ -216,10 +226,12 @@ function buildConfig(
 }
 
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
-  return buildConfig(source, (file) => ({ settings: readSettings(file) })).config;
+  const { config, read } = buildConfig(source);
+  if (read.problem) throw invalidSettings(config.configFile, read.problem);
+  return config;
 }
 
 export function loadConfigLeniently(source: NodeJS.ProcessEnv = process.env) {
-  const { config, read } = buildConfig(source, readSettingsLeniently);
+  const { config, read } = buildConfig(source);
   return { config, ...read };
 }

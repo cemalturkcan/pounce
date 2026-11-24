@@ -124,3 +124,53 @@ test("a stored API key of only spaces fails the schema", async () => {
 
   expect(loadConfigLeniently({ HOME: home }).problem).toContain("ask.apiKey");
 });
+
+test("a WEB_AGENT setting stored in config.json is used when the environment has none", async () => {
+  await writeSettings(
+    newConfigDir(),
+    JSON.stringify({ env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium" } }),
+  );
+
+  expect(loadConfig({ HOME: home }).executablePath).toBe("/usr/bin/chromium");
+});
+
+test("a stored port moves the endpoint", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: { WEB_AGENT_DAEMON_PORT: "39123" } }));
+
+  expect(loadConfig({ HOME: home }).endpoint).toBe("http://127.0.0.1:39123/mcp");
+});
+
+test("the environment overrides a stored WEB_AGENT setting", async () => {
+  await writeSettings(
+    newConfigDir(),
+    JSON.stringify({ env: { WEB_AGENT_CHROME_EXECUTABLE: "/usr/bin/chromium" } }),
+  );
+
+  expect(
+    loadConfig({ HOME: home, WEB_AGENT_CHROME_EXECUTABLE: "/opt/brave/brave" }).executablePath,
+  ).toBe("/opt/brave/brave");
+});
+
+test("a stored variable outside WEB_AGENT_* fails the schema", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: { HOME: "/elsewhere" } }));
+
+  expect(loadConfigLeniently({ HOME: home }).problem).toContain("env");
+});
+
+test("the lenient load names a stored setting with an invalid value", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: { WEB_AGENT_DAEMON_PORT: "abc" } }));
+
+  expect(loadConfigLeniently({ HOME: home }).problem).toContain("WEB_AGENT_DAEMON_PORT");
+});
+
+test("the lenient load drops a stored setting with an invalid value", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: { WEB_AGENT_DAEMON_PORT: "abc" } }));
+
+  expect(loadConfigLeniently({ HOME: home }).config.port).toBe(29741);
+});
+
+test("the strict load names config.json when a stored setting is invalid", async () => {
+  await writeSettings(newConfigDir(), JSON.stringify({ env: { WEB_AGENT_DAEMON_PORT: "abc" } }));
+
+  expect(() => loadConfig({ HOME: home })).toThrow(path.join(newConfigDir(), "config.json"));
+});

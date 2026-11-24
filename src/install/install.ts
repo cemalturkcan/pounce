@@ -19,7 +19,12 @@ import {
 import { ensureDaemon, SERVICE_NAME } from "../cli/daemon-control.ts";
 import { runCommand, type Runner, selfCommand } from "../cli/process.ts";
 import { type Config, loadConfigLeniently } from "../config/config.ts";
-import { type AskMode, type AskSetting, type Settings } from "../config/settings.ts";
+import {
+  type AskMode,
+  type AskSetting,
+  type Settings,
+  STORED_VARIABLE,
+} from "../config/settings.ts";
 import { SERVER_VERSION } from "../config/version.ts";
 import { daemonHoldsProfile, type DaemonRegistry, runningDaemon } from "../server/daemon.ts";
 import { messageOf } from "../shared/errors.ts";
@@ -615,6 +620,14 @@ async function healthStep(run: Run, before: DaemonRegistry | undefined, askChang
     );
 }
 
+function storedVariables(settings: Settings, env: NodeJS.ProcessEnv) {
+  const given = Object.entries(env).flatMap(([key, value]) =>
+    STORED_VARIABLE.test(key) && value ? [[key, value] as const] : [],
+  );
+  const merged = { ...settings.env, ...Object.fromEntries(given) };
+  return Object.keys(merged).length ? merged : undefined;
+}
+
 async function rewriteInvalidSettings(run: Run, problem: string) {
   const { io } = run;
   const file = tilde(run, run.config.configFile);
@@ -657,7 +670,7 @@ export async function install(args: readonly string[], io: InstallIo): Promise<n
     io,
     flags,
     config,
-    settings: loaded.settings,
+    settings: { ...loaded.settings, env: storedVariables(loaded.settings, io.env) },
     home,
     configHome: io.env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"),
     dataHome: io.env.XDG_DATA_HOME?.trim() || path.join(home, ".local", "share"),

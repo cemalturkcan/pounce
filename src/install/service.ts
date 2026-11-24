@@ -42,9 +42,6 @@ export function serviceUnit(
     : presentEntries(env, (key) => DISPLAY_VARIABLES.has(key)).map(([key, value]) =>
         environmentLine(key, value),
       );
-  const settings = presentEntries(env, (key) => key.startsWith("WEB_AGENT_")).map(([key, value]) =>
-    environmentLine(key, value),
-  );
   return [
     "[Unit]",
     "Description=pounce browser daemon for AI agents",
@@ -58,7 +55,6 @@ export function serviceUnit(
     "SuccessExitStatus=143",
     "PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY",
     ...display,
-    ...settings,
     "",
     "[Install]",
     `WantedBy=${target}`,
