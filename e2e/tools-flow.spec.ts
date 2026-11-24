@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { Locator } from "playwright-core";
 import { z } from "zod";
 import { inSequence, repeatUntil, sleep } from "../src/shared/async.ts";
 import type { ToolArgs } from "../tests/mcpHarness.ts";
@@ -438,15 +439,30 @@ describe("browser flow", () => {
     );
   });
 
-  test("a click covered by an overlay that goes away just before the timeout is not blamed on the label", async () => {
+  test("a click covered by an overlay that goes away once the click has timed out is not blamed on the label", async () => {
     await ok("navigate", { tab, url: `${fixture().url}/label-overlay` });
-    await mcp.deps.manager
-      .getTab(tab)
-      .page.evaluate(() => setTimeout(() => document.getElementById("loading")?.remove(), 1450));
-    const result = await call("click", { tab, target: "#remember-me", timeout_ms: 1500 });
-    expect(result.text).toMatch(
-      /^Another element covers the target: <div id="loading"[^\n]*Run dismiss_overlays/m,
-    );
+    const { page } = mcp.deps.manager.getTab(tab);
+    const locators: Pick<Locator, "click"> = Object.getPrototypeOf(page.locator("body"));
+    const click = locators.click;
+    let timedOut = false;
+    locators.click = async function (this: Locator, options) {
+      try {
+        await click.call(this, options);
+      } catch (cause) {
+        await page.evaluate(() => document.getElementById("loading")?.remove());
+        timedOut = true;
+        throw cause;
+      }
+    };
+    try {
+      const result = await call("click", { tab, target: "#remember-me", timeout_ms: 1500 });
+      if (!timedOut) throw new Error(`The click did not time out on the overlay: ${result.text}`);
+      expect(result.text).toMatch(
+        /^Another element covers the target: <div id="loading"[^\n]*Run dismiss_overlays/m,
+      );
+    } finally {
+      locators.click = click;
+    }
   });
 
   test("include_diff reports only changed lines", async () => {
