@@ -20,8 +20,9 @@ call, so you can fix it without restarting the daemon. `ask-adapter.mjs` in the 
 so creating or removing it takes effect without a restart as well.
 
 The Claude Code adapter reads the session that `claude auth login` saved in `~/.claude/.credentials.json` (or in
-`$CLAUDE_CONFIG_DIR`). It does not read the OS keychain, so the daemon has to run as the signed-in user. It refreshes
-an expiring session under the same lock Claude Code uses.
+`$CLAUDE_CONFIG_DIR`), so the daemon has to run as the signed-in user. It does not read the OS keychain: a Claude Code
+install that keeps its session there needs the API key or another adapter. It refreshes an expiring session under
+the same lock Claude Code uses.
 
 ## Writing one
 
@@ -39,7 +40,18 @@ export default {
         model,
         system,
         max_tokens: maxTokens,
-        messages: [{ role: "user", content: prompt }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...images.map((image) => ({
+                type: "image",
+                source: { type: "base64", media_type: image.mediaType, data: image.data },
+              })),
+              { type: "text", text: prompt },
+            ],
+          },
+        ],
       }),
       signal,
     });

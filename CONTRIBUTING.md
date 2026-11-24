@@ -44,14 +44,23 @@ bun test --timeout 300000 e2e/daemon.spec.ts  # one e2e file
 Tests run on `bun:test`; spec files sit next to the code they test, HTTP boundaries are mocked with msw, and the
 shared harness is in `tests/`. Both suites run one worker per two CPU threads.
 
-Each e2e file starts its own fixture servers and daemons on free ports and its own Chrome profile in a temporary
-folder. Nothing is shared between files or with an installed pounce, so the suites need no lock and run beside a
-daemon on the default port. They launch the installed Google Chrome headless. `e2e/timings.json` holds per-file
-durations so the slowest files start first; refresh it after adding or growing a spec with
+Each e2e file starts its own fixture servers and daemons on free ports with their own Chrome profile in a temporary
+folder, so files do not share state and the suites run beside an installed pounce on the default port. They launch
+the installed Google Chrome headless. `e2e/timings.json` holds per-file durations so the slowest files start first;
+refresh it after adding or growing a spec with
 `bun test --timeout 300000 e2e --parallel=8 --timings=e2e/timings.json --update-timings`.
 
-`eval/` holds tool-choice and `ask_pages` evaluations that call the real Claude Code CLI or model; they are not part of
-`bun run test`.
+CI (`.github/workflows/ci.yml`) runs on pull requests and by hand: one job lints the workflows with actionlint and runs
+`bun run check`, the other runs the e2e suite on the Playwright engine.
+
+`eval/` holds evaluations that call the real Claude Code CLI or model, so they are not part of `bun run test`:
+
+```sh
+bun eval/run.ts --label after                 # which tools Claude Code picks for plain-language tasks
+bun eval/score.ts eval/results before after   # compare two runs
+bun eval/ask-this-product.ts --label after    # one ask_pages question over 15 pricing pages
+bun eval/browse-record.ts                     # record ask_pages browsing for e2e/browse.spec.ts
+```
 
 ## Layout
 
